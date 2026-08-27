@@ -8,11 +8,11 @@ Prove ort+CoreML, whisper-rs+Metal, and a bundled static ffmpeg all build and ru
 Follow `spike/README.md` exactly. Do not touch `crates/`.
 
 ## Acceptance
-- [ ] `cd spike && cargo run --release` exits 0 and prints ms for all three steps
-- [ ] CoreML confirmed ACTIVE (provider list or verbose log pasted in PR), not CPU fallback
-- [ ] Metal confirmed in whisper log
-- [ ] `docs/versions.md` written: macOS, chip, RAM, exact crate versions, build flags, ms per step, CoreML op warnings
-- [ ] `sidecars/SOURCES.md` records ffmpeg source URL, LGPL confirmation, sha256
+- [x] `cd spike && cargo run --release` exits 0 and prints ms for all three steps
+- [x] CoreML confirmed ACTIVE (provider list or verbose log pasted in PR), not CPU fallback
+- [x] Metal confirmed in whisper log
+- [x] `docs/versions.md` written: macOS, chip, RAM, exact crate versions, build flags, ms per step, CoreML op warnings
+- [x] `sidecars/SOURCES.md` records ffmpeg source URL, LGPL confirmation, sha256
 
 ## Do not
 - Add ort/whisper-rs to the workspace Cargo.toml yet — that is Task 1's follow-up after go/no-go
@@ -20,3 +20,5 @@ Follow `spike/README.md` exactly. Do not touch `crates/`.
 
 ## Human review
 John reads docs/versions.md and gives go / no-go.
+
+Status: implementation and local evidence complete; awaiting John's go/no-go before merge or Task 2.
