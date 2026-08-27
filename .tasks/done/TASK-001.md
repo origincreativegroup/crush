@@ -2,9 +2,8 @@
 Agent: Codex (Linux OK). Branch: task/01-skeleton. Read docs/HANDOFF.md first.
 
 ## State
-Implementation is locally complete on macOS as of 2026-08-27. The repository is initialized on
-the `main` branch; creating and connecting the GitHub remote is in progress so Actions/Linux CI
-can provide the final external acceptance evidence.
+Completed on 2026-08-27. The repository is initialized on `main`, connected to GitHub, and green
+on both local macOS verification and GitHub Actions/Linux CI.
 
 ## Verification
 - [x] `cargo build --workspace` passes on macOS
@@ -14,7 +13,8 @@ can provide the final external acceptance evidence.
 - [x] `crushctl doctor` exits 0 and writes JSON containing `job_id="doctor"` and `stage="doctor"`
 - [x] `LICENSE` is the complete Apache-2.0 text
 - [x] Initialize the local Git repository on `main`
-- [ ] Create/connect `https://github.com/origincreativegroup/crush` and verify Linux CI green
+- [x] Create/connect `https://github.com/origincreativegroup/crush`
+- [x] Linux CI run `33123337534` completed successfully
 
 ## Instructions
 1. `cargo build --workspace` and fix anything that does not compile. Keep the structure; do not redesign.
@@ -25,11 +25,11 @@ can provide the final external acceptance evidence.
 6. Set `repository` in Cargo.toml to the real GitHub URL.
 
 ## Acceptance
-- [ ] `cargo build --workspace` clean on Linux and macOS
-- [ ] CI green
-- [ ] `doctor` runs; JSON log line appears in logs/crush.log
-- [ ] Config test passes
-- [ ] No new dependencies beyond workspace list
+- [x] `cargo build --workspace` clean on Linux and macOS
+- [x] CI green
+- [x] `doctor` runs; JSON log line appears in logs/crush.log
+- [x] Config test passes
+- [x] No new dependencies beyond workspace list
 
 ## Do not
 - Add stage logic, ort, whisper-rs, rusqlite, or tauri

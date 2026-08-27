@@ -25,12 +25,12 @@
 
 ## Current implementation state (2026-08-27)
 
-- TASK-001 is implementation-complete and locally green on macOS: workspace build, all tests,
-  Clippy with warnings denied, and rustfmt check pass.
+- TASK-001 is complete: workspace build, all tests, Clippy with warnings denied, and rustfmt pass
+  locally on macOS and in GitHub Actions/Linux CI run 33123337534.
 - `crushctl doctor` was exercised against a temporary data directory. It creates
   `logs/crush.log` and emits JSON with both `job_id="doctor"` and `stage="doctor"`.
-- The local Git repository is initialized on `main`. GitHub creation/connection and the first CI
-  run are still pending at `https://github.com/origincreativegroup/crush`.
+- Git is initialized on `main` and connected to the public repository
+  `https://github.com/origincreativegroup/crush`.
 - Do not advance the implementation sequence past the Task 0 hard stop. The next runtime task is
   TASK-000 in `spike/`, owned by Cursor on the Mac, followed by John's explicit go/no-go. Once
-  approved, finish TASK-001's Linux CI evidence and begin TASK-002.
+  approved, begin TASK-002.

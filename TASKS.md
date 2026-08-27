@@ -2,8 +2,8 @@
 
 | ID | Task | Agent | Status |
 |---|---|---|---|
-| TASK-000 | Feasibility spike (CoreML / Metal / ffmpeg sidecar) | Cursor (Mac) | backlog — **first** |
-| TASK-001 | Workspace, config, tracing, job log, repo hygiene | Codex | review — macOS build/test/clippy/fmt + doctor log pass; awaiting GitHub/Linux CI |
+| TASK-000 | Feasibility spike (CoreML / Metal / ffmpeg sidecar) | Cursor (Mac) | active — **hard stop; human go/no-go required** |
+| TASK-001 | Workspace, config, tracing, job log, repo hygiene | Codex | done — macOS local gates + Linux CI green |
 | TASK-002 | SQLite store + migrations | Codex | backlog (after 001) |
 | TASK-003 | Reference kit + fixtures | Codex + John (clips) | backlog (after 001) |
 | TASK-004 | Bundled ffmpeg + wrapper | Cursor (Mac) | backlog (after 001) |
