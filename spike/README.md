@@ -1,20 +1,42 @@
-# Task 0 — Feasibility spike (run on the Mac, two days max)
+# Task 0 — Feasibility spike
 
-Goal: prove the three risky pieces link and accelerate on Apple Silicon before any product code exists.
+This throwaway Mac-only binary proves that CoreML CLIP inference, Metal Whisper inference, and an
+LGPL static-library FFmpeg sidecar can coexist. It exits nonzero if an artifact is missing, FFmpeg
+is GPL/nonfree, CoreML is unavailable, no CoreML profile events are observed, an output is invalid,
+or Whisper produces no transcript.
 
-## Steps
-1. `pip install open_clip_torch onnx onnxruntime` in `reference/.venv`; run `reference/export_clip_onnx.py` (Task 3/6 draft) or export ViT-B/32 by hand with opset 17, fixed shape [1,3,224,224].
-2. Download `ggml-base.bin` from the whisper.cpp model repo into `models/`.
-3. Download a static LGPL arm64 ffmpeg + ffprobe into `sidecars/`. Record source URL and sha256.
-4. Fill in `Cargo.toml` deps with current versions from crates.io. Build with `cargo run --release`.
-5. For ort: enable CoreML EP and confirm it is active — check the session's provider list or ort's verbose log. A run that quietly uses CPU is a FAIL for this spike.
-6. For whisper-rs: build with `metal` feature; confirm Metal init in the log.
-7. Print ms for: CLIP image encode ×10, whisper 10 s, ffmpeg spawn.
+## Prerequisites and assets
 
-## Deliverable
-`docs/versions.md` with: macOS version, chip, RAM, exact crate versions, build flags/env vars needed, ms per step, and any op-support warnings from CoreML.
+Install Rust and CMake, then create the Python preparation environment from the repository root:
 
-## Go / no-go
-- CoreML active and < 50 ms/frame: go.
-- CoreML falls back to CPU: report; decide CPU-only (still fine for v1) vs. investigating ort's CoreML build.
-- Anything fails to link: stop, report, do not start Task 1.
+```sh
+python3 -m venv reference/.venv
+reference/.venv/bin/python -m pip install onnx==1.17.0 numpy==2.0.2 protobuf==6.33.6
+```
+
+Download the pinned model inputs:
+
+```sh
+curl -fL -o models/clip-vision-vit-b-32.onnx \
+  https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/d15189d7028b43f1d3e65039190477f6af591c2a/onnx/vision_model.onnx
+curl -fL -o models/ggml-base.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en.bin
+reference/.venv/bin/python spike/fix_clip_shape.py
+```
+
+Build FFmpeg 9.0.1 from the official source archive using the exact flags in
+`sidecars/SOURCES.md`, then copy the resulting `ffmpeg` and `ffprobe` executables into
+`sidecars/`. The model files and binaries are intentionally ignored by Git.
+
+## Run
+
+From the repository root:
+
+```sh
+cargo run --release --manifest-path spike/Cargo.toml
+```
+
+The committed fixture is already at `fixtures/spike-jfk.wav`. A successful run prints
+`FFMPEG_OK`, `COREML_ACTIVE=true`, `CLIP_OK`, the Metal initialization log, `WHISPER_OK`, and
+finally `SPIKE_OK`. Full results, hashes, machine details, and known risks are in
+`docs/versions.md`.

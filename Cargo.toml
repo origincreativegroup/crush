@@ -9,6 +9,7 @@ members = [
   "crates/search",
   "crates/cli",
 ]
+exclude = ["spike"]
 # spike/ is intentionally NOT a workspace member. It is throwaway (Task 0).
 
 [workspace.package]

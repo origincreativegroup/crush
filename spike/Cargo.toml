@@ -7,8 +7,7 @@ publish = false
 # Task 0 — pin the versions that actually build on the Mac, then record them in docs/versions.md.
 # Cursor: check crates.io for the current release of each before filling in.
 [dependencies]
-anyhow = "1"
-# ort = { version = "<FILL>", features = ["coreml"] }
-# whisper-rs = { version = "<FILL>", features = ["metal"] }
-# image = "0.25"
-# ndarray = "0.16"
+anyhow = "=1.0.104"
+hound = "=3.5.1"
+ort = { version = "=2.0.0-rc.13", features = ["coreml"] }
+whisper-rs = { version = "=0.16.0", features = ["metal"] }

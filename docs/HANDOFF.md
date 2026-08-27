@@ -31,6 +31,10 @@
   `logs/crush.log` and emits JSON with both `job_id="doctor"` and `stage="doctor"`.
 - Git is initialized on `main` and connected to the public repository
   `https://github.com/origincreativegroup/crush`.
-- Do not advance the implementation sequence past the Task 0 hard stop. The next runtime task is
-  TASK-000 in `spike/`, owned by Cursor on the Mac, followed by John's explicit go/no-go. Once
-  approved, begin TASK-002.
+- TASK-000 is implemented on `task/00-spike`. Its release run passed: FFmpeg spawn 4.98 ms,
+  CoreML 685/685 nodes in one partition with no ONNX Runtime CPU-provider events and 5.86 ms mean
+  CLIP inference, and Whisper Metal inference on 10 seconds of audio in 79.04 ms. The clean CoreML
+  session compile took 201.11 seconds; see `docs/versions.md` for the caching requirement and full
+  provenance.
+- John approved GO for TASK-000 on 2026-08-27. Merge its PR, then begin TASK-002 on an isolated
+  task branch.
