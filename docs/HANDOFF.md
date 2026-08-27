@@ -36,5 +36,5 @@
   CLIP inference, and Whisper Metal inference on 10 seconds of audio in 79.04 ms. The clean CoreML
   session compile took 201.11 seconds; see `docs/versions.md` for the caching requirement and full
   provenance.
-- Do not merge TASK-000 or advance past its hard stop until John explicitly gives go/no-go. On go,
-  merge its PR and begin TASK-002.
+- John approved GO for TASK-000 on 2026-08-27. Merge its PR, then begin TASK-002 on an isolated
+  task branch.

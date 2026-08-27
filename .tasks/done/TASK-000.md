@@ -21,4 +21,4 @@ Follow `spike/README.md` exactly. Do not touch `crates/`.
 ## Human review
 John reads docs/versions.md and gives go / no-go.
 
-Status: implementation and local evidence complete; awaiting John's go/no-go before merge or Task 2.
+Status: approved GO by John on 2026-08-27; ready to merge.
