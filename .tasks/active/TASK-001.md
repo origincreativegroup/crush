@@ -1,0 +1,39 @@
+# TASK-001: Workspace, config, tracing, job log, repo hygiene
+Agent: Codex (Linux OK). Branch: task/01-skeleton. Read docs/HANDOFF.md first.
+
+## State
+Implementation is locally complete on macOS as of 2026-08-27. The repository is initialized on
+the `main` branch; creating and connecting the GitHub remote is in progress so Actions/Linux CI
+can provide the final external acceptance evidence.
+
+## Verification
+- [x] `cargo build --workspace` passes on macOS
+- [x] `cargo test --workspace` passes, including `config_smoke`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes
+- [x] `cargo fmt --all -- --check` passes
+- [x] `crushctl doctor` exits 0 and writes JSON containing `job_id="doctor"` and `stage="doctor"`
+- [x] `LICENSE` is the complete Apache-2.0 text
+- [x] Initialize the local Git repository on `main`
+- [ ] Create/connect `https://github.com/origincreativegroup/crush` and verify Linux CI green
+
+## Instructions
+1. `cargo build --workspace` and fix anything that does not compile. Keep the structure; do not redesign.
+2. `cargo run -p crush-cli -- doctor` prints the stub and creates `logs/crush.log` under the data dir.
+3. Add `cargo clippy --workspace -- -D warnings` and `cargo fmt --check` to CI; make them pass.
+4. Add a `tests/` smoke in `crates/core` that loads `crush.example.toml` and asserts defaults.
+5. Replace the `LICENSE` placeholder with the full Apache-2.0 text if it is not already the full text.
+6. Set `repository` in Cargo.toml to the real GitHub URL.
+
+## Acceptance
+- [ ] `cargo build --workspace` clean on Linux and macOS
+- [ ] CI green
+- [ ] `doctor` runs; JSON log line appears in logs/crush.log
+- [ ] Config test passes
+- [ ] No new dependencies beyond workspace list
+
+## Do not
+- Add stage logic, ort, whisper-rs, rusqlite, or tauri
+- Change the crate layout
+
+## Human review
+Crate layout matches blueprint §10; config keys readable; CI green.

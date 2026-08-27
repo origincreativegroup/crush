@@ -1,0 +1,20 @@
+# Copy to crush.toml. All keys optional; these are the defaults.
+# data_dir = "/Users/you/Library/Application Support/Crush"
+
+[split]
+sample_fps = 4.0
+threshold = 27.0
+min_scene_len_s = 0.6
+rep_frame_pos = 0.4
+
+[embed]
+model = "clip-vit-b-32"
+provider = "coreml"   # or "cpu"
+
+[asr]
+model = "small"       # or "base"
+# language = "en"
+
+[limits]
+threads = 0           # 0 = physical cores minus two
+concurrent_videos = 1

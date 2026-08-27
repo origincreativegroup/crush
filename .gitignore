@@ -1,0 +1,11 @@
+/target
+/spike/target
+/models/
+/sidecars/ffmpeg
+/sidecars/ffprobe
+/debug/
+crush.toml
+*.log
+.DS_Store
+reference/.venv/
+__pycache__/

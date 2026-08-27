@@ -1,0 +1,10 @@
+[package]
+name = "crush-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crush-core = { path = "../core" }
+anyhow.workspace = true
+tracing.workspace = true

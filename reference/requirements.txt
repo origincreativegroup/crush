@@ -1,0 +1,8 @@
+open_clip_torch
+torch
+onnx
+onnxruntime
+scenedetect[opencv]
+faster-whisper
+pillow
+numpy
