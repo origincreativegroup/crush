@@ -59,7 +59,8 @@ def main() -> None:
     if fixture_manifest.get("queries") != QUERIES:
         raise RuntimeError("fixture manifest queries differ from the generator")
 
-    expected_names = {"manifest.json", "fixtures-manifest.json"}
+    expected_names = {"manifest.json", "fixtures-manifest.json", "expected_search.json"}
+    valid_shot_ids = set()
     for clip in clips:
         stem = clip.stem
         names = {
@@ -78,6 +79,9 @@ def main() -> None:
         scenes = load_json(golden / f"{stem}.scenes.json")
         if not scenes.get("shots"):
             raise RuntimeError(f"{stem}.scenes.json has no shots")
+        valid_shot_ids.update(
+            f"{stem}-shot-{index:06}" for index, _shot in enumerate(scenes["shots"])
+        )
         transcript = load_json(golden / f"{stem}.transcript.json")
         if "segments" not in transcript:
             raise RuntimeError(f"{stem}.transcript.json has no segments field")
@@ -97,6 +101,14 @@ def main() -> None:
         if text.get("input") != query:
             raise RuntimeError(f"{name} query differs from the generator")
         validate_text_golden(text, name)
+
+    expected_search = load_json(golden / "expected_search.json").get("queries", [])
+    if [entry.get("query") for entry in expected_search] != QUERIES:
+        raise RuntimeError("search expectation queries differ from the generator")
+    for entry in expected_search:
+        expected_shot_id = entry.get("expected_shot_id")
+        if expected_shot_id not in valid_shot_ids:
+            raise RuntimeError(f"search expectation names an unknown shot: {expected_shot_id}")
 
     actual_names = {path.name for path in golden.iterdir() if path.is_file()}
     if actual_names != expected_names:

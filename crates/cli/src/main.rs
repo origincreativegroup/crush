@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crush_core::{models, paths::AppPaths, telemetry, Config, DEFAULT_OWNER_ID};
+use crush_search::SearchEngine;
 use crush_stage_embed::{
     embedder::{Embedder, ProviderPreference},
     preprocess::{preprocess, Tensor, IMAGE_SIZE, TENSOR_LEN},
@@ -44,6 +45,8 @@ enum Cmd {
         query: String,
         #[arg(long, default_value_t = 10)]
         top: usize,
+        #[arg(long)]
+        json: bool,
     },
     /// List pipeline jobs (Task 11)
     Jobs {
@@ -92,7 +95,7 @@ fn main() -> anyhow::Result<()> {
             command: ModelsCommand::Ensure { manifest_url },
         } => ensure_models(&paths, &manifest_url),
         Cmd::Ingest { .. } => anyhow::bail!("not implemented yet — Task 11"),
-        Cmd::Search { .. } => anyhow::bail!("not implemented yet — Task 9"),
+        Cmd::Search { query, top, json } => search(&cfg, &paths, &query, top, json),
         Cmd::Jobs { .. } => anyhow::bail!("not implemented yet — Task 11"),
         Cmd::Debug {
             command: DebugCommand::Scenes { video },
@@ -104,6 +107,55 @@ fn main() -> anyhow::Result<()> {
             command: DebugCommand::Vector { shot_id },
         } => debug_vector(&cfg, &paths, &shot_id),
     }
+}
+
+fn search(
+    cfg: &Config,
+    paths: &AppPaths,
+    query: &str,
+    top: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(top > 0, "--top must be greater than zero");
+    let store = Store::open(&paths.root)?;
+    let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, cfg.search.transcript_hit_boost)?;
+    let preference = ProviderPreference::parse(&cfg.embed.provider)?;
+    eprintln!(
+        "search: loading text encoder and {} indexed shot vectors...",
+        engine.len()
+    );
+    let mut embedder = Embedder::new(paths.models(), preference, cfg.limits.threads)?;
+    let mut text_embedder = |text: &str| embedder.embed_text(text);
+    let results = engine.search(&store, &mut text_embedder, query, top)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+        return Ok(());
+    }
+
+    println!(
+        "{:<4} {:>8} {:>8} {:>10} {:>10}  VIDEO",
+        "RANK", "SCORE", "COSINE", "START", "END"
+    );
+    for (rank, result) in results.iter().enumerate() {
+        println!(
+            "{:<4} {:>8.4} {:>8.4} {:>10.3} {:>10.3}  {}",
+            rank + 1,
+            result.score,
+            result.cosine,
+            result.start_s,
+            result.end_s,
+            result.video_path
+        );
+        println!(
+            "     shot={} thumb={}",
+            result.shot_id,
+            result.thumb_path.as_deref().unwrap_or("—")
+        );
+        if let Some(snippet) = &result.transcript_snippet {
+            println!("     transcript: {snippet}");
+        }
+    }
+    Ok(())
 }
 
 fn debug_frame(image_path: &Path, golden_path: Option<&Path>) -> anyhow::Result<()> {
@@ -423,6 +475,23 @@ mod tests {
             Cmd::Debug {
                 command: DebugCommand::Vector { shot_id }
             } if shot_id == "shot-123"
+        ));
+    }
+
+    #[test]
+    fn search_cli_accepts_top_and_json() {
+        let cli = Cli::try_parse_from([
+            "crushctl",
+            "search",
+            "a rocket launching",
+            "--top",
+            "3",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Search { query, top: 3, json: true } if query == "a rocket launching"
         ));
     }
 }

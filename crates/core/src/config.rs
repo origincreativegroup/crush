@@ -9,6 +9,7 @@ pub struct Config {
     pub data_dir: Option<PathBuf>,
     pub split: SplitConfig,
     pub embed: EmbedConfig,
+    pub search: SearchConfig,
     pub asr: AsrConfig,
     pub limits: LimitsConfig,
 }
@@ -32,6 +33,13 @@ pub struct EmbedConfig {
     pub model: String,
     /// "coreml" | "cpu". doctor reports which one is actually active.
     pub provider: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    /// Added once when any non-stopword query term occurs in an overlapping transcript segment.
+    pub transcript_hit_boost: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +74,13 @@ impl Default for EmbedConfig {
         Self {
             model: "clip-vit-b-32".into(),
             provider: "coreml".into(),
+        }
+    }
+}
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            transcript_hit_boost: 0.15,
         }
     }
 }

@@ -67,6 +67,24 @@ pub struct TranscriptSegment {
     pub confidence: Option<f64>,
 }
 
+/// Store-owned projection used to hydrate a ranked in-memory vector match.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchShotContext {
+    pub shot_id: String,
+    pub video_id: String,
+    pub video_path: String,
+    pub start_s: f64,
+    pub end_s: f64,
+    pub thumb_rel: Option<String>,
+}
+
+/// A matching transcript segment joined to every shot whose interval it overlaps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptShotHit {
+    pub shot_id: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingMeta {
     pub owner_id: String,
@@ -471,6 +489,61 @@ impl Store {
             statement.query_map(params![owner_id, query, limit as i64], transcript_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to search transcripts")
+    }
+
+    pub fn search_shot_context(
+        &self,
+        owner_id: &str,
+        shot_id: &str,
+    ) -> anyhow::Result<Option<SearchShotContext>> {
+        self.connection
+            .query_row(
+                "SELECT s.id, s.video_id, v.path, s.start_s, s.end_s, s.thumb_rel
+                 FROM shots AS s
+                 JOIN videos AS v ON v.id = s.video_id AND v.owner_id = s.owner_id
+                 WHERE s.owner_id = ?1 AND s.id = ?2",
+                params![owner_id, shot_id],
+                |row| {
+                    Ok(SearchShotContext {
+                        shot_id: row.get(0)?,
+                        video_id: row.get(1)?,
+                        video_path: row.get(2)?,
+                        start_s: row.get(3)?,
+                        end_s: row.get(4)?,
+                        thumb_rel: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load search shot context")
+    }
+
+    pub fn transcript_shot_hits(
+        &self,
+        owner_id: &str,
+        fts_query: &str,
+    ) -> anyhow::Result<Vec<TranscriptShotHit>> {
+        ensure!(!fts_query.trim().is_empty(), "FTS query must not be empty");
+        let mut statement = self.connection.prepare(
+            "SELECT s.id, t.text
+             FROM transcripts_fts
+             JOIN transcripts AS t ON t.rowid = transcripts_fts.rowid
+             JOIN shots AS s
+               ON s.video_id = t.video_id
+              AND s.owner_id = t.owner_id
+              AND t.start_s < s.end_s
+              AND t.end_s > s.start_s
+             WHERE transcripts_fts MATCH ?2 AND t.owner_id = ?1
+             ORDER BY bm25(transcripts_fts), t.start_s, s.id",
+        )?;
+        let rows = statement.query_map(params![owner_id, fts_query], |row| {
+            Ok(TranscriptShotHit {
+                shot_id: row.get(0)?,
+                text: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to join transcript matches to shots")
     }
 
     pub fn job_start(&self, owner_id: &str, job: &NewJob) -> anyhow::Result<JobRecord> {

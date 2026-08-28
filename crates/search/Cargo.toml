@@ -6,5 +6,10 @@ license.workspace = true
 
 [dependencies]
 crush-core = { path = "../core" }
+crush-store = { path = "../store" }
 anyhow.workspace = true
+serde.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0"
