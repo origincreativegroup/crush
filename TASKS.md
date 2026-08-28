@@ -10,7 +10,7 @@
 | TASK-005 | Scene detector | Codex | done — four goldens, store/CSV parity, and 3.47 s CPU acceptance pass |
 | TASK-006 | CLIP ONNX export + model downloader | Codex (Mac) | done — `models-v1` release and live resume/corruption acceptance pass |
 | TASK-007 | Embed preprocessing golden | Codex (Mac) | done — exact goldens and John’s two-run Mac approval |
-| TASK-008 | Embed with ort (CoreML + CPU) | Codex (Mac) | active — CPU image/text cosines 1.0; CoreML + human doctor gate pending |
+| TASK-008 | Embed with ort (CoreML + CPU) | Codex (Mac) | done — CPU/CoreML cosines 1.0; doctor and Linux/macOS CI green |
 | TASK-009 | Search + hybrid ranking | Codex | backlog (after 008) |
 | TASK-010 | Transcribe + alignment | Codex | backlog (after 004) |
 | TASK-011 | Ingest orchestration, cancel/resume, clip export | Cursor (Mac) | backlog |

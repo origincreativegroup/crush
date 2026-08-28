@@ -1,5 +1,5 @@
 # TASK-008: Embed with ort (CoreML + CPU)
-Agent: Codex on the Mac. Branch: task/08-embed. Depends: 007 approved, 000 versions.
+Agent: Codex on the Mac. Branch: task/08-embed. Depends: 007 approved, 000 versions. Status: done.
 
 ## Goal
 Image and text embeddings from the ONNX models, on CoreML with CPU fallback, matching the answer key.
@@ -38,3 +38,5 @@ Run doctor; confirm CoreML active and note ms/frame in docs/versions.md.
 - The pinned release assets remain untouched. A derived ONNX copy appends only the official
   `COREML_CACHE_KEY` metadata property (the pinned model SHA-256), making both CoreML partitions
   reuse one stable cache across CLI launches and test binaries.
+- GitHub Actions runs 33168746223 and 33168749709 passed both Linux workspace gates and the macOS
+  CPU embedding goldens. CoreML is enabled only for macOS targets so Linux links the CPU runtime.
