@@ -8,3 +8,8 @@ license.workspace = true
 crush-core = { path = "../core" }
 anyhow.workspace = true
 tracing.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
