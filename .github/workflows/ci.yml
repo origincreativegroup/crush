@@ -14,14 +14,14 @@ jobs:
       - run: cargo test --workspace
   test-macos-embed-cpu:
     runs-on: macos-latest
-    env:
-      CRUSH_TEST_MODELS: ${{ runner.temp }}/crush-models-v1
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Configure model cache path
+        run: echo "CRUSH_TEST_MODELS=$RUNNER_TEMP/crush-models-v1" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
         with:
-          path: ${{ env.CRUSH_TEST_MODELS }}
+          path: ${{ runner.temp }}/crush-models-v1
           key: crush-models-v1-c29c784ed9a2ee4d
       - name: Download pinned CLIP model assets
         run: |
