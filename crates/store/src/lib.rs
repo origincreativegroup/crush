@@ -812,6 +812,7 @@ impl Store {
         )?;
         for job in &jobs {
             self.job_fail(owner_id, &job.id, now, "interrupted")?;
+            self.set_video_status(owner_id, &job.video_id, VideoStatus::Failed)?;
         }
         Ok(jobs.len())
     }

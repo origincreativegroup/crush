@@ -328,10 +328,13 @@ mod macos {
                         ..JobFilter::default()
                     },
                 )?;
-                let last_error = jobs
-                    .iter()
-                    .find(|job| job.status == JobStatus::Failed)
-                    .and_then(|job| job.error.clone());
+                let last_error = if video.status == VideoStatus::Failed {
+                    jobs.iter()
+                        .find(|job| job.status == JobStatus::Failed)
+                        .and_then(|job| job.error.clone())
+                } else {
+                    None
+                };
                 output.push(VideoView {
                     shots: store.shots_for_video(DEFAULT_OWNER_ID, &video.id)?.len(),
                     id: video.id,
@@ -368,6 +371,76 @@ mod macos {
         } else {
             Ok(false)
         }
+    }
+
+    #[tauri::command]
+    fn reindex_video(
+        id: String,
+        app: AppHandle,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<TaskStarted> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let video = store
+                .video_by_id(DEFAULT_OWNER_ID, &id)?
+                .with_context(|| format!("video {id} was not found"))?;
+            drop(store);
+
+            let job_id = Uuid::new_v4().to_string();
+            let cancellation = CancellationToken::default();
+            {
+                let mut active = lock_anyhow(&state.active_ingest)?;
+                if let Some(current) = active.as_ref() {
+                    anyhow::bail!("ingest {} is already running", current.job_id);
+                }
+                *active = Some(ActiveIngest {
+                    job_id: job_id.clone(),
+                    cancellation: cancellation.clone(),
+                });
+            }
+            insert_background(
+                &state.background,
+                BackgroundTask {
+                    job_id: job_id.clone(),
+                    kind: BackgroundKind::Ingest,
+                    status: BackgroundStatus::Running,
+                    detail: Some(format!("re-indexing {}", video.path)),
+                    error: None,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+            let initial = job_snapshot(&state.paths.root, &state.background)?;
+            let _ = app.emit("ingest-progress", initial);
+
+            let config = state.config.clone();
+            let paths = state.paths.clone();
+            let data_dir = paths.root.clone();
+            let tasks = Arc::clone(&state.background);
+            let active_ingest = Arc::clone(&state.active_ingest);
+            let spawned_job_id = job_id.clone();
+            let spawned_cancellation = cancellation.clone();
+            drop(tauri::async_runtime::spawn_blocking(move || {
+                let result = Pipeline::new(config, paths, spawned_cancellation.clone())
+                    .resplit(&id, false)
+                    .map(|()| "re-index complete".to_owned());
+                let cancelled = spawned_cancellation.is_cancelled();
+                let completed = complete_background(&tasks, &spawned_job_id, result, cancelled);
+                if let Ok(mut active) = active_ingest.lock() {
+                    if active
+                        .as_ref()
+                        .is_some_and(|current| current.job_id == spawned_job_id)
+                    {
+                        *active = None;
+                    }
+                }
+                if completed.is_ok() {
+                    if let Ok(snapshot) = job_snapshot(&data_dir, &tasks) {
+                        let _ = app.emit("ingest-progress", snapshot);
+                    }
+                }
+            }));
+            Ok(TaskStarted { job_id })
+        })())
     }
 
     #[tauri::command]
@@ -615,6 +688,8 @@ mod macos {
 
     pub fn run() {
         tauri::Builder::default()
+            .plugin(tauri_plugin_clipboard_manager::init())
+            .plugin(tauri_plugin_dialog::init())
             .setup(|app| {
                 let resource_dir = app.path().resource_dir()?;
                 ffmpeg::register_bundle_resource_dir(resource_dir)?;
@@ -623,6 +698,7 @@ mod macos {
                 let mut config = Config::load(None)?;
                 config.data_dir = Some(data_dir.clone());
                 let paths = AppPaths::resolve(config.data_dir.as_ref())?;
+                Store::open(&paths.root)?.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
                 app.manage(RuntimeState {
                     config,
                     paths,
@@ -640,6 +716,7 @@ mod macos {
                 list_videos,
                 job_status,
                 cancel_ingest,
+                reindex_video,
                 search,
                 shot_detail,
                 export_clip,

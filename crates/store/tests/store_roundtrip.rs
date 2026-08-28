@@ -525,15 +525,19 @@ fn interrupted_jobs_fail_and_failed_videos_restore_last_completed_stage() {
             },
         )
         .unwrap();
-    store
-        .set_video_status(DEFAULT_OWNER_ID, "video-i", VideoStatus::Failed)
-        .unwrap();
-
     assert_eq!(
         store
             .fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)
             .unwrap(),
         1
+    );
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, "video-i")
+            .unwrap()
+            .unwrap()
+            .status,
+        VideoStatus::Failed
     );
     assert_eq!(
         store

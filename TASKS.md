@@ -15,6 +15,6 @@
 | TASK-010 | Transcribe + alignment | Codex (Mac) | done — WER 0.000; Metal active; silent fast path 0.149 ms |
 | TASK-011 | Ingest orchestration, cancel/resume, clip export | Codex (Mac) | done — resumable pipeline, cancellation, reprocessing, clip export |
 | TASK-012a | Tauri shell + commands | Codex (Mac) | done — signed `.app`, bundled sidecars, command bridge verified |
-| TASK-012b | First-run + Library screens | Cursor (Mac) | backlog |
+| TASK-012b | First-run + Library screens | Codex (Mac) | done — native Library workflow, recoverable ingest, and UI states verified |
 | TASK-012c | Search + Shot detail screens | Cursor (Mac) | backlog — **hard stop after** |
 | TASK-013 | Build, sign, smoke, clean-machine test | Cursor (Mac) | backlog |
