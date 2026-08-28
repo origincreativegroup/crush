@@ -336,7 +336,8 @@ impl Store {
                     .context("failed to reserve the vector matrix")?;
             }
 
-            for chunk in bytes.chunks_exact(size_of::<f32>()) {
+            // Length was validated above, so every chunk contains exactly one little-endian f32.
+            for chunk in bytes.chunks(size_of::<f32>()) {
                 matrix.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
             }
             ids.push(shot_id);
