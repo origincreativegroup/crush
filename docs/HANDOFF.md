@@ -41,7 +41,8 @@
   owner-safe typed APIs, synchronized transcript FTS, exact little-endian vectors, jobs, cascading
   deletion, and deep integrity checks. Six store acceptance tests pass; the 1000×512 vector load
   measured 14.845 ms.
-- TASK-003 is active on `task/03-reference`. Four license-safe fixtures total 5.15 MiB. The pinned
+- TASK-003 is complete on `task/03-reference`. Four license-safe fixtures total 5.15 MiB. The pinned
   Python 3.12 answer key exports the OpenAI CLIP ViT-B/32 QuickGELU encoders at opset 17 and produces
   scenes, transcripts, image tensors/embeddings, and text tokens/embeddings. Two full golden runs are
-  byte-identical and `make -C reference check` passes. Human scene-boundary review remains.
+  byte-identical and `make -C reference check` passes. John approved the rocket-launch scene-boundary
+  review on 2026-08-27; PR #3 is ready to merge.

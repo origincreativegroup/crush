@@ -19,4 +19,4 @@ Working answer-key kit in `reference/` and committed golden outputs in `fixtures
 - [x] README explains how to regenerate and that regenerating needs a reason in the commit message
 
 ## Human review
-- [ ] John eyeballs one scenes JSON against the clip.
+- [x] John approved the `rocket-launch.scenes.json` boundary review on 2026-08-27.
