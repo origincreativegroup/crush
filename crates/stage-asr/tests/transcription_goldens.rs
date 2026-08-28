@@ -79,7 +79,11 @@ fn speech_fixtures_stay_below_fifteen_percent_wer() {
         eprintln!("skipping ASR golden: {} is not installed", model.display());
         return;
     }
-    let runner = ffmpeg::Runner::new(ffmpeg::resolve().unwrap(), 0, "asr-golden");
+    let Ok(resolved) = ffmpeg::resolve() else {
+        eprintln!("skipping ASR golden: FFmpeg sidecars are not installed");
+        return;
+    };
+    let runner = ffmpeg::Runner::new(resolved, 0, "asr-golden");
     let transcriber = Transcriber::new(
         &model,
         ModelChoice::Small,
@@ -130,7 +134,11 @@ fn speech_fixtures_stay_below_fifteen_percent_wer() {
 
 #[test]
 fn silent_fixture_finishes_without_opening_wav_or_model() {
-    let runner = ffmpeg::Runner::new(ffmpeg::resolve().unwrap(), 0, "asr-silent");
+    let Ok(resolved) = ffmpeg::resolve() else {
+        eprintln!("skipping silent ASR fixture: FFmpeg sidecars are not installed");
+        return;
+    };
+    let runner = ffmpeg::Runner::new(resolved, 0, "asr-silent");
     let clip = repo_root().join("fixtures/clips/earth-timelapse-silent.mp4");
     let probe = runner.probe(&clip).unwrap().value;
     assert!(!probe.has_audio);
