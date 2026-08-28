@@ -15,6 +15,13 @@
 | TASK-010 | Transcribe + alignment | Codex (Mac) | done — WER 0.000; Metal active; silent fast path 0.149 ms |
 | TASK-011 | Ingest orchestration, cancel/resume, clip export | Codex (Mac) | done — resumable pipeline, cancellation, reprocessing, clip export |
 | TASK-012a | Tauri shell + commands | Codex (Mac) | done — signed `.app`, bundled sidecars, command bridge verified |
-| TASK-012b | First-run + Library screens | Cursor (Mac) | backlog |
-| TASK-012c | Search + Shot detail screens | Cursor (Mac) | backlog — **hard stop after** |
-| TASK-013 | Build, sign, smoke, clean-machine test | Cursor (Mac) | backlog |
+| TASK-012b | First-run + Library screens | Codex (Mac) | in progress — awaiting John's approval |
+| TASK-012c | Search + Shot detail screens | Claude (Mac) | PR #14 (draft, rebases onto 12b) — **hard stop after** |
+| TASK-013 | Build, sign, smoke, clean-machine test | Claude (Mac) | PR #13 — CI green; tag + fresh-account test pending John |
+| TASK-014 | 12c hard-stop fixes from smoke annoyances | OpenCode (Mac) | backlog — after 12c hard stop |
+| TASK-015 | First tagged release + clean-machine follow-through | OpenCode (Mac) | backlog — after #13 merges |
+| TASK-016 | UI harness in CI + README/THIRD_PARTY refresh | OpenCode | backlog — after 12c merges |
+
+## Team routing (2026-08-28)
+Codex: TASK-012b. Claude: TASK-012c, TASK-013, rebases/merges, review of OpenCode PRs. OpenCode: TASK-014–016.
+Work in `git worktree add ../crush-NN -b task/NN-name origin/main`; never edit another agent's live checkout.
