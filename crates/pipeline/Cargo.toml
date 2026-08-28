@@ -19,6 +19,7 @@ serde_json.workspace = true
 tracing.workspace = true
 libc.workspace = true
 tempfile = "=3.27.0"
+image.workspace = true
 
 [dev-dependencies]
 serde.workspace = true

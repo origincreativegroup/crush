@@ -2,9 +2,15 @@
 
 **Name:** App = **Crush**. CLI binary = **`crushctl`** (not `crush` — that's charmbracelet's coding agent on Homebrew; avoid PATH collisions). Crate prefix `crush-`, bundle id `dev.crush.app`, data dir `~/Library/Application Support/dev.crush.app` (Tauri's `app_data_dir`).
 
-**What:** Crush, a local Mac app that splits footage into shots, embeds them with CLIP, transcribes with Whisper, and searches by text. Rust, no server, no cloud. Open source (Apache-2.0).
+**What:** Crush, a local-first photo/video editorial intelligence system. It recognizes strong
+shots with a general model, learns an owner's style from feedback and explicitly added previous
+work, plans selects/clips, and renders derivatives. The DAM/catalog is supporting infrastructure.
+Rust, no server, no cloud. Open source (Apache-2.0).
 
-**Source of truth:** `docs/project-blueprint.md`. Review + protocol: `docs/blueprint-review.md`. Tasks: `TASKS.md` and `.tasks/`.
+**Source of truth:** `docs/project-blueprint.md` remains the engineering architecture and build
+protocol, with `docs/blueprint-review.md` as its review discipline. The additive product expansion
+is `docs/dam-feedback-blueprint.md`. Current sequencing and acceptance live in `TASKS.md` and
+`.tasks/`; the DAM plan extends the original architecture rather than replacing it.
 
 **Stack (do not change without a blueprint edit):** Rust workspace; bundled static ffmpeg via subprocess; `ort` (CoreML + CPU) for CLIP ONNX; `whisper-rs` (Metal); `rusqlite` for metadata AND vectors; in-process cosine search; `clap` CLI; Tauri 2 app.
 
@@ -17,9 +23,12 @@
 - Log `job_id` and `stage` on every stage span. Log ffmpeg command lines verbatim.
 - Mac tasks are tested on the Mac. Paste `doctor` output in the PR.
 
-**Routing:** Tasks 0, 4, 6, 7, 8, 11, 12a–c, 13 → Cursor on the Mac. Tasks 1, 2, 3, 5, 9, 10 → Codex OK.
+**Routing:** The original routing remains the record for Tasks 0–13. Current Tasks 016–023 are
+owned through the additive DAM/editorial plan. Do not revive closed implementation branches or
+obsolete agent assignments without an explicit current task.
 
-**Hard stops (human):** after Task 0, after Task 7, after Task 12c, before notarization.
+**Hard stops (human):** RAW/color fixture review in Task 016, held-out style proof in Task 018,
+render-golden review in Task 021, and clean-machine acceptance before release in Task 023.
 
 **Branch:** `task/NN-short-name`. One task per PR.
 

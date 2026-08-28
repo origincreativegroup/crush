@@ -174,9 +174,11 @@ fn ingest(
     let summary =
         Pipeline::new(cfg.clone(), paths.clone(), cancellation.clone()).ingest(input, debug)?;
     println!(
-        "Ingest complete: discovered={} indexed={} skipped={} failed={} recovered_jobs={} search_vectors={}",
+        "Ingest complete: discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} recovered_jobs={} search_vectors={}",
         summary.discovered,
+        summary.discovered_photos,
         summary.indexed,
+        summary.indexed_photos,
         summary.skipped,
         summary.failed,
         summary.recovered_jobs,
@@ -185,7 +187,11 @@ fn ingest(
     for (path, error) in &summary.errors {
         eprintln!("failed {}: {error}", path.display());
     }
-    anyhow::ensure!(summary.failed == 0, "{} video(s) failed", summary.failed);
+    anyhow::ensure!(
+        summary.failed == 0,
+        "{} media file(s) failed",
+        summary.failed
+    );
     Ok(())
 }
 
@@ -246,30 +252,41 @@ fn search(
     );
     let mut embedder = Embedder::new(paths.models(), preference, cfg.limits.threads)?;
     let mut text_embedder = |text: &str| embedder.embed_text(text);
-    let results = engine.search(&store, &mut text_embedder, query, top)?;
+    let results = engine.search_assets(&store, &mut text_embedder, query, top)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
         return Ok(());
     }
 
     println!(
-        "{:<4} {:>8} {:>8} {:>10} {:>10}  VIDEO",
-        "RANK", "SCORE", "COSINE", "START", "END"
+        "{:<4} {:<6} {:>8} {:>8} {:>10} {:>10}  ASSET",
+        "RANK", "TYPE", "SCORE", "COSINE", "START", "END"
     );
     for (rank, result) in results.iter().enumerate() {
         println!(
-            "{:<4} {:>8.4} {:>8.4} {:>10.3} {:>10.3}  {}",
+            "{:<4} {:<6} {:>8.4} {:>8.4} {:>10} {:>10}  {}",
             rank + 1,
+            result.asset_type,
             result.score,
             result.cosine,
-            result.start_s,
-            result.end_s,
-            result.video_path
+            result
+                .start_s
+                .map_or_else(|| "—".to_owned(), |value| format!("{value:.3}")),
+            result
+                .end_s
+                .map_or_else(|| "—".to_owned(), |value| format!("{value:.3}")),
+            result.path
         );
         println!(
-            "     shot={} thumb={}",
-            result.shot_id,
-            result.thumb_path.as_deref().unwrap_or("—")
+            "     asset={} thumb={} editorial_quality={} aesthetic={}",
+            result.asset_id,
+            result.thumb_path.as_deref().unwrap_or("—"),
+            result
+                .editorial_quality
+                .map_or_else(|| "—".to_owned(), |value| value.to_string()),
+            result
+                .aesthetic_score
+                .map_or_else(|| "—".to_owned(), |value| format!("{value:.3}"))
         );
         if let Some(snippet) = &result.transcript_snippet {
             println!("     transcript: {snippet}");

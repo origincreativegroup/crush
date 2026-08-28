@@ -8,8 +8,11 @@ use crush_core::job::{JobStatus, Stage};
 use crush_core::paths::AppPaths;
 use crush_core::{Config, DEFAULT_OWNER_ID};
 use crush_pipeline::Pipeline;
+use crush_search::SearchEngine;
+use crush_stage_embed::embedder::{Embedder, ProviderPreference};
 use crush_stage_split::ffmpeg;
-use crush_store::{JobFilter, NewJob, Store, VideoStatus};
+use crush_store::{JobFilter, NewJob, PhotoStatus, Store, VideoStatus};
+use image::{Rgb, RgbImage};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -55,6 +58,73 @@ fn fixture_config(data_dir: &Path) -> Config {
     config.asr.model = "small".to_owned();
     config.asr.language = Some("en".to_owned());
     config
+}
+
+#[test]
+fn photo_ingest_is_idempotent_and_searchable() {
+    let temp = tempfile::tempdir().unwrap();
+    if !install_model_links(temp.path()) {
+        return;
+    }
+    let input = temp.path().join("photos");
+    std::fs::create_dir(&input).unwrap();
+    let photo_path = input.join("warm-geometric-portrait.jpg");
+    let image = RgbImage::from_fn(640, 426, |x, y| {
+        if x > 380 && (90..350).contains(&y) {
+            Rgb([230, 166, 72])
+        } else {
+            Rgb([34, 48, 78])
+        }
+    });
+    image.save(&photo_path).unwrap();
+    let paths = AppPaths {
+        root: temp.path().to_path_buf(),
+    };
+    let config = fixture_config(temp.path());
+    let pipeline = Pipeline::new(config.clone(), paths.clone(), CancellationToken::default());
+
+    let first = pipeline.ingest(&input, false).unwrap();
+    assert_eq!(first.discovered, 1);
+    assert_eq!(first.discovered_photos, 1);
+    assert_eq!(first.indexed, 1);
+    assert_eq!(first.indexed_photos, 1);
+    assert_eq!(first.failed, 0);
+    assert_eq!(first.search_vectors, 1);
+
+    let store = Store::open(temp.path()).unwrap();
+    let photo = store.photos(DEFAULT_OWNER_ID).unwrap().pop().unwrap();
+    assert_eq!(photo.status, PhotoStatus::Done);
+    assert!(store
+        .thumbnail_path(photo.thumb_rel.as_deref().unwrap())
+        .unwrap()
+        .is_file());
+    assert_eq!(
+        store
+            .vector_for_photo(DEFAULT_OWNER_ID, &photo.id)
+            .unwrap()
+            .unwrap()
+            .len(),
+        512
+    );
+    let engine =
+        SearchEngine::load(&store, DEFAULT_OWNER_ID, config.search.transcript_hit_boost).unwrap();
+    let mut embedder = Embedder::new(paths.models(), ProviderPreference::Cpu, 2).unwrap();
+    let results = engine
+        .search_assets(
+            &store,
+            &mut |text: &str| embedder.embed_text(text),
+            "warm geometric portrait",
+            5,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].asset_type, "photo");
+    assert_eq!(results[0].asset_id, photo.id);
+    drop(store);
+
+    let second = pipeline.ingest(&input, false).unwrap();
+    assert_eq!(second.indexed, 0);
+    assert_eq!(second.skipped, 1);
 }
 
 #[test]

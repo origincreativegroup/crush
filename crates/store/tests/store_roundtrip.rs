@@ -9,8 +9,9 @@ use crush_core::{
     DEFAULT_OWNER_ID,
 };
 use crush_store::{
-    EmbeddingMeta, JobFilter, NewJob, ProblemKind, Shot, Store, TranscriptSegment, Video,
-    VideoStatus,
+    AestheticAssessment, EditorialAnnotation, EmbeddingMeta, FeedbackEvent, FeedbackSignal,
+    JobFilter, MediaKind, NewJob, Photo, PhotoStatus, ProblemKind, Shot, Store, StyleProfile,
+    TranscriptSegment, Video, VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -74,7 +75,7 @@ fn shot(id: &str, video_id: &str, idx: i64) -> Shot {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(store.schema_version().unwrap(), 2);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -85,12 +86,182 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 1);
+    assert_eq!(reopened.schema_version().unwrap(), 2);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .unwrap();
     assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+}
+
+#[test]
+fn photos_editorial_feedback_and_style_round_trip() {
+    let directory = TestDir::new("dam-feedback");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 28, 18, 0, 0).unwrap();
+    let first = Photo {
+        id: "photo-a".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        path: "/photos/a.jpg".to_owned(),
+        sha256: "photo-sha-a".to_owned(),
+        width: 6000,
+        height: 4000,
+        format: "jpeg".to_owned(),
+        orientation: Some(1),
+        captured_at: Some(now),
+        camera_make: Some("Example".to_owned()),
+        camera_model: Some("Camera".to_owned()),
+        lens: Some("35mm".to_owned()),
+        thumb_rel: Some("photo-a.jpg".to_owned()),
+        status: PhotoStatus::Pending,
+        indexed_at: None,
+    };
+    let second = Photo {
+        id: "photo-b".to_owned(),
+        path: "/photos/b.png".to_owned(),
+        sha256: "photo-sha-b".to_owned(),
+        format: "png".to_owned(),
+        thumb_rel: None,
+        ..first.clone()
+    };
+    assert_eq!(store.upsert_photo(DEFAULT_OWNER_ID, &first).unwrap(), first);
+    assert_eq!(
+        store.upsert_photo(DEFAULT_OWNER_ID, &second).unwrap(),
+        second
+    );
+    store
+        .put_photo_vector(DEFAULT_OWNER_ID, "photo-a", &[1.0, -0.0, 0.25])
+        .unwrap();
+    let vector = store
+        .vector_for_photo(DEFAULT_OWNER_ID, "photo-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(vector[0].to_bits(), 1.0_f32.to_bits());
+    assert_eq!(vector[1].to_bits(), (-0.0_f32).to_bits());
+    assert_eq!(
+        store.load_all_photo_vectors(DEFAULT_OWNER_ID).unwrap().0,
+        vec!["photo-a"]
+    );
+    store
+        .set_photo_status(DEFAULT_OWNER_ID, "photo-a", PhotoStatus::Done)
+        .unwrap();
+    assert_eq!(
+        store
+            .photo_by_path(DEFAULT_OWNER_ID, "/photos/a.jpg")
+            .unwrap()
+            .unwrap()
+            .status,
+        PhotoStatus::Done
+    );
+
+    let annotation = EditorialAnnotation {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind: MediaKind::Photo,
+        media_id: "photo-a".to_owned(),
+        description: "quiet architectural portrait with deliberate negative space".to_owned(),
+        subjects: "person, architecture".to_owned(),
+        action: "standing".to_owned(),
+        tags: "warm, geometric, campaign-a".to_owned(),
+        quality: Some(5),
+        standout: true,
+        usable: true,
+        faces_visible: true,
+        nametags_visible: false,
+        blur_required: false,
+        crop_x: Some(0.38),
+        grade_json: Some(r#"{"warmth":18,"contrast":6}"#.to_owned()),
+        notes: "Prefer the asymmetry.".to_owned(),
+        updated_at: now,
+    };
+    store
+        .upsert_editorial_annotation(DEFAULT_OWNER_ID, &annotation)
+        .unwrap();
+    assert_eq!(
+        store
+            .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, "photo-a")
+            .unwrap(),
+        Some(annotation)
+    );
+
+    let assessment = AestheticAssessment {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind: MediaKind::Photo,
+        media_id: "photo-a".to_owned(),
+        sharpness: 0.92,
+        exposure: 0.81,
+        contrast: 0.74,
+        color_harmony: 0.88,
+        balance: 0.83,
+        subject_placement: 0.91,
+        negative_space: 0.95,
+        visual_clarity: 0.86,
+        overall: 0.89,
+        confidence: 0.77,
+        explanation_json: r#"{"strengths":["negative space","color harmony"]}"#.to_owned(),
+        model_version: "design-baseline-v1".to_owned(),
+        assessed_at: now,
+    };
+    store
+        .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &assessment)
+        .unwrap();
+    assert_eq!(
+        store
+            .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Photo, "photo-a")
+            .unwrap(),
+        Some(assessment)
+    );
+
+    let preference = FeedbackEvent {
+        id: "feedback-1".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind: MediaKind::Photo,
+        media_id: "photo-a".to_owned(),
+        signal: FeedbackSignal::Prefer,
+        value: Some(1.0),
+        compared_media_kind: Some(MediaKind::Photo),
+        compared_media_id: Some("photo-b".to_owned()),
+        context_json: r#"{"collection":"homepage hero"}"#.to_owned(),
+        created_at: now,
+    };
+    store
+        .append_feedback(DEFAULT_OWNER_ID, &preference)
+        .unwrap();
+    assert_eq!(
+        store.feedback_events(DEFAULT_OWNER_ID).unwrap(),
+        vec![preference]
+    );
+
+    let profile = StyleProfile {
+        id: "style-local-1".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        name: "default".to_owned(),
+        version: 1,
+        algorithm_version: "pairwise-linear-v1".to_owned(),
+        embedding_weights: vec![0.1, -0.2, 0.3],
+        feature_weights_json: r#"{"negative_space":0.8,"color_harmony":0.6}"#.to_owned(),
+        sample_count: 42,
+        held_out_metric: Some(0.73),
+        active: true,
+        trained_at: now,
+    };
+    store.put_style_profile(DEFAULT_OWNER_ID, &profile).unwrap();
+    assert_eq!(
+        store.active_style_profile(DEFAULT_OWNER_ID).unwrap(),
+        Some(profile)
+    );
+
+    assert!(store
+        .upsert_editorial_annotation(
+            DEFAULT_OWNER_ID,
+            &EditorialAnnotation {
+                media_id: "missing".to_owned(),
+                ..store
+                    .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, "photo-a")
+                    .unwrap()
+                    .unwrap()
+            },
+        )
+        .is_err());
 }
 
 #[test]

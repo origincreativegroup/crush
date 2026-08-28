@@ -62,7 +62,7 @@
       <main id="library-view" class="workspace" aria-labelledby="library-title">
         <header class="toolbar">
           <div>
-            <p class="eyebrow">Footage index</p>
+            <p class="eyebrow">Photo + video index</p>
             <h1 id="library-title">Library</h1>
           </div>
           <div class="toolbar-actions">
@@ -77,8 +77,8 @@
         <section id="library-content" class="library-content" aria-live="polite">
           <div id="empty-library" class="empty-state" hidden>
             <div class="empty-icon" aria-hidden="true">＋</div>
-            <h2>No footage yet</h2>
-            <p>No footage indexed yet. Add a folder to start indexing, or run <span class="mono">crushctl ingest</span>.</p>
+            <h2>No media yet</h2>
+            <p>No photos or footage indexed yet. Add a folder to start indexing, or run <span class="mono">crushctl ingest</span>.</p>
             <button id="empty-add-folder" class="button primary" type="button">Add Folder…</button>
           </div>
 
@@ -129,7 +129,7 @@
           <div id="search-nothing-indexed" class="empty-state" hidden>
             <div class="empty-icon" aria-hidden="true">▦</div>
             <h2>Nothing indexed yet</h2>
-            <p>Add a folder in the Library and Crush will split, describe, and transcribe every shot.</p>
+            <p>Add a folder in the Library and Crush will index photos and split, describe, and transcribe video shots.</p>
             <button id="go-library" class="button primary" type="button">Open Library</button>
           </div>
           <div id="search-idle" class="empty-state muted" hidden>
@@ -144,16 +144,17 @@
         </section>
       </main>
 
-      <aside id="detail" class="detail-panel" role="dialog" aria-label="Shot detail" tabindex="-1" hidden>
+      <aside id="detail" class="detail-panel" role="dialog" aria-label="Asset detail" tabindex="-1" hidden>
         <div class="detail-head">
           <div>
-            <p class="eyebrow">Shot detail</p>
+            <p id="detail-kind" class="eyebrow">Asset detail</p>
             <div id="detail-file" class="file-name detail-file"></div>
           </div>
           <button id="detail-close" class="icon-button" type="button" aria-label="Close">×</button>
         </div>
         <div class="player-box">
           <video id="detail-video" preload="metadata" playsinline></video>
+          <img id="detail-photo" alt="Selected photo" hidden />
           <div id="player-hint" class="player-hint" aria-hidden="true">Space play/pause · L loop · ← → shots</div>
         </div>
         <div class="detail-times">
@@ -165,12 +166,23 @@
           <button id="export-clip" class="button secondary" type="button">Export clip…</button>
           <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>
         </div>
+        <div class="detail-feedback" aria-label="Editorial feedback">
+          <span class="eyebrow">Teach my style</span>
+          <button id="feedback-pick" class="button secondary" type="button">Pick</button>
+          <button id="feedback-reject" class="button secondary" type="button">Reject</button>
+          <label class="rating-control"><span class="sr-only">Quality rating</span>
+            <select id="feedback-rating" aria-label="Quality rating">
+              <option value="">Rate…</option><option value="1">★ 1</option><option value="2">★ 2</option>
+              <option value="3">★ 3</option><option value="4">★ 4</option><option value="5">★ 5</option>
+            </select>
+          </label>
+        </div>
         <div class="detail-nav">
           <button id="prev-shot" class="button secondary" type="button">← Prev shot</button>
           <button id="next-shot" class="button secondary" type="button">Next shot →</button>
         </div>
-        <section class="detail-transcript" aria-label="Transcript">
-          <p class="eyebrow">Transcript</p>
+        <section class="detail-transcript" aria-label="Asset notes">
+          <p id="detail-notes-label" class="eyebrow">Transcript</p>
           <div id="detail-transcript"></div>
         </section>
       </aside>

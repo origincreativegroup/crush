@@ -12,10 +12,13 @@ mod macos {
     use crush_core::paths::AppPaths;
     use crush_core::{Config, DEFAULT_OWNER_ID};
     use crush_pipeline::{IngestSummary, Pipeline};
-    use crush_search::{SearchEngine, SearchResult};
+    use crush_search::{retrain_style_profile, AssetSearchResult, SearchEngine};
     use crush_stage_embed::embedder::{Embedder, ProviderPreference};
     use crush_stage_split::ffmpeg;
-    use crush_store::{EmbeddingMeta, JobFilter, Store, VideoStatus};
+    use crush_store::{
+        EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, PhotoStatus, Store,
+        VideoStatus,
+    };
     use serde::Serialize;
     use tauri::{AppHandle, Emitter, Manager, State};
     use uuid::Uuid;
@@ -95,6 +98,7 @@ mod macos {
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct VideoView {
+        asset_type: String,
         id: String,
         path: String,
         duration_s: Option<f64>,
@@ -139,6 +143,21 @@ mod macos {
         fps: Option<f64>,
         thumb_path: Option<String>,
         transcripts: Vec<TranscriptView>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PhotoDetailView {
+        id: String,
+        photo_path: String,
+        width: i64,
+        height: i64,
+        format: String,
+        quality: Option<i64>,
+        aesthetic_score: Option<f64>,
+        description: String,
+        tags: String,
+        notes: String,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -337,6 +356,7 @@ mod macos {
                     None
                 };
                 output.push(VideoView {
+                    asset_type: "video".to_owned(),
                     shots: store.shots_for_video(DEFAULT_OWNER_ID, &video.id)?.len(),
                     id: video.id,
                     path: video.path,
@@ -350,6 +370,23 @@ mod macos {
                     last_error,
                 });
             }
+            for photo in store.photos(DEFAULT_OWNER_ID)? {
+                output.push(VideoView {
+                    asset_type: "photo".to_owned(),
+                    id: photo.id,
+                    path: photo.path,
+                    duration_s: None,
+                    fps: None,
+                    width: Some(photo.width),
+                    height: Some(photo.height),
+                    has_audio: false,
+                    status: photo_status_name(photo.status).to_owned(),
+                    indexed_at: photo.indexed_at.map(|value| value.to_rfc3339()),
+                    shots: 0,
+                    last_error: None,
+                });
+            }
+            output.sort_by(|left, right| left.path.cmp(&right.path));
             Ok(output)
         })())
     }
@@ -449,7 +486,7 @@ mod macos {
         q: String,
         top: usize,
         state: State<'_, RuntimeState>,
-    ) -> CommandResult<Vec<SearchResult>> {
+    ) -> CommandResult<Vec<AssetSearchResult>> {
         let config = state.config.clone();
         let paths = state.paths.clone();
         let cache = Arc::clone(&state.search);
@@ -479,7 +516,7 @@ mod macos {
                 let runtime = runtime.as_mut().context("search runtime was not created")?;
                 runtime.engine.reload(&store)?;
                 let SearchRuntime { engine, embedder } = runtime;
-                engine.search(&store, &mut |text: &str| embedder.embed_text(text), &q, top)
+                engine.search_assets(&store, &mut |text: &str| embedder.embed_text(text), &q, top)
             })())
         })
         .await
@@ -534,6 +571,91 @@ mod macos {
                 thumb_path,
                 transcripts,
             })
+        })())
+    }
+
+    #[tauri::command]
+    fn photo_detail(
+        id: String,
+        app: AppHandle,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PhotoDetailView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let photo = store
+                .photo_by_id(DEFAULT_OWNER_ID, &id)?
+                .with_context(|| format!("photo {id} was not found"))?;
+            allow_asset_path(&app, Path::new(&photo.path)).map_err(anyhow::Error::msg)?;
+            let annotation = store.editorial_annotation(
+                DEFAULT_OWNER_ID,
+                crush_store::MediaKind::Photo,
+                &photo.id,
+            )?;
+            let assessment = store.aesthetic_assessment(
+                DEFAULT_OWNER_ID,
+                crush_store::MediaKind::Photo,
+                &photo.id,
+            )?;
+            Ok(PhotoDetailView {
+                id: photo.id,
+                photo_path: photo.path,
+                width: photo.width,
+                height: photo.height,
+                format: photo.format,
+                quality: annotation.as_ref().and_then(|value| value.quality),
+                aesthetic_score: assessment.map(|value| value.overall),
+                description: annotation
+                    .as_ref()
+                    .map_or_else(String::new, |value| value.description.clone()),
+                tags: annotation
+                    .as_ref()
+                    .map_or_else(String::new, |value| value.tags.clone()),
+                notes: annotation.map_or_else(String::new, |value| value.notes),
+            })
+        })())
+    }
+
+    #[tauri::command]
+    fn record_feedback(
+        asset_type: String,
+        id: String,
+        signal: String,
+        value: Option<f64>,
+        context: Option<String>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<String> {
+        command_result((|| {
+            let media_kind = match asset_type.as_str() {
+                "photo" => MediaKind::Photo,
+                "video" => MediaKind::Shot,
+                _ => anyhow::bail!("unsupported asset type {asset_type:?}"),
+            };
+            let signal = match signal.as_str() {
+                "pick" => FeedbackSignal::Pick,
+                "reject" => FeedbackSignal::Reject,
+                "rating" => FeedbackSignal::Rating,
+                _ => anyhow::bail!("unsupported feedback signal {signal:?}"),
+            };
+            let event_id = Uuid::new_v4().to_string();
+            let mut store = Store::open(&state.paths.root)?;
+            store.append_feedback(
+                DEFAULT_OWNER_ID,
+                &FeedbackEvent {
+                    id: event_id.clone(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    media_kind,
+                    media_id: id,
+                    signal,
+                    value,
+                    compared_media_kind: None,
+                    compared_media_id: None,
+                    context_json: serde_json::json!({ "query": context.unwrap_or_default() })
+                        .to_string(),
+                    created_at: chrono::Utc::now(),
+                },
+            )?;
+            let _ = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)?;
+            Ok(event_id)
         })())
     }
 
@@ -622,11 +744,22 @@ mod macos {
         }
     }
 
+    fn photo_status_name(status: PhotoStatus) -> &'static str {
+        match status {
+            PhotoStatus::Pending => "pending",
+            PhotoStatus::Embedded => "embedded",
+            PhotoStatus::Done => "done",
+            PhotoStatus::Failed => "failed",
+        }
+    }
+
     fn ingest_summary(summary: &IngestSummary) -> String {
         format!(
-            "discovered={} indexed={} skipped={} failed={} recovered={} vectors={}",
+            "discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} recovered={} vectors={}",
             summary.discovered,
+            summary.discovered_photos,
             summary.indexed,
+            summary.indexed_photos,
             summary.skipped,
             summary.failed,
             summary.recovered_jobs,
@@ -749,6 +882,11 @@ mod macos {
                         eprintln!("could not expose {} to the webview: {error}", video.path);
                     }
                 }
+                for photo in store.photos(DEFAULT_OWNER_ID)? {
+                    if let Err(error) = scope.allow_file(&photo.path) {
+                        eprintln!("could not expose {} to the webview: {error}", photo.path);
+                    }
+                }
                 app.manage(RuntimeState {
                     config,
                     paths,
@@ -769,6 +907,8 @@ mod macos {
                 reindex_video,
                 search,
                 shot_detail,
+                photo_detail,
+                record_feedback,
                 shot_at_index,
                 export_clip,
                 open_in_finder
@@ -808,7 +948,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=1"));
+            assert!(report.contains("schema=2"));
         }
     }
 }
