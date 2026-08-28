@@ -59,3 +59,12 @@
   explicit release benchmark detects 2,400 decoded 480p frames in 3.47 s. The required score plot was
   reviewed at desktop and narrow widths: threshold 27 retains the approved 11.33 s cut while allowing
   one earlier false positive, so lowering it would reduce precision.
+- TASK-006 is complete on `task/06-models`. The project-org `models-v1` release publishes five pinned
+  model assets plus the tracked manifest (1,242,702,823 model bytes total). The reference export uses
+  a real fixture and exceeds cosine 0.9999 on both CLIP encoders; CoreML supports 466/467 image nodes
+  and 476/478 text nodes, with the remaining nodes explicitly falling back to CPU. The pinned `ureq`
+  downloader streams to `.part`, resumes with Range, retries, verifies SHA-256, and renames atomically.
+  A live acceptance run was interrupted at byte 234,881,024, resumed from that offset, verified all
+  five release assets, detected a deliberately corrupted vocabulary as `sha-mismatch`, repaired only
+  that file, and left `doctor` green. The first successful ensure recorded the combined CLIP model
+  identity, dimension 512, and preprocessing version 1 in `embedding_meta`.

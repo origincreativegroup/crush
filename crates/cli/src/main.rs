@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
-use crush_core::{paths::AppPaths, telemetry, Config};
+use crush_core::{models, paths::AppPaths, telemetry, Config, DEFAULT_OWNER_ID};
 use crush_stage_split::{ffmpeg, scene};
+use crush_store::{EmbeddingMeta, Store};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -21,6 +22,11 @@ struct Cli {
 enum Cmd {
     /// Check ffmpeg, models, acceleration, database. Run this first when anything is wrong.
     Doctor,
+    /// Download and verify the pinned model release.
+    Models {
+        #[command(subcommand)]
+        command: ModelsCommand,
+    },
     /// Index a file or folder (Task 11)
     Ingest {
         path: std::path::PathBuf,
@@ -46,6 +52,15 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum ModelsCommand {
+    /// Resume missing downloads, verify every sha256, and install atomically.
+    Ensure {
+        #[arg(long, default_value = models::DEFAULT_MANIFEST_URL)]
+        manifest_url: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum DebugCommand {
     /// Sample a video, write scores.csv, and print the per-frame scene scores.
     Scenes { video: PathBuf },
@@ -59,6 +74,9 @@ fn main() -> anyhow::Result<()> {
 
     match cli.cmd {
         Cmd::Doctor => doctor(&cfg, &paths),
+        Cmd::Models {
+            command: ModelsCommand::Ensure { manifest_url },
+        } => ensure_models(&paths, &manifest_url),
         Cmd::Ingest { .. } => anyhow::bail!("not implemented yet — Task 11"),
         Cmd::Search { .. } => anyhow::bail!("not implemented yet — Task 9"),
         Cmd::Jobs { .. } => anyhow::bail!("not implemented yet — Task 11"),
@@ -66,6 +84,41 @@ fn main() -> anyhow::Result<()> {
             command: DebugCommand::Scenes { video },
         } => debug_scenes(&cfg, &paths, &video),
     }
+}
+
+fn ensure_models(paths: &AppPaths, manifest_url: &str) -> anyhow::Result<()> {
+    let manifest = models::ensure(&paths.models(), manifest_url, |progress| {
+        let percent = if progress.total == 0 {
+            0.0
+        } else {
+            progress.downloaded as f64 * 100.0 / progress.total as f64
+        };
+        eprintln!(
+            "model {:<31} {:>6.2}% ({}/{})",
+            progress.name, percent, progress.downloaded, progress.total
+        );
+    })?;
+    record_embedding_meta(paths, &manifest)?;
+    println!("Models verified in {}", paths.models().display());
+    Ok(())
+}
+
+fn record_embedding_meta(paths: &AppPaths, manifest: &models::Manifest) -> anyhow::Result<bool> {
+    let store = Store::open(&paths.root)?;
+    if store.embedding_meta_get(DEFAULT_OWNER_ID)?.is_some() {
+        return Ok(false);
+    }
+    store.embedding_meta_set(
+        DEFAULT_OWNER_ID,
+        &EmbeddingMeta {
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            model_name: manifest.model_name.clone(),
+            model_sha256: manifest.embedding_sha256.clone(),
+            dim: manifest.dim,
+            preprocess_version: manifest.preprocess_version,
+        },
+    )?;
+    Ok(true)
 }
 
 fn debug_scenes(cfg: &Config, paths: &AppPaths, video: &Path) -> anyhow::Result<()> {
@@ -102,7 +155,6 @@ fn debug_scenes(cfg: &Config, paths: &AppPaths, video: &Path) -> anyhow::Result<
     Ok(())
 }
 
-/// Task 1 stub. Each line becomes a real check as its task lands.
 fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
     tracing::info!(job_id = "doctor", stage = "doctor", "doctor started");
     println!("Crush doctor");
@@ -129,7 +181,34 @@ fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
         "  ffprobe       path={}",
         runner.resolved().ffprobe_path.display()
     );
-    println!("  models        unchecked — Task 6 (sha256 verified)");
+    let manifest = models::bundled_manifest()?;
+    let model_checks = models::inspect(&paths.models(), &manifest)?;
+    let mut models_green = true;
+    for check in &model_checks {
+        let status = match check.status {
+            models::ModelStatus::Present => "present",
+            models::ModelStatus::Missing => {
+                models_green = false;
+                "missing"
+            }
+            models::ModelStatus::ShaMismatch => {
+                models_green = false;
+                "sha-mismatch"
+            }
+        };
+        println!("  model         {} {}", check.name, status);
+    }
+    println!(
+        "  models        {}",
+        if models_green {
+            "green"
+        } else {
+            "attention required"
+        }
+    );
+    if models_green && record_embedding_meta(paths, &manifest)? {
+        println!("  embed metadata initialized");
+    }
     println!(
         "  embed provider requested={} active=unchecked — Task 8",
         cfg.embed.provider
@@ -154,6 +233,24 @@ mod tests {
             Cmd::Debug {
                 command: DebugCommand::Scenes { video }
             } if video == Path::new("clip.mp4")
+        ));
+    }
+
+    #[test]
+    fn models_ensure_cli_shape_is_stable() {
+        let cli = Cli::try_parse_from([
+            "crushctl",
+            "models",
+            "ensure",
+            "--manifest-url",
+            "http://127.0.0.1/manifest.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Models {
+                command: ModelsCommand::Ensure { manifest_url }
+            } if manifest_url == "http://127.0.0.1/manifest.json"
         ));
     }
 }
