@@ -2,8 +2,9 @@
 
 use crate::ffmpeg::Runner;
 use anyhow::{ensure, Context};
+use crush_core::cancellation::CancellationToken;
 use crush_core::config::SplitConfig;
-use crush_store::{Shot, Store, VideoStatus};
+use crush_store::{Shot, Store};
 use image::{ImageReader, RgbImage};
 use std::fmt::Write as _;
 use std::fs;
@@ -168,6 +169,29 @@ pub fn materialize_shots(
     spans: &[ShotSpan],
     thumbs_dir: &Path,
 ) -> anyhow::Result<Vec<Shot>> {
+    materialize_shots_with_control(
+        runner,
+        store,
+        owner_id,
+        video_id,
+        input,
+        spans,
+        thumbs_dir,
+        &CancellationToken::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn materialize_shots_with_control(
+    runner: &Runner,
+    store: &mut Store,
+    owner_id: &str,
+    video_id: &str,
+    input: &Path,
+    spans: &[ShotSpan],
+    thumbs_dir: &Path,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<Vec<Shot>> {
     ensure!(!spans.is_empty(), "cannot materialize an empty shot list");
     ensure!(
         video_id
@@ -176,13 +200,25 @@ pub fn materialize_shots(
         "video id must be safe for thumbnail filenames"
     );
     fs::create_dir_all(thumbs_dir)?;
+    let video = store
+        .video_by_id(owner_id, video_id)?
+        .with_context(|| format!("video {video_id} was not found"))?;
 
     let mut shots = Vec::with_capacity(spans.len());
     for (index, span) in spans.iter().enumerate() {
-        let shot_id = format!("{video_id}-shot-{index:06}");
+        ensure!(
+            !cancellation.is_cancelled(),
+            "shot materialization cancelled"
+        );
+        let shot_id = stable_shot_id(&video.sha256, index, span.start_s);
         let thumb_rel = format!("{shot_id}.jpg");
         runner
-            .frame_at(input, span.rep_frame_s, &thumbs_dir.join(&thumb_rel))
+            .frame_at_with_control(
+                input,
+                span.rep_frame_s,
+                &thumbs_dir.join(&thumb_rel),
+                cancellation,
+            )
             .with_context(|| format!("failed to extract thumbnail for shot {index}"))?;
         shots.push(Shot {
             id: shot_id,
@@ -196,9 +232,22 @@ pub fn materialize_shots(
             scene_score: Some(span.scene_score),
         });
     }
-    store.insert_shots(owner_id, &shots)?;
-    store.set_video_status(owner_id, video_id, VideoStatus::Split)?;
+    ensure!(
+        !cancellation.is_cancelled(),
+        "shot materialization cancelled"
+    );
+    store.replace_shots(owner_id, video_id, &shots)?;
     Ok(shots)
+}
+
+/// Stable 64-bit external id from content hash, shot index, and rounded start milliseconds.
+pub fn stable_shot_id(video_sha256: &str, index: usize, start_s: f64) -> String {
+    let start_ms = (start_s * 1_000.0).round() as i64;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(video_sha256.as_bytes());
+    hasher.update(&(index as u64).to_le_bytes());
+    hasher.update(&start_ms.to_le_bytes());
+    hasher.finalize().to_hex()[..16].to_owned()
 }
 
 fn validate_inputs(
@@ -349,6 +398,16 @@ fn shot_span(start_s: f64, end_s: f64, scene_score: f64, rep_frame_pos: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_shot_ids_repeat_and_change_with_each_input() {
+        let first = stable_shot_id("abc", 3, 1.2344);
+        assert_eq!(first.len(), 16);
+        assert_eq!(first, stable_shot_id("abc", 3, 1.23449));
+        assert_ne!(first, stable_shot_id("def", 3, 1.2344));
+        assert_ne!(first, stable_shot_id("abc", 4, 1.2344));
+        assert_ne!(first, stable_shot_id("abc", 3, 1.236));
+    }
     use image::Rgb;
 
     fn solid_frame(directory: &Path, index: usize, rgb: [u8; 3]) -> PathBuf {

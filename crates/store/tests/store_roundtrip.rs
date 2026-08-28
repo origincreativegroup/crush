@@ -491,6 +491,69 @@ fn jobs_and_embedding_metadata_round_trip_for_every_terminal_state() {
 }
 
 #[test]
+fn interrupted_jobs_fail_and_failed_videos_restore_last_completed_stage() {
+    let directory = TestDir::new("interrupted-job");
+    let store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-i", "sha-i"))
+        .unwrap();
+    let started = Utc::now();
+    store
+        .job_start(
+            DEFAULT_OWNER_ID,
+            &NewJob {
+                id: "split-done".to_owned(),
+                video_id: "video-i".to_owned(),
+                stage: Stage::Split,
+                started_at: started,
+                debug_dir: None,
+            },
+        )
+        .unwrap();
+    store
+        .job_finish(DEFAULT_OWNER_ID, "split-done", started)
+        .unwrap();
+    store
+        .job_start(
+            DEFAULT_OWNER_ID,
+            &NewJob {
+                id: "embed-running".to_owned(),
+                video_id: "video-i".to_owned(),
+                stage: Stage::Embed,
+                started_at: started,
+                debug_dir: None,
+            },
+        )
+        .unwrap();
+    store
+        .set_video_status(DEFAULT_OWNER_ID, "video-i", VideoStatus::Failed)
+        .unwrap();
+
+    assert_eq!(
+        store
+            .fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .restore_failed_video_status(DEFAULT_OWNER_ID, "video-i")
+            .unwrap(),
+        VideoStatus::Split
+    );
+    let failed = store
+        .jobs(
+            DEFAULT_OWNER_ID,
+            &JobFilter {
+                status: Some(JobStatus::Failed),
+                ..JobFilter::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(failed[0].error.as_deref(), Some("interrupted"));
+}
+
+#[test]
 fn deep_integrity_reports_missing_vectors_and_thumbnail_files() {
     let directory = TestDir::new("integrity");
     let mut store = Store::open(directory.path()).unwrap();

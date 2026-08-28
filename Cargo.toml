@@ -6,6 +6,7 @@ members = [
   "crates/stage-split",
   "crates/stage-embed",
   "crates/stage-asr",
+  "crates/pipeline",
   "crates/search",
   "crates/cli",
 ]
@@ -40,6 +41,8 @@ flate2 = "=1.1.9"
 regex = "=1.12.3"
 hound = "=3.5.1"
 whisper-rs = "=0.16.0"
+blake3 = "1.8"
+ctrlc = "3.4"
 # Pinned later by its implementation task:
 #   tauri
 # Blacklisted (dead or wrong for this project):

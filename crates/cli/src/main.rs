@@ -1,6 +1,8 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use crush_core::{cancellation::CancellationToken, job::JobStatus};
 use crush_core::{models, paths::AppPaths, telemetry, Config, DEFAULT_OWNER_ID};
+use crush_pipeline::Pipeline;
 use crush_search::SearchEngine;
 use crush_stage_asr::{
     align_video, choose_model, model_path, production_backend, total_memory_bytes,
@@ -10,7 +12,7 @@ use crush_stage_embed::{
     preprocess::{preprocess, Tensor, IMAGE_SIZE, TENSOR_LEN},
 };
 use crush_stage_split::{ffmpeg, scene};
-use crush_store::{EmbeddingMeta, Store};
+use crush_store::{EmbeddingMeta, JobFilter, Store};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -55,6 +57,28 @@ enum Cmd {
     Jobs {
         #[arg(long)]
         failed: bool,
+        #[arg(long)]
+        video: Option<String>,
+    },
+    /// Re-run scene splitting and all downstream stages for one stored video.
+    Resplit {
+        video: String,
+        #[arg(long)]
+        debug: bool,
+    },
+    /// Recompute shot embeddings for all videos or one stored video.
+    Reembed {
+        #[arg(long, conflicts_with = "video")]
+        all: bool,
+        video: Option<String>,
+        #[arg(long)]
+        debug: bool,
+    },
+    /// Export one indexed shot as a standalone playable clip.
+    Clip {
+        shot_id: String,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Inspect raw intermediate values from one pipeline stage.
     Debug {
@@ -93,15 +117,38 @@ fn main() -> anyhow::Result<()> {
     let cfg = Config::load(cli.config.as_deref())?;
     let paths = AppPaths::resolve(cfg.data_dir.as_ref())?;
     telemetry::init(&paths.logs())?;
+    let cancellation = CancellationToken::default();
+    let signal_cancellation = cancellation.clone();
+    ctrlc::set_handler(move || signal_cancellation.cancel())
+        .context("failed to install Ctrl-C handler")?;
 
     match cli.cmd {
         Cmd::Doctor => doctor(&cfg, &paths),
         Cmd::Models {
             command: ModelsCommand::Ensure { manifest_url },
         } => ensure_models(&paths, &manifest_url),
-        Cmd::Ingest { .. } => anyhow::bail!("not implemented yet — Task 11"),
+        Cmd::Ingest { path, debug } => ingest(&cfg, &paths, &cancellation, &path, debug),
         Cmd::Search { query, top, json } => search(&cfg, &paths, &query, top, json),
-        Cmd::Jobs { .. } => anyhow::bail!("not implemented yet — Task 11"),
+        Cmd::Jobs { failed, video } => jobs(&paths, failed, video.as_deref()),
+        Cmd::Resplit { video, debug } => {
+            Pipeline::new(cfg, paths, cancellation).resplit(&video, debug)
+        }
+        Cmd::Reembed { all, video, debug } => {
+            let pipeline = Pipeline::new(cfg, paths, cancellation);
+            let count = pipeline.reembed(video.as_deref(), all, debug)?;
+            println!("Re-embedded {count} video(s)");
+            Ok(())
+        }
+        Cmd::Clip { shot_id, out } => {
+            let result = Pipeline::new(cfg, paths, cancellation).export_clip(&shot_id, &out)?;
+            println!(
+                "Exported {} with {:?} ({})",
+                out.display(),
+                result.mode,
+                result.command
+            );
+            Ok(())
+        }
         Cmd::Debug {
             command: DebugCommand::Scenes { video },
         } => debug_scenes(&cfg, &paths, &video),
@@ -115,6 +162,71 @@ fn main() -> anyhow::Result<()> {
             command: DebugCommand::Align { video },
         } => debug_align(&paths, &video),
     }
+}
+
+fn ingest(
+    cfg: &Config,
+    paths: &AppPaths,
+    cancellation: &CancellationToken,
+    input: &Path,
+    debug: bool,
+) -> anyhow::Result<()> {
+    let summary =
+        Pipeline::new(cfg.clone(), paths.clone(), cancellation.clone()).ingest(input, debug)?;
+    println!(
+        "Ingest complete: discovered={} indexed={} skipped={} failed={} recovered_jobs={} search_vectors={}",
+        summary.discovered,
+        summary.indexed,
+        summary.skipped,
+        summary.failed,
+        summary.recovered_jobs,
+        summary.search_vectors
+    );
+    for (path, error) in &summary.errors {
+        eprintln!("failed {}: {error}", path.display());
+    }
+    anyhow::ensure!(summary.failed == 0, "{} video(s) failed", summary.failed);
+    Ok(())
+}
+
+fn jobs(paths: &AppPaths, failed: bool, video: Option<&str>) -> anyhow::Result<()> {
+    let store = Store::open(&paths.root)?;
+    let video_id = video
+        .map(|target| {
+            store
+                .video_by_id(DEFAULT_OWNER_ID, target)?
+                .or(store.video_by_path(DEFAULT_OWNER_ID, target)?)
+                .map(|video| video.id)
+                .with_context(|| format!("video {target:?} was not found by id or stored path"))
+        })
+        .transpose()?;
+    let rows = store.jobs(
+        DEFAULT_OWNER_ID,
+        &JobFilter {
+            video_id,
+            status: failed.then_some(JobStatus::Failed),
+            ..JobFilter::default()
+        },
+    )?;
+    println!(
+        "{:<36} {:<10} {:<10} {:>10}  VIDEO / ERROR",
+        "JOB", "STAGE", "STATUS", "MS"
+    );
+    for job in rows {
+        println!(
+            "{:<36} {:<10} {:<10} {:>10}  {}{}",
+            job.id,
+            format!("{:?}", job.stage).to_ascii_lowercase(),
+            format!("{:?}", job.status).to_ascii_lowercase(),
+            job.duration_ms
+                .map_or_else(|| "—".to_owned(), |value| value.to_string()),
+            job.video_id,
+            job.error
+                .as_deref()
+                .map_or_else(String::new, |error| format!(" — {error}"))
+        );
+    }
+    Ok(())
 }
 
 fn search(
@@ -562,6 +674,42 @@ mod tests {
         assert!(matches!(
             cli.cmd,
             Cmd::Search { query, top: 3, json: true } if query == "a rocket launching"
+        ));
+    }
+
+    #[test]
+    fn ingest_jobs_reprocess_and_clip_cli_shapes_are_stable() {
+        let ingest = Cli::try_parse_from(["crushctl", "ingest", "clips", "--debug"]).unwrap();
+        assert!(matches!(
+            ingest.cmd,
+            Cmd::Ingest { path, debug: true } if path == Path::new("clips")
+        ));
+        let jobs = Cli::try_parse_from(["crushctl", "jobs", "--failed", "--video", "/clips/a.mov"])
+            .unwrap();
+        assert!(matches!(
+            jobs.cmd,
+            Cmd::Jobs { failed: true, video: Some(video) } if video == "/clips/a.mov"
+        ));
+        let resplit = Cli::try_parse_from(["crushctl", "resplit", "video-1"]).unwrap();
+        assert!(matches!(
+            resplit.cmd,
+            Cmd::Resplit { video, debug: false } if video == "video-1"
+        ));
+        let reembed = Cli::try_parse_from(["crushctl", "reembed", "--all"]).unwrap();
+        assert!(matches!(
+            reembed.cmd,
+            Cmd::Reembed {
+                all: true,
+                video: None,
+                debug: false
+            }
+        ));
+        let clip =
+            Cli::try_parse_from(["crushctl", "clip", "shot-1", "--out", "export.mp4"]).unwrap();
+        assert!(matches!(
+            clip.cmd,
+            Cmd::Clip { shot_id, out }
+                if shot_id == "shot-1" && out == Path::new("export.mp4")
         ));
     }
 }

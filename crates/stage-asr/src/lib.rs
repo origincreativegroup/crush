@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{ensure, Context};
+use crush_core::cancellation::CancellationToken;
 use crush_store::{Shot, Store, TranscriptSegment, VideoStatus};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -125,6 +126,14 @@ impl Transcriber {
         &self,
         wav_path: impl AsRef<Path>,
     ) -> anyhow::Result<(Vec<RecognizedSegment>, f64, f64)> {
+        self.transcribe_wav_with_control(wav_path, &CancellationToken::default())
+    }
+
+    pub fn transcribe_wav_with_control(
+        &self,
+        wav_path: impl AsRef<Path>,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<(Vec<RecognizedSegment>, f64, f64)> {
         let (samples, audio_s) = read_wav(wav_path.as_ref())?;
         let mut state = self
             .context
@@ -138,11 +147,15 @@ impl Transcriber {
         parameters.set_print_progress(false);
         parameters.set_print_realtime(false);
         parameters.set_print_timestamps(false);
+        let abort = cancellation.clone();
+        let abort_callback: Box<dyn FnMut() -> bool> = Box::new(move || abort.is_cancelled());
+        parameters.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(abort_callback));
 
         let started = Instant::now();
         state
             .full(parameters, &samples)
             .context("Whisper inference failed")?;
+        ensure!(!cancellation.is_cancelled(), "transcription cancelled");
         let inference_ms = started.elapsed().as_secs_f64() * 1_000.0;
         let mut recognized = Vec::new();
         for segment in state.as_iter() {
@@ -198,6 +211,29 @@ pub fn transcribe_video(
     model: ModelChoice,
     options: TranscribeOptions,
 ) -> anyhow::Result<TranscriptionReport> {
+    transcribe_video_with_control(
+        store,
+        owner_id,
+        video_id,
+        wav_path,
+        model_path,
+        model,
+        options,
+        &CancellationToken::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn transcribe_video_with_control(
+    store: &mut Store,
+    owner_id: &str,
+    video_id: &str,
+    wav_path: impl AsRef<Path>,
+    model_path: impl AsRef<Path>,
+    model: ModelChoice,
+    options: TranscribeOptions,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<TranscriptionReport> {
     let video = store
         .video_by_id(owner_id, video_id)?
         .with_context(|| format!("video {video_id} was not found"))?;
@@ -215,12 +251,12 @@ pub fn transcribe_video(
     }
 
     let transcriber = Transcriber::new(model_path, model, options)?;
-    let (recognized, audio_s, inference_ms) = transcriber.transcribe_wav(wav_path)?;
+    let (recognized, audio_s, inference_ms) =
+        transcriber.transcribe_wav_with_control(wav_path, cancellation)?;
     let segments = recognized
         .into_iter()
-        .enumerate()
-        .map(|(index, segment)| TranscriptSegment {
-            id: format!("{video_id}-segment-{index:06}"),
+        .map(|segment| TranscriptSegment {
+            id: stable_segment_id(&video.sha256, segment.start_s, segment.end_s),
             video_id: video_id.to_owned(),
             owner_id: owner_id.to_owned(),
             start_s: segment.start_s,
@@ -239,6 +275,16 @@ pub fn transcribe_video(
         model: transcriber.model(),
         backend: transcriber.backend(),
     })
+}
+
+pub fn stable_segment_id(video_sha256: &str, start_s: f64, end_s: f64) -> String {
+    let start_ms = (start_s * 1_000.0).round() as i64;
+    let end_ms = (end_s * 1_000.0).round() as i64;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(video_sha256.as_bytes());
+    hasher.update(&start_ms.to_le_bytes());
+    hasher.update(&end_ms.to_le_bytes());
+    hasher.finalize().to_hex()[..16].to_owned()
 }
 
 pub fn align_video(
@@ -380,6 +426,16 @@ mod tests {
         assert_eq!(choose_model("base", None).unwrap(), ModelChoice::Base);
         assert_eq!(choose_model("small", Some(1)).unwrap(), ModelChoice::Small);
         assert!(choose_model("large", None).is_err());
+    }
+
+    #[test]
+    fn stable_segment_ids_repeat_and_include_both_endpoints() {
+        let first = stable_segment_id("abc", 1.2344, 5.6784);
+        assert_eq!(first.len(), 16);
+        assert_eq!(first, stable_segment_id("abc", 1.23449, 5.67849));
+        assert_ne!(first, stable_segment_id("def", 1.2344, 5.6784));
+        assert_ne!(first, stable_segment_id("abc", 1.2356, 5.6784));
+        assert_ne!(first, stable_segment_id("abc", 1.2344, 5.6796));
     }
 
     #[test]

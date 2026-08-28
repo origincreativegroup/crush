@@ -1,28 +1,24 @@
 [package]
-name = "crush-cli"
+name = "crush-pipeline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "crushctl"
-path = "src/main.rs"
-
 [dependencies]
 crush-core = { path = "../core" }
+crush-store = { path = "../store" }
 crush-stage-split = { path = "../stage-split" }
 crush-stage-embed = { path = "../stage-embed" }
 crush-stage-asr = { path = "../stage-asr" }
 crush-search = { path = "../search" }
-crush-store = { path = "../store" }
-crush-pipeline = { path = "../pipeline" }
 anyhow.workspace = true
-clap.workspace = true
-tracing.workspace = true
-image.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
-ctrlc.workspace = true
+tracing.workspace = true
+libc.workspace = true
+tempfile = "=3.27.0"
 
 [dev-dependencies]
 serde.workspace = true
-tempfile = "=3.27.0"
