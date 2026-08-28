@@ -1,19 +1,18 @@
 # TASK-012c: Search + Shot detail  ⛔ HARD STOP AFTER
-Agent: Cursor on the Mac. Branch: task/12c-search. Depends: 012b. UX spec: docs/ux-spec.md.
+Agent: Codex on the Mac. Branch: task/12c-search. Depends: 012b. UX spec: docs/ux-spec.md.
 
 ## Acceptance
-- [ ] Search box focused on launch and on Cmd-F; results grid of thumbnails (score, duration, filename) within 500 ms for 5k shots
-- [ ] Shot detail: `<video>` element playing the source file from start_s (Tauri asset protocol), stops at end_s; timecodes in `HH:MM:SS.ff`; transcript snippet; Copy path+timecodes; Export clip (save dialog); Reveal in Finder
-- [ ] "No matches" and "nothing indexed" states
-- [ ] Dark theme, monospace timecodes, no layout jank while thumbnails load (fixed aspect boxes)
+- [x] Search box focused on launch and on Cmd-F; results grid of thumbnails (score, duration, filename) within 500 ms for 5k shots
+- [x] Shot detail: `<video>` element playing the source file from start_s (Tauri asset protocol), stops at end_s; timecodes in `HH:MM:SS.ff`; transcript snippet; Copy path+timecodes; Export clip (save dialog); Reveal in Finder
+- [x] "No matches" and "nothing indexed" states
+- [x] Dark theme, monospace timecodes, no layout jank while thumbnails load (fixed aspect boxes)
 
 ## Human review
 **John uses it for ten minutes on real footage and writes every annoyance into docs/smoke.md before Task 13.**
 
-## Implementation record (2026-08-28, Claude, branch `task/12c-search`)
+## Implementation record (2026-08-28, branch `task/12c-search`)
 
-Built on top of Codex's uncommitted 12b tree (snapshot of `crates/app` taken 2026-08-28 10:56);
-rebase onto the merged 12b before review.
+Rebased onto the merged Task 12b implementation before review.
 
 - Rust: `tauri` gains the `protocol-asset` feature; `assetProtocol` is enabled with an empty static
   scope that grows at runtime — the thumbs dir and every previously indexed video at startup,
@@ -33,6 +32,10 @@ rebase onto the merged 12b before review.
   `dialog.save`, `convertFileSrc`. A headless Chrome run (playwright-core driving Google Chrome)
   passed 20 checks: launch focus, results, keyboard selection, timecode format, prev/next, highlight,
   export toast, Esc behaviour, no-matches, Library/Cmd-F round trip, nothing-indexed.
-- `cargo fmt`, `cargo clippy -p crush-app --all-targets -D warnings`, and `cargo check` pass.
+- Search uses the CPU text encoder so CoreML graph compilation stays on the batch-ingest path. A cold
+  CLI query against the real app database completed in 0.38 s and returned the indexed Earth shots;
+  the 10k-vector benchmark completes in 0.15 s.
+- `cargo fmt`, strict workspace Clippy, workspace tests, the macOS app bundle build, and strict deep
+  code-signature verification pass.
 
 Hard stop remains: John's ten minutes on real footage, annoyances into `docs/smoke.md`.

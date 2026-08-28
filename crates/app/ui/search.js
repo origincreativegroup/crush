@@ -268,6 +268,7 @@
   function renderDetail() {
     const d = state.detail;
     el.detail.hidden = false;
+    el.detail.focus();
     el.detailFile.textContent = fileName(d.videoPath);
     el.detailFile.title = d.videoPath;
     const length = Math.max(0, d.endS - d.startS);

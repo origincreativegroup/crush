@@ -460,14 +460,20 @@ mod macos {
                 let store = Store::open(&paths.root)?;
                 let mut runtime = lock_anyhow(&cache)?;
                 if runtime.is_none() {
-                    let preference = ProviderPreference::parse(&config.embed.provider)?;
                     *runtime = Some(SearchRuntime {
                         engine: SearchEngine::load(
                             &store,
                             DEFAULT_OWNER_ID,
                             config.search.transcript_hit_boost,
                         )?,
-                        embedder: Embedder::new(paths.models(), preference, config.limits.threads)?,
+                        // CPU starts cold in under the 500 ms search budget, while CoreML's
+                        // one-time graph compilation is optimized for batch image ingestion.
+                        // Task 8 goldens enforce that both providers share the same CLIP space.
+                        embedder: Embedder::new(
+                            paths.models(),
+                            ProviderPreference::Cpu,
+                            config.limits.threads,
+                        )?,
                     });
                 }
                 let runtime = runtime.as_mut().context("search runtime was not created")?;
@@ -735,7 +741,9 @@ mod macos {
                 let store = Store::open(&paths.root)?;
                 store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
                 let scope = app.asset_protocol_scope();
-                scope.allow_directory(paths.thumbs(), true)?;
+                let thumbs_dir = paths.thumbs();
+                std::fs::create_dir_all(&thumbs_dir)?;
+                scope.allow_directory(&thumbs_dir, true)?;
                 for video in store.videos(DEFAULT_OWNER_ID)? {
                     if let Err(error) = scope.allow_file(&video.path) {
                         eprintln!("could not expose {} to the webview: {error}", video.path);
