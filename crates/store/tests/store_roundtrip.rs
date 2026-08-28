@@ -139,6 +139,13 @@ fn videos_shots_and_delete_cascade_round_trip() {
     store
         .put_vector(DEFAULT_OWNER_ID, "shot-1", &[1.0, -0.0, f32::NAN])
         .unwrap();
+    let exact_vector = store
+        .vector_for_shot(DEFAULT_OWNER_ID, "shot-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact_vector[0].to_bits(), 1.0_f32.to_bits());
+    assert_eq!(exact_vector[1].to_bits(), (-0.0_f32).to_bits());
+    assert!(exact_vector[2].is_nan());
     store
         .insert_transcript_segments(
             DEFAULT_OWNER_ID,
@@ -175,6 +182,10 @@ fn videos_shots_and_delete_cascade_round_trip() {
         .is_none());
     assert!(store
         .shot_by_id(DEFAULT_OWNER_ID, "shot-1")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .vector_for_shot(DEFAULT_OWNER_ID, "shot-1")
         .unwrap()
         .is_none());
     assert!(store

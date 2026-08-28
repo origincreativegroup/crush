@@ -13,6 +13,12 @@ pub struct Tensor {
 }
 
 impl Tensor {
+    pub fn zeros() -> Self {
+        Self {
+            values: vec![0.0; TENSOR_LEN],
+        }
+    }
+
     pub const fn shape(&self) -> [usize; 4] {
         [1, 3, IMAGE_SIZE, IMAGE_SIZE]
     }

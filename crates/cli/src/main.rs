@@ -1,10 +1,14 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crush_core::{models, paths::AppPaths, telemetry, Config, DEFAULT_OWNER_ID};
-use crush_stage_embed::preprocess::{preprocess, IMAGE_SIZE, TENSOR_LEN};
+use crush_stage_embed::{
+    embedder::{Embedder, ProviderPreference},
+    preprocess::{preprocess, Tensor, IMAGE_SIZE, TENSOR_LEN},
+};
 use crush_stage_split::{ffmpeg, scene};
 use crush_store::{EmbeddingMeta, Store};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(
@@ -72,6 +76,8 @@ enum DebugCommand {
         #[arg(long)]
         golden: Option<PathBuf>,
     },
+    /// Print a stored shot vector summary and the verified embedding provider.
+    Vector { shot_id: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -94,6 +100,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::Debug {
             command: DebugCommand::Frame { image, golden },
         } => debug_frame(&image, golden.as_deref()),
+        Cmd::Debug {
+            command: DebugCommand::Vector { shot_id },
+        } => debug_vector(&cfg, &paths, &shot_id),
     }
 }
 
@@ -155,6 +164,34 @@ fn print_tensor_summary(label: &str, values: &[f32]) -> anyhow::Result<()> {
         println!("{label} channel {channel}: min={minimum:.7} max={maximum:.7} mean={mean:.7}");
     }
     println!("{label} first 8: {:?}", &values[..8]);
+    Ok(())
+}
+
+fn debug_vector(cfg: &Config, paths: &AppPaths, shot_id: &str) -> anyhow::Result<()> {
+    let store = Store::open(&paths.root)?;
+    let vector = store
+        .vector_for_shot(DEFAULT_OWNER_ID, shot_id)?
+        .with_context(|| format!("shot {shot_id} has no stored vector"))?;
+    anyhow::ensure!(
+        vector.len() == 512,
+        "shot {shot_id} vector has dim {}",
+        vector.len()
+    );
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let preference = ProviderPreference::parse(&cfg.embed.provider)?;
+    eprintln!(
+        "verifying embedding provider; first CoreML initialization can take several minutes..."
+    );
+    let mut embedder = Embedder::new(paths.models(), preference, cfg.limits.threads)?;
+    let _ = embedder.embed_image(&Tensor::zeros())?;
+    println!("shot_id={shot_id}");
+    println!("norm={norm:.9}");
+    println!("first_8={:?}", &vector[..8]);
+    println!("active={}", embedder.active_provider().as_str());
     Ok(())
 }
 
@@ -278,13 +315,45 @@ fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
             "attention required"
         }
     );
-    if models_green && record_embedding_meta(paths, &manifest)? {
-        println!("  embed metadata initialized");
+    if models_green {
+        if record_embedding_meta(paths, &manifest)? {
+            println!("  embed metadata initialized");
+        }
+        let preference = ProviderPreference::parse(&cfg.embed.provider)?;
+        eprintln!(
+            "doctor: initializing embedding sessions; first CoreML use can take several minutes..."
+        );
+        let initialized = Instant::now();
+        let mut embedder = Embedder::new(paths.models(), preference, cfg.limits.threads)?;
+        let init_ms = initialized.elapsed().as_secs_f64() * 1_000.0;
+        let input = Tensor::zeros();
+        let _ = embedder.embed_image(&input)?;
+        let measured = Instant::now();
+        for _ in 0..20 {
+            let _ = embedder.embed_image(&input)?;
+        }
+        let mean_ms = measured.elapsed().as_secs_f64() * 1_000.0 / 20.0;
+        println!(
+            "  embed provider requested={} active={} providers={} init_ms={:.2} ms/frame={mean_ms:.2}",
+            embedder.requested_provider().as_str(),
+            embedder.active_provider().as_str(),
+            embedder
+                .active_providers()
+                .iter()
+                .map(|provider| provider.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            init_ms,
+        );
+        for warning in embedder.warnings() {
+            println!("  embed warning  {warning}");
+        }
+    } else {
+        println!(
+            "  embed provider requested={} active=unavailable — install models first",
+            cfg.embed.provider
+        );
     }
-    println!(
-        "  embed provider requested={} active=unchecked — Task 8",
-        cfg.embed.provider
-    );
     println!(
         "  whisper       model={} metal=unchecked — Task 10",
         cfg.asr.model
@@ -343,6 +412,17 @@ mod tests {
                 command: DebugCommand::Frame { image, golden }
             } if image == Path::new("frame.png")
                 && golden.as_deref() == Some(Path::new("frame.image.json"))
+        ));
+    }
+
+    #[test]
+    fn debug_vector_cli_shape_is_stable() {
+        let cli = Cli::try_parse_from(["crushctl", "debug", "vector", "shot-123"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Debug {
+                command: DebugCommand::Vector { shot_id }
+            } if shot_id == "shot-123"
         ));
     }
 }

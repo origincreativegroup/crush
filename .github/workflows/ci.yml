@@ -12,4 +12,27 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
       - run: cargo test --workspace
-  # macos job added in Task 8 once ort/whisper deps exist (golden tests on CPU provider)
+  test-macos-embed-cpu:
+    runs-on: macos-latest
+    env:
+      CRUSH_TEST_MODELS: ${{ runner.temp }}/crush-models-v1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CRUSH_TEST_MODELS }}
+          key: crush-models-v1-c29c784ed9a2ee4d
+      - name: Download pinned CLIP model assets
+        run: |
+          mkdir -p "$CRUSH_TEST_MODELS"
+          test -f "$CRUSH_TEST_MODELS/clip-image.onnx" || curl --fail --location --retry 4 --output "$CRUSH_TEST_MODELS/clip-image.onnx" https://github.com/origincreativegroup/crush/releases/download/models-v1/clip-image.onnx
+          test -f "$CRUSH_TEST_MODELS/clip-text.onnx" || curl --fail --location --retry 4 --output "$CRUSH_TEST_MODELS/clip-text.onnx" https://github.com/origincreativegroup/crush/releases/download/models-v1/clip-text.onnx
+          test -f "$CRUSH_TEST_MODELS/bpe_simple_vocab_16e6.txt.gz" || curl --fail --location --retry 4 --output "$CRUSH_TEST_MODELS/bpe_simple_vocab_16e6.txt.gz" https://github.com/origincreativegroup/crush/releases/download/models-v1/bpe_simple_vocab_16e6.txt.gz
+      - name: Verify pinned model hashes
+        run: |
+          test "$(shasum -a 256 "$CRUSH_TEST_MODELS/clip-image.onnx" | cut -d ' ' -f 1)" = "9a4c3b87ec5c78e3951b6e7e041981e55468efe8978ec5411b00510ae8726d01"
+          test "$(shasum -a 256 "$CRUSH_TEST_MODELS/clip-text.onnx" | cut -d ' ' -f 1)" = "cab3f1bb08bcb3a46e033c69b43015ba49c1308a3b7ff24bce61e08a41e476d8"
+          test "$(shasum -a 256 "$CRUSH_TEST_MODELS/bpe_simple_vocab_16e6.txt.gz" | cut -d ' ' -f 1)" = "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a"
+      - run: cargo test -p crush-stage-embed --test embedding_goldens clip_token_ids_match_all_text_goldens -- --nocapture
+      - run: cargo test -p crush-stage-embed --test embedding_goldens cpu_image_and_text_embeddings_match_goldens -- --nocapture

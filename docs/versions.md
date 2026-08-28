@@ -99,3 +99,31 @@ The Whisper output was:
 
 FFmpeg build provenance, license configuration, binary hashes, and dynamic-system-library audit are
 recorded in `sidecars/SOURCES.md`.
+
+## Task 8 production embedding acceptance
+
+Run date: 2026-08-27 on the same Apple M4 Pro machine.
+
+The production workspace pins `ort = 2.0.0-rc.13` with the `coreml` feature. The Rust tokenizer is a
+direct, ftfy-free OpenCLIP BPE port using `bpe_simple_vocab_16e6.txt.gz`; all five text fixtures match
+their exact 77-token answer-key arrays. The CPU and CoreML sessions both returned cosine
+`1.000000000` against every one of the four image and five text embeddings.
+
+| Production check | Result |
+|---|---|
+| CPU doctor, 20 image runs | `active=cpu`, **9.38 ms/frame** |
+| CoreML doctor, 20 image runs | `active=coreml`, **5.29 ms/frame** |
+| Clean keyed CoreML image+text initialization | 132,230 ms |
+| Cross-process cached doctor initialization | 122,703.28 ms; no new cache entry |
+| CoreML execution profile | `providers=cpu,coreml`; CoreML executed the accelerated partitions and CPU handled the small unsupported remainder documented by Task 6 |
+| CoreML golden test | 4 image + 5 text cosines all `1.000000000` |
+| CPU golden test | 4 image + 5 text cosines all `1.000000000` |
+
+CoreML's compiled model cache is stored beneath `models/coreml-cache`. Without explicit metadata,
+ONNX Runtime hashes temporary partition URLs and produced a new multi-gigabyte cache pair on each
+process launch. Crush leaves the pinned release assets untouched and creates byte-identical derived
+ONNX copies with one appended protobuf metadata property: `COREML_CACHE_KEY=<pinned model sha256>`.
+The image and text cache directories are therefore named by their stable release hashes across CLI
+and test binaries. The derived ONNX copies add about 607 MiB of local cache data. A clean conversion
+remains slow and loading the compiled programs in a cold process is still substantial, but neither
+path creates duplicate compiled artifacts.

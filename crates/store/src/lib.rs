@@ -139,6 +139,15 @@ impl Store {
         &self.db_path
     }
 
+    pub fn thumbnail_path(&self, relative: &str) -> anyhow::Result<PathBuf> {
+        let relative = Path::new(relative);
+        ensure!(
+            safe_relative_path(relative),
+            "thumbnail path must be a safe path relative to the thumbs directory"
+        );
+        Ok(self.data_dir.join("thumbs").join(relative))
+    }
+
     pub fn schema_version(&self) -> anyhow::Result<i64> {
         self.connection
             .query_row(
@@ -295,6 +304,40 @@ impl Store {
             params![shot_id, owner_id, values.len() as i64, bytes],
         )?;
         Ok(())
+    }
+
+    /// Load one vector, preserving its exact little-endian f32 representation.
+    pub fn vector_for_shot(
+        &self,
+        owner_id: &str,
+        shot_id: &str,
+    ) -> anyhow::Result<Option<Vec<f32>>> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT dim, vec FROM shot_vectors WHERE owner_id = ?1 AND shot_id = ?2",
+                params![owner_id, shot_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let Some((dim_i64, bytes)) = row else {
+            return Ok(None);
+        };
+        let dim = usize::try_from(dim_i64).context("vector dimension was negative")?;
+        ensure!(
+            bytes.len() == dim * size_of::<f32>(),
+            "vector {shot_id} contains {} bytes; expected {}",
+            bytes.len(),
+            dim * size_of::<f32>()
+        );
+        Ok(Some(
+            bytes
+                .as_chunks::<{ size_of::<f32>() }>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect(),
+        ))
     }
 
     /// Return shot ids plus one contiguous row-major vector matrix.
