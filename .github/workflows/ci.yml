@@ -12,7 +12,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
       - run: cargo test --workspace
-  test-macos-embed-cpu:
+  test-macos-accelerated:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/crush-models-v1
-          key: crush-models-v1-c29c784ed9a2ee4d
+          key: crush-models-v1-asr-1be3a9b2063867b9
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/crush-sidecars-v1
@@ -36,11 +36,13 @@ jobs:
           test -f "$CRUSH_TEST_MODELS/clip-image.onnx" || curl --fail --location --retry 4 --output "$CRUSH_TEST_MODELS/clip-image.onnx" https://github.com/origincreativegroup/crush/releases/download/models-v1/clip-image.onnx
           test -f "$CRUSH_TEST_MODELS/clip-text.onnx" || curl --fail --location --retry 4 --output "$CRUSH_TEST_MODELS/clip-text.onnx" https://github.com/origincreativegroup/crush/releases/download/models-v1/clip-text.onnx
           test -f "$CRUSH_TEST_MODELS/bpe_simple_vocab_16e6.txt.gz" || curl --fail --location --retry 4 --output "$CRUSH_TEST_MODELS/bpe_simple_vocab_16e6.txt.gz" https://github.com/origincreativegroup/crush/releases/download/models-v1/bpe_simple_vocab_16e6.txt.gz
+          test -f "$CRUSH_TEST_MODELS/ggml-small.bin" || curl --fail --location --retry 4 --output "$CRUSH_TEST_MODELS/ggml-small.bin" https://github.com/origincreativegroup/crush/releases/download/models-v1/ggml-small.bin
       - name: Verify pinned model hashes
         run: |
           test "$(shasum -a 256 "$CRUSH_TEST_MODELS/clip-image.onnx" | cut -d ' ' -f 1)" = "9a4c3b87ec5c78e3951b6e7e041981e55468efe8978ec5411b00510ae8726d01"
           test "$(shasum -a 256 "$CRUSH_TEST_MODELS/clip-text.onnx" | cut -d ' ' -f 1)" = "cab3f1bb08bcb3a46e033c69b43015ba49c1308a3b7ff24bce61e08a41e476d8"
           test "$(shasum -a 256 "$CRUSH_TEST_MODELS/bpe_simple_vocab_16e6.txt.gz" | cut -d ' ' -f 1)" = "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a"
+          test "$(shasum -a 256 "$CRUSH_TEST_MODELS/ggml-small.bin" | cut -d ' ' -f 1)" = "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
       - name: Download and verify pinned FFmpeg sidecars
         run: |
           mkdir -p "$CRUSH_TEST_SIDECARS"
@@ -52,3 +54,4 @@ jobs:
       - run: cargo test -p crush-stage-embed --test embedding_goldens clip_token_ids_match_all_text_goldens -- --nocapture
       - run: cargo test -p crush-stage-embed --test embedding_goldens cpu_image_and_text_embeddings_match_goldens -- --nocapture
       - run: cargo test -p crush-cli --test search_fixtures -- --nocapture
+      - run: cargo test -p crush-stage-asr --test transcription_goldens -- --nocapture

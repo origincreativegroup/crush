@@ -2,6 +2,9 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crush_core::{models, paths::AppPaths, telemetry, Config, DEFAULT_OWNER_ID};
 use crush_search::SearchEngine;
+use crush_stage_asr::{
+    align_video, choose_model, model_path, production_backend, total_memory_bytes,
+};
 use crush_stage_embed::{
     embedder::{Embedder, ProviderPreference},
     preprocess::{preprocess, Tensor, IMAGE_SIZE, TENSOR_LEN},
@@ -81,6 +84,8 @@ enum DebugCommand {
     },
     /// Print a stored shot vector summary and the verified embedding provider.
     Vector { shot_id: String },
+    /// Print transcript segments overlapping every shot in a stored video.
+    Align { video: String },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -106,6 +111,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::Debug {
             command: DebugCommand::Vector { shot_id },
         } => debug_vector(&cfg, &paths, &shot_id),
+        Cmd::Debug {
+            command: DebugCommand::Align { video },
+        } => debug_align(&paths, &video),
     }
 }
 
@@ -244,6 +252,36 @@ fn debug_vector(cfg: &Config, paths: &AppPaths, shot_id: &str) -> anyhow::Result
     println!("norm={norm:.9}");
     println!("first_8={:?}", &vector[..8]);
     println!("active={}", embedder.active_provider().as_str());
+    Ok(())
+}
+
+fn debug_align(paths: &AppPaths, video: &str) -> anyhow::Result<()> {
+    let store = Store::open(&paths.root)?;
+    let video = store
+        .video_by_id(DEFAULT_OWNER_ID, video)?
+        .or(store.video_by_path(DEFAULT_OWNER_ID, video)?)
+        .with_context(|| format!("video {video:?} was not found by id or stored path"))?;
+    println!(
+        "{:<6} {:>10} {:>10} {:>8}  TEXT",
+        "SHOT", "START", "END", "SEGMENTS"
+    );
+    for alignment in align_video(&store, DEFAULT_OWNER_ID, &video.id)? {
+        let text = alignment
+            .segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "{:<6} {:>10.3} {:>10.3} {:>8}  {}",
+            alignment.shot.idx,
+            alignment.shot.start_s,
+            alignment.shot.end_s,
+            alignment.segments.len(),
+            text
+        );
+    }
     Ok(())
 }
 
@@ -406,9 +444,30 @@ fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
             cfg.embed.provider
         );
     }
+    let memory = total_memory_bytes();
+    let selected_asr_model = choose_model(&cfg.asr.model, memory)?;
     println!(
-        "  whisper       model={} metal=unchecked — Task 10",
-        cfg.asr.model
+        "  memory        {}",
+        memory.map_or_else(
+            || "unknown".to_owned(),
+            |bytes| format!(
+                "{} bytes ({:.1} GiB)",
+                bytes,
+                bytes as f64 / 1024_f64.powi(3)
+            )
+        )
+    );
+    let asr_model_path = model_path(paths.models(), selected_asr_model);
+    println!(
+        "  whisper       configured={} selected={} backend={} model={}",
+        cfg.asr.model,
+        selected_asr_model,
+        production_backend(),
+        if asr_model_path.is_file() {
+            "present"
+        } else {
+            "missing"
+        }
     );
     println!("  threads       {} (0 = cores-2)", cfg.limits.threads);
     Ok(())
@@ -475,6 +534,17 @@ mod tests {
             Cmd::Debug {
                 command: DebugCommand::Vector { shot_id }
             } if shot_id == "shot-123"
+        ));
+    }
+
+    #[test]
+    fn debug_align_cli_shape_is_stable() {
+        let cli = Cli::try_parse_from(["crushctl", "debug", "align", "video-123"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Debug {
+                command: DebugCommand::Align { video }
+            } if video == "video-123"
         ));
     }
 

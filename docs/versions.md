@@ -127,3 +127,23 @@ The image and text cache directories are therefore named by their stable release
 and test binaries. The derived ONNX copies add about 607 MiB of local cache data. A clean conversion
 remains slow and loading the compiled programs in a cold process is still substantial, but neither
 path creates duplicate compiled artifacts.
+
+## Task 10 production transcription acceptance
+
+Run date: 2026-08-28 on the same Apple M4 Pro machine. The production workspace pins
+`whisper-rs = 0.16.0` and `hound = 3.5.1`; macOS builds enable Whisper's Metal feature while Linux
+builds retain the CPU implementation. Both speech fixtures used the pinned multilingual small
+model, greedy decoding, English, token timestamps, and the configured thread limit. A minimum
+average token probability of 0.78 removes music hallucinations while retaining all golden speech.
+
+| Production check | Result |
+|---|---|
+| Whisper backend evidence | `GPU name: Apple M4 Pro` and `using Metal backend` |
+| `goodnight-earth-vertical` | WER **0.000**; 210.51 ms for 20.00 s; **105.26 ms per 10 s** |
+| `synthetic-speech` | WER **0.000**; 166.63 ms for 12.00 s; **138.86 ms per 10 s** |
+| Silent fixture fast path | status `transcribed`, zero segments, **0.149 ms**; WAV and model paths were never opened |
+| Query-time alignment | the synthetic 0.00–12.00 s shot returned both overlapping transcript segments |
+
+The small model loaded 487.01 MB onto Metal. Transcript confidence is the arithmetic mean of the
+segment's token probabilities, and transcript replacement updates the content table and FTS index
+in one SQLite transaction so resumed ingestion cannot duplicate rows.

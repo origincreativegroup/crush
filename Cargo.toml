@@ -38,7 +38,9 @@ ureq = { version = "=3.4.0", default-features = false, features = ["rustls"] }
 ort = "=2.0.0-rc.13"
 flate2 = "=1.1.9"
 regex = "=1.12.3"
-# Pinned later by Task 0 outcome — do NOT add here yet:
-#   whisper-rs, tauri
+hound = "=3.5.1"
+whisper-rs = "=0.16.0"
+# Pinned later by its implementation task:
+#   tauri
 # Blacklisted (dead or wrong for this project):
 #   onnxruntime-rs, ffmpeg-next, tch

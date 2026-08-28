@@ -225,6 +225,34 @@ impl Store {
             .context("failed to query video by sha256")
     }
 
+    pub fn video_by_id(&self, owner_id: &str, video_id: &str) -> anyhow::Result<Option<Video>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, path, sha256, duration_s, fps, width, height, has_audio,
+                        status, indexed_at
+                 FROM videos
+                 WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, video_id],
+                video_from_row,
+            )
+            .optional()
+            .context("failed to query video by id")
+    }
+
+    pub fn video_by_path(&self, owner_id: &str, path: &str) -> anyhow::Result<Option<Video>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, path, sha256, duration_s, fps, width, height, has_audio,
+                        status, indexed_at
+                 FROM videos
+                 WHERE owner_id = ?1 AND path = ?2",
+                params![owner_id, path],
+                video_from_row,
+            )
+            .optional()
+            .context("failed to query video by path")
+    }
+
     pub fn set_video_status(
         &self,
         owner_id: &str,
@@ -446,6 +474,77 @@ impl Store {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Atomically replace one video's transcript and its external-content FTS rows.
+    pub fn replace_transcript_segments(
+        &mut self,
+        owner_id: &str,
+        video_id: &str,
+        segments: &[TranscriptSegment],
+    ) -> anyhow::Result<()> {
+        for segment in segments {
+            ensure_owner_matches(owner_id, &segment.owner_id, "transcript segment")?;
+            ensure!(
+                segment.video_id == video_id,
+                "transcript segment belongs to a different video"
+            );
+            ensure!(
+                segment.end_s > segment.start_s,
+                "segment end must exceed start"
+            );
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "DELETE FROM transcripts_fts
+             WHERE rowid IN (
+                 SELECT rowid FROM transcripts WHERE owner_id = ?1 AND video_id = ?2
+             )",
+            params![owner_id, video_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM transcripts WHERE owner_id = ?1 AND video_id = ?2",
+            params![owner_id, video_id],
+        )?;
+        for segment in segments {
+            transaction.execute(
+                "INSERT INTO transcripts (
+                    id, video_id, owner_id, start_s, end_s, text, confidence
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    segment.id,
+                    video_id,
+                    owner_id,
+                    segment.start_s,
+                    segment.end_s,
+                    segment.text,
+                    segment.confidence,
+                ],
+            )?;
+            let rowid = transaction.last_insert_rowid();
+            transaction.execute(
+                "INSERT INTO transcripts_fts(rowid, text) VALUES (?1, ?2)",
+                params![rowid, segment.text],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn transcript_count_for_video(
+        &self,
+        owner_id: &str,
+        video_id: &str,
+    ) -> anyhow::Result<usize> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM transcripts WHERE owner_id = ?1 AND video_id = ?2",
+            params![owner_id, video_id],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).context("transcript count was negative")
     }
 
     pub fn segments_overlapping(

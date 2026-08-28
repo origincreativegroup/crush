@@ -320,6 +320,60 @@ fn transcript_overlap_and_fts_queries_return_typed_segments() {
 }
 
 #[test]
+fn replacing_transcripts_removes_stale_rows_from_table_and_fts() {
+    let directory = TestDir::new("replace-transcripts");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-r", "sha-r"))
+        .unwrap();
+    let old = TranscriptSegment {
+        id: "old-segment".to_owned(),
+        video_id: "video-r".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        start_s: 0.0,
+        end_s: 1.0,
+        text: "obsolete lighthouse words".to_owned(),
+        confidence: Some(0.5),
+    };
+    let replacement = TranscriptSegment {
+        id: "new-segment".to_owned(),
+        video_id: "video-r".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        start_s: 1.0,
+        end_s: 2.0,
+        text: "current rocket words".to_owned(),
+        confidence: Some(0.9),
+    };
+    store
+        .insert_transcript_segments(DEFAULT_OWNER_ID, &[old])
+        .unwrap();
+    store
+        .replace_transcript_segments(
+            DEFAULT_OWNER_ID,
+            "video-r",
+            std::slice::from_ref(&replacement),
+        )
+        .unwrap();
+
+    assert!(store
+        .search_transcripts(DEFAULT_OWNER_ID, "obsolete", 10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .search_transcripts(DEFAULT_OWNER_ID, "rocket", 10)
+            .unwrap(),
+        vec![replacement]
+    );
+    assert_eq!(
+        store
+            .transcript_count_for_video(DEFAULT_OWNER_ID, "video-r")
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn jobs_and_embedding_metadata_round_trip_for_every_terminal_state() {
     let directory = TestDir::new("jobs");
     let store = Store::open(directory.path()).unwrap();
