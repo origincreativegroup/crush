@@ -25,10 +25,10 @@ feedback history as the basis for a photo/video DAM that can learn an owner's st
 - Store triggers validate polymorphic photo/shot targets and clean feedback when media is removed.
 - The first personalizer is an auditable normalized feedback centroid. Picks/rejects/ratings and
   workflow evidence produce separate personal-style affinity in mixed-media ranking. It remains a
-  baseline, not a validated learned model, until Task 017 records held-out improvement.
+  baseline, not a validated learned model, until Task 018 records held-out improvement.
 - Store round trips, style-rank ordering, strict workspace Clippy, and workspace tests pass.
 
 ## Follow-on hard gates
 
-Task 015 must prove real photo ingest/search. Task 017 must show held-out ranking improvement before
+Task 015 proves real photo ingest/search. Task 018 must show held-out ranking improvement before
 the UI describes the profile as learned. Real Reel Studio catalogue/media stays local and ignored.

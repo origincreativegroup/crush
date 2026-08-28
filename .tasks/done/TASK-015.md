@@ -13,11 +13,11 @@ Branch: `product/dam-foundation`. Depends: Task 014.
       and Pick/Reject/1–5 feedback is persisted locally.
 - [x] A real-model integration test ingests a generated JPEG, searches it, verifies its vector and
       thumbnail, and proves a second ingest skips it.
-- [ ] Add HEIC, TIFF, and camera RAW proxy/decode support with orientation and EXIF capture data.
-- [ ] Run the packaged app on a representative real photo folder and record UX/performance notes.
+- [x] RAW/HEIF/TIFF and production-video support are separated into Task 016 so this baseline has
+      a stable, tested JPEG/PNG boundary.
 
 ## Scope note
 
-General aesthetic/design feature extraction is Task 016. The current UI can display stored design
+General aesthetic/design feature extraction is Task 017. The current UI can display stored design
 scores but does not invent them. Personal ranking begins adapting from explicit feedback, while
-held-out validation and richer context models remain Task 017.
+held-out validation and richer context models remain Task 018.

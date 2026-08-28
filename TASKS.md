@@ -16,11 +16,15 @@
 | TASK-011 | Ingest orchestration, cancel/resume, clip export | Codex (Mac) | done — resumable pipeline, cancellation, reprocessing, clip export |
 | TASK-012a | Tauri shell + commands | Codex (Mac) | done — signed `.app`, bundled sidecars, command bridge verified |
 | TASK-012b | First-run + Library screens | Codex (Mac) | done — native Library workflow, recoverable ingest, and UI states verified |
-| TASK-012c | Search + Shot detail screens | Codex (Mac) | in review on `task/12c-search` — **hard stop after** |
-| TASK-013 | Build, sign, smoke, clean-machine test | Codex (Mac) | paused — product scope expanded before release |
-| TASK-014 | Photo/video DAM schema + Reel Studio editorial feedback foundation | Codex (Mac) | in review on `product/dam-foundation` |
-| TASK-015 | Photo ingest, thumbnails, vectors, and mixed-media search | Codex (Mac) | in progress on `product/dam-foundation` — JPEG/PNG vertical slice complete |
-| TASK-016 | Explainable aesthetic/design assessment | Codex (Mac) | backlog |
-| TASK-017 | Personal style trainer + held-out ranking evaluation | Codex (Mac) | in progress — feedback-centroid baseline implemented; evaluation pending |
-| TASK-018 | Mixed-media review UI: picks, rejects, ratings, comparisons, notes | Codex (Mac) | backlog |
-| TASK-019 | Reel Studio catalogue/recipe importer + collections and exports | Codex (Mac) | backlog |
+| TASK-012c | Search + Shot detail screens | Codex (Mac) | done — merged as PR #14 |
+| TASK-013 | Pre-pivot release workflow and smoke plan | Claude (Mac) | superseded — useful packaging notes retained in TASK-023; PR #13 closed |
+| TASK-014 | Photo/video DAM schema + Reel Studio editorial feedback foundation | Codex (Mac) | done — merged through DAM foundation |
+| TASK-015 | JPEG/PNG ingest, thumbnails, vectors, and mixed-media search | Codex (Mac) | done — real-model photo vertical slice |
+| TASK-016 | RAW/HEIF/TIFF photo ingest + production-video source support | Codex (Mac) | next — format support matrix, metadata, color, proxies |
+| TASK-017 | Explainable technical and aesthetic analysis for photos/video | Codex (Mac) | backlog — depends TASK-016 |
+| TASK-018 | Personal-style learner + held-out ranking evaluation | Codex (Mac) | backlog — centroid baseline exists; proof and controls required |
+| TASK-019 | Mixed-media review and DAM organization | Codex (Mac) | backlog — comparisons, collections, versions, metadata, safety |
+| TASK-020 | User-style photo selection and video clip/reel planning | Codex (Mac) | backlog — depends TASK-017–019 |
+| TASK-021 | Non-destructive recipes + photo/video render and export | Codex (Mac) | backlog — rendered derivatives only; originals stay immutable |
+| TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | backlog — import confirmed editorial evidence into the unified schema |
+| TASK-023 | DAM release packaging, UI CI, and clean-machine acceptance | Codex (Mac) | backlog — after end-to-end photo/video render workflow |

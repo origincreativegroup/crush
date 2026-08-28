@@ -95,15 +95,27 @@ Nothing in the real Reel Studio database or media library enters version control
 - Machine scores never clear a privacy flag. Publishing still requires review.
 - Every learned profile is versioned, locally deletable, and reproducible from retained feedback.
 
-## Delivery slices
+## Execution roadmap
 
-1. DAM schema: photos, vectors, annotations, aesthetic assessments, feedback events, style models.
-2. Photo ingest/search: JPEG/PNG first, then HEIC/TIFF/RAW proxy support; mixed photo/video results.
-3. Editorial review UI: pick/reject, stars, pairwise compare, editable tags/notes, privacy flags.
-4. General aesthetic analysis with feature-level explanations and test fixtures.
-5. Personal ranking trainer, score breakdown, reset/export controls, and held-out evaluation.
-6. Reel Studio importer plus recipe/crop/grade feedback ingestion.
-7. Collections, deduplication, version stacks, saved searches, and export/publish workflow.
+1. **Foundation (done):** unified photo/video records, vectors, annotations, assessments, feedback,
+   style profiles, JPEG/PNG ingest, mixed search, photo detail, and explicit feedback.
+2. **Source fidelity:** add HEIC/HEIF, TIFF, DNG and supported camera RAW stills with EXIF,
+   orientation, timestamps, lens/camera data, embedded previews, ICC/color metadata, and cached
+   working proxies. Expand production-video probing and proxy generation. Publish a tested format
+   matrix; camera-RAW video such as BRAW/R3D/ProRes RAW requires an explicit decoder/licensing
+   decision rather than silent fallback.
+3. **Explainable judgment:** compute technical, composition/design, moment/story, and sequence
+   features for stills and representative video frames. Preserve each component and confidence.
+4. **Review and learning:** pairwise compare, picks/rejects, ratings, crops, grades, tags, notes,
+   privacy flags, collections, version stacks, and saved searches. Train context-aware personal
+   ranking and require held-out improvement before calling it learned.
+5. **Editorial planning:** create ranked photo selects and video clip/reel plans in the user's
+   style, with editable reasons, boundaries, pacing, crops, grades, and sequence order.
+6. **Render and export:** keep originals immutable; store non-destructive recipes and render photo
+   derivatives plus video clips/reels through resumable jobs. Exports include deterministic presets,
+   color/orientation handling, metadata policy, cancellation, manifests, and output verification.
+7. **Migration and release:** import Reel Studio catalogue/recipe evidence, then package and test
+   the complete mixed-media workflow on a clean Mac.
 
 ## Acceptance principles
 
@@ -113,3 +125,7 @@ Nothing in the real Reel Studio database or media library enters version control
 - Pairwise and pick/reject feedback must change ranking predictably and reversibly.
 - Every result can explain the signals that helped or hurt it.
 - Existing video fixtures, goldens, and clean-machine guarantees continue to pass.
+- Originals are never overwritten. Every render records its source assets, recipe, tool/model
+  versions, output checksum, and failure/cancellation state.
+- Unsupported RAW or acquisition formats fail with a precise capability reason; Crush never
+  labels a low-fidelity thumbnail as a full-quality decode.

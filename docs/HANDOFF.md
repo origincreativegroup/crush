@@ -2,9 +2,13 @@
 
 **Name:** App = **Crush**. CLI binary = **`crushctl`** (not `crush` — that's charmbracelet's coding agent on Homebrew; avoid PATH collisions). Crate prefix `crush-`, bundle id `dev.crush.app`, data dir `~/Library/Application Support/dev.crush.app` (Tauri's `app_data_dir`).
 
-**What:** Crush, a local Mac app that splits footage into shots, embeds them with CLIP, transcribes with Whisper, and searches by text. Rust, no server, no cloud. Open source (Apache-2.0).
+**What:** Crush, a local-first photo/video DAM that searches media, supports editorial feedback,
+learns an owner's visual preferences, plans selects/clips, and renders derivatives. Rust, no server,
+no cloud. Open source (Apache-2.0).
 
-**Source of truth:** `docs/project-blueprint.md`. Review + protocol: `docs/blueprint-review.md`. Tasks: `TASKS.md` and `.tasks/`.
+**Source of truth:** `docs/dam-feedback-blueprint.md`, `TASKS.md`, and `.tasks/`. The original
+`docs/project-blueprint.md` and `docs/blueprint-review.md` explain the completed video-search
+foundation but no longer define product sequencing.
 
 **Stack (do not change without a blueprint edit):** Rust workspace; bundled static ffmpeg via subprocess; `ort` (CoreML + CPU) for CLIP ONNX; `whisper-rs` (Metal); `rusqlite` for metadata AND vectors; in-process cosine search; `clap` CLI; Tauri 2 app.
 
@@ -17,9 +21,11 @@
 - Log `job_id` and `stage` on every stage span. Log ffmpeg command lines verbatim.
 - Mac tasks are tested on the Mac. Paste `doctor` output in the PR.
 
-**Routing:** Tasks 0, 4, 6, 7, 8, 11, 12a–c, 13 → Cursor on the Mac. Tasks 1, 2, 3, 5, 9, 10 → Codex OK.
+**Routing:** Current Tasks 016–023 are owned through the active DAM plan. Do not revive historical
+Cursor/Claude/OpenCode assignments or their branches without an explicit current task.
 
-**Hard stops (human):** after Task 0, after Task 7, after Task 12c, before notarization.
+**Hard stops (human):** RAW/color fixture review in Task 016, held-out style proof in Task 018,
+render-golden review in Task 021, and clean-machine acceptance before release in Task 023.
 
 **Branch:** `task/NN-short-name`. One task per PR.
 

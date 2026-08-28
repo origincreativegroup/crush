@@ -1,4 +1,4 @@
-# TASK-012c: Search + Shot detail  ⛔ HARD STOP AFTER
+# TASK-012c: Search + Shot detail (done)
 Agent: Codex on the Mac. Branch: task/12c-search. Depends: 012b. UX spec: docs/ux-spec.md.
 
 ## Acceptance
@@ -8,7 +8,9 @@ Agent: Codex on the Mac. Branch: task/12c-search. Depends: 012b. UX spec: docs/u
 - [x] Dark theme, monospace timecodes, no layout jank while thumbnails load (fixed aspect boxes)
 
 ## Human review
-**John uses it for ten minutes on real footage and writes every annoyance into docs/smoke.md before Task 13.**
+
+The original video-only hard stop was superseded by the DAM pivot. The completed Search and Shot
+detail implementation was merged in PR #14 and now underpins mixed photo/video review.
 
 ## Implementation record (2026-08-28, branch `task/12c-search`)
 
@@ -38,4 +40,4 @@ Rebased onto the merged Task 12b implementation before review.
 - `cargo fmt`, strict workspace Clippy, workspace tests, the macOS app bundle build, and strict deep
   code-signature verification pass.
 
-Hard stop remains: John's ten minutes on real footage, annoyances into `docs/smoke.md`.
+The next end-to-end human acceptance is the mixed-media clean-machine gate in Task 023.
