@@ -1,5 +1,7 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use crush_core::{models, paths::AppPaths, telemetry, Config, DEFAULT_OWNER_ID};
+use crush_stage_embed::preprocess::{preprocess, IMAGE_SIZE, TENSOR_LEN};
 use crush_stage_split::{ffmpeg, scene};
 use crush_store::{EmbeddingMeta, Store};
 use std::path::{Path, PathBuf};
@@ -64,6 +66,12 @@ enum ModelsCommand {
 enum DebugCommand {
     /// Sample a video, write scores.csv, and print the per-frame scene scores.
     Scenes { video: PathBuf },
+    /// Print the normalized CLIP tensor summary for an image and optional golden JSON.
+    Frame {
+        image: PathBuf,
+        #[arg(long)]
+        golden: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -83,7 +91,71 @@ fn main() -> anyhow::Result<()> {
         Cmd::Debug {
             command: DebugCommand::Scenes { video },
         } => debug_scenes(&cfg, &paths, &video),
+        Cmd::Debug {
+            command: DebugCommand::Frame { image, golden },
+        } => debug_frame(&image, golden.as_deref()),
     }
+}
+
+fn debug_frame(image_path: &Path, golden_path: Option<&Path>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        image_path.is_file(),
+        "image does not exist: {}",
+        image_path.display()
+    );
+    let image = image::open(image_path)?;
+    let tensor = preprocess(&image);
+    print_tensor_summary("rust", tensor.values())?;
+    if let Some(golden_path) = golden_path {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(golden_path)?)?;
+        let values = value
+            .get("tensor")
+            .and_then(serde_json::Value::as_array)
+            .context("golden JSON has no tensor array")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_f64()
+                    .map(|value| value as f32)
+                    .context("golden tensor contains a non-number")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        print_tensor_summary("golden", &values)?;
+        anyhow::ensure!(
+            values.len() == tensor.values().len(),
+            "tensor lengths differ"
+        );
+        let (maximum, mismatches) = tensor.values().iter().zip(&values).fold(
+            (0.0_f32, 0_usize),
+            |(maximum, mismatches), (&found, &expected)| {
+                let difference = (found - expected).abs();
+                (
+                    maximum.max(difference),
+                    mismatches + usize::from(difference >= 1e-3),
+                )
+            },
+        );
+        println!("diff max_abs={maximum:.9} values_at_or_above_1e-3={mismatches}");
+    }
+    Ok(())
+}
+
+fn print_tensor_summary(label: &str, values: &[f32]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        values.len() == TENSOR_LEN,
+        "{label} tensor has wrong length"
+    );
+    println!("{label} shape [1, 3, {IMAGE_SIZE}, {IMAGE_SIZE}]");
+    let channel_len = IMAGE_SIZE * IMAGE_SIZE;
+    for channel in 0..3 {
+        let values = &values[channel * channel_len..(channel + 1) * channel_len];
+        let minimum = values.iter().copied().fold(f32::INFINITY, f32::min);
+        let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mean = values.iter().map(|&value| f64::from(value)).sum::<f64>() / values.len() as f64;
+        println!("{label} channel {channel}: min={minimum:.7} max={maximum:.7} mean={mean:.7}");
+    }
+    println!("{label} first 8: {:?}", &values[..8]);
+    Ok(())
 }
 
 fn ensure_models(paths: &AppPaths, manifest_url: &str) -> anyhow::Result<()> {
@@ -251,6 +323,26 @@ mod tests {
             Cmd::Models {
                 command: ModelsCommand::Ensure { manifest_url }
             } if manifest_url == "http://127.0.0.1/manifest.json"
+        ));
+    }
+
+    #[test]
+    fn debug_frame_cli_shape_is_stable() {
+        let cli = Cli::try_parse_from([
+            "crushctl",
+            "debug",
+            "frame",
+            "frame.png",
+            "--golden",
+            "frame.image.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Debug {
+                command: DebugCommand::Frame { image, golden }
+            } if image == Path::new("frame.png")
+                && golden.as_deref() == Some(Path::new("frame.image.json"))
         ));
     }
 }

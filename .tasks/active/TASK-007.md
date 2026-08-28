@@ -1,5 +1,5 @@
 # TASK-007: Embed preprocessing — golden first  ⛔ HARD STOP AFTER
-Agent: Cursor on the Mac. Branch: task/07-preprocess. Depends: 003, 006.
+Agent: Codex on the Mac. Branch: task/07-preprocess. Depends: 003, 006.
 
 ## Goal
 Rust produces the exact same `[1,3,224,224]` f32 tensor as `reference_embed.py`. This is the highest-risk task in the project. No ONNX session in this task.
@@ -17,11 +17,18 @@ Rust produces the exact same `[1,3,224,224]` f32 tensor as `reference_embed.py`.
 - `crushctl debug frame <png>` prints tensor shape, min/max/mean per channel, and first 8 values, plus the same from the golden if given.
 
 ## Acceptance
-- [ ] `cargo test -p crush-stage-embed preprocess_golden` passes at 1e-3 on all golden frames
-- [ ] `docs/preprocess.md` records the resize filter that matched and any JPEG decoder delta observed
+- [x] `cargo test -p crush-stage-embed preprocess_golden` passes at 1e-3 on all golden frames
+- [x] `docs/preprocess.md` records the resize filter that matched and any JPEG decoder delta observed
 
 ## Do not
 - Start Task 8. Touch ort. Loosen the tolerance.
 
 ## Human review
 **John runs the test himself on his Mac and posts the output before Task 8 is dispatched.**
+
+## Implementation note
+
+The committed lossless frames are `.frame.ppm`, as documented by the reference kit, rather than the
+task draft's `frame.png`; PNG and JPEG decoding have separate coverage. Catmull–Rom and Lanczos3 did
+not meet the fixed tolerance. The direct Pillow-compatible BICUBIC implementation produces
+`max_abs_diff=0` for all four 150,528-value goldens without adding ort.

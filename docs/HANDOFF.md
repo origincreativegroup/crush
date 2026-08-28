@@ -68,3 +68,10 @@
   five release assets, detected a deliberately corrupted vocabulary as `sha-mismatch`, repaired only
   that file, and left `doctor` green. The first successful ensure recorded the combined CLIP model
   identity, dimension 512, and preprocessing version 1 in `embedding_meta`.
+- TASK-006 passed Ubuntu CI run 33137930186 and PR #6 was squash-merged as `907cae5`.
+- TASK-007 is active on `task/07-preprocess`. All four lossless PPM fixture tensors match the Pillow
+  answer key exactly (`max_abs_diff=0`) at the required `1e-3` threshold. `image` crate Catmull–Rom
+  reached only 0.042660236 and Lanczos3 reached 0.10505438, so the production path implements
+  Pillow's scale-aware BICUBIC coefficient and 22-bit fixed-point two-pass behavior directly in Rust.
+  JPEG and PNG decode coverage passes. Do not start TASK-008 until John personally runs the golden
+  command on his Mac and posts its output.
