@@ -89,7 +89,7 @@ Utilitarian editor-tool feel. Dark UI, dense thumbnail grid, monospace timecodes
 
 ## 9. Data Model
 
-One SQLite file at `~/Library/Application Support/Crush/library.db`. Vectors are stored in SQLite too.
+One SQLite file at `~/Library/Application Support/dev.crush.app/library.db` (Tauri's `app_data_dir`). Vectors are stored in SQLite too.
 
 | Entity | Fields | Notes |
 |---|---|---|

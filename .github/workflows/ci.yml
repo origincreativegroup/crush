@@ -51,6 +51,10 @@ jobs:
           test "$(shasum -a 256 "$CRUSH_TEST_SIDECARS/ffmpeg" | cut -d ' ' -f 1)" = "73a2114706389cad8a87890bb77b0dbe2031647acf25d6dcf48baf32fae29d0d"
           test "$(shasum -a 256 "$CRUSH_TEST_SIDECARS/ffprobe" | cut -d ' ' -f 1)" = "da8681f30f30c6b344a2e40899b5c5669d0e501712c1867305a5027b3d6380d8"
           chmod +x "$CRUSH_TEST_SIDECARS/ffmpeg" "$CRUSH_TEST_SIDECARS/ffprobe"
+          mkdir -p sidecars
+          cp "$CRUSH_TEST_SIDECARS/ffmpeg" sidecars/ffmpeg-aarch64-apple-darwin
+          cp "$CRUSH_TEST_SIDECARS/ffprobe" sidecars/ffprobe-aarch64-apple-darwin
+      - run: cargo check -p crush-app
       - run: cargo test -p crush-stage-embed --test embedding_goldens clip_token_ids_match_all_text_goldens -- --nocapture
       - run: cargo test -p crush-stage-embed --test embedding_goldens cpu_image_and_text_embeddings_match_goldens -- --nocapture
       - run: cargo test -p crush-cli --test search_fixtures -- --nocapture

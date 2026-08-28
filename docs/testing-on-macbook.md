@@ -15,7 +15,7 @@ This is the primary test machine for the whole project. Fill in the header once.
 2. Rust: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` then restart the terminal.
 3. `brew install cmake` (whisper-rs builds whisper.cpp from source).
 4. Python for the answer key only: `cd reference && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt`.
-5. Clone the repo, `cargo build --workspace`, `cargo run -p crush-cli -- doctor`. You should see the doctor stub print your data dir under `~/Library/Application Support/Crush`.
+5. Clone the repo, `cargo build --workspace`, `cargo run -p crush-cli -- doctor`. You should see the doctor stub print your data dir under `~/Library/Application Support/dev.crush.app`.
 
 ## What gets tested here, and when
 

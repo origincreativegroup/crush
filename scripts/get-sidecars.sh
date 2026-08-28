@@ -44,9 +44,18 @@ verify_binary() {
   esac
 }
 
+install_tauri_aliases() {
+  for binary in ffmpeg ffprobe; do
+    alias_path="$DESTINATION_DIR/${binary}-aarch64-apple-darwin"
+    rm -f "$alias_path"
+    ln "$DESTINATION_DIR/$binary" "$alias_path"
+  done
+}
+
 if [ "$FORCE" -eq 0 ] \
   && verify_binary "$DESTINATION_DIR/ffmpeg" "$FFMPEG_SHA256" \
   && verify_binary "$DESTINATION_DIR/ffprobe" "$FFPROBE_SHA256"; then
+  install_tauri_aliases
   echo "FFmpeg ${VERSION} sidecars already match the pinned LGPL build"
   exit 0
 fi
@@ -105,4 +114,5 @@ fi
 mkdir -p "$DESTINATION_DIR"
 install -m 0755 "$SOURCE_DIR/ffmpeg" "$DESTINATION_DIR/ffmpeg"
 install -m 0755 "$SOURCE_DIR/ffprobe" "$DESTINATION_DIR/ffprobe"
+install_tauri_aliases
 echo "Installed verified FFmpeg ${VERSION} LGPL sidecars in $DESTINATION_DIR"
