@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use crush_core::{paths::AppPaths, telemetry, Config};
+use crush_stage_split::ffmpeg;
 
 #[derive(Parser)]
 #[command(
@@ -58,10 +59,27 @@ fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
     println!("Crush doctor");
     println!("  data dir      {}", paths.root.display());
     println!(
-        "  database      {} (unchecked — Task 2)",
-        paths.db().display()
+        "  database      {} ({})",
+        paths.db().display(),
+        if paths.db().exists() {
+            "present"
+        } else {
+            "not created yet"
+        }
     );
-    println!("  ffmpeg        unchecked — Task 4 (must resolve from bundle, not PATH)");
+    let resolved = ffmpeg::resolve()?;
+    let runner = ffmpeg::Runner::new(resolved, cfg.limits.threads, "doctor");
+    let version = runner.version()?.value;
+    println!(
+        "  ffmpeg        {} source={} path={}",
+        version,
+        runner.resolved().source,
+        runner.resolved().path.display()
+    );
+    println!(
+        "  ffprobe       path={}",
+        runner.resolved().ffprobe_path.display()
+    );
     println!("  models        unchecked — Task 6 (sha256 verified)");
     println!(
         "  embed provider requested={} active=unchecked — Task 8",

@@ -1,2 +1,3 @@
-//! stage-split — stub. Filled in by its blueprint task. See docs/project-blueprint.md §14.
-//! Contract rule: this crate reads from the store (or a file path) and writes to the store. Nothing else.
+//! Video splitting primitives. Stage orchestration lands in later blueprint tasks.
+
+pub mod ffmpeg;
