@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use crush_core::{paths::AppPaths, telemetry, Config};
-use crush_stage_split::ffmpeg;
+use crush_stage_split::{ffmpeg, scene};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -37,6 +38,17 @@ enum Cmd {
         #[arg(long)]
         failed: bool,
     },
+    /// Inspect raw intermediate values from one pipeline stage.
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DebugCommand {
+    /// Sample a video, write scores.csv, and print the per-frame scene scores.
+    Scenes { video: PathBuf },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -50,7 +62,44 @@ fn main() -> anyhow::Result<()> {
         Cmd::Ingest { .. } => anyhow::bail!("not implemented yet — Task 11"),
         Cmd::Search { .. } => anyhow::bail!("not implemented yet — Task 9"),
         Cmd::Jobs { .. } => anyhow::bail!("not implemented yet — Task 11"),
+        Cmd::Debug {
+            command: DebugCommand::Scenes { video },
+        } => debug_scenes(&cfg, &paths, &video),
     }
+}
+
+fn debug_scenes(cfg: &Config, paths: &AppPaths, video: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(video.is_file(), "video does not exist: {}", video.display());
+    let stem = video
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("video")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let debug_dir = paths.debug().join("scenes").join(stem);
+    let frame_dir = debug_dir.join("frames");
+    let runner = ffmpeg::Runner::new(ffmpeg::resolve()?, cfg.limits.threads, "debug-scenes")
+        .with_debug_dir(&debug_dir);
+    let duration_s = runner.probe(video)?.value.duration_s;
+    runner.sample_frames(video, f64::from(cfg.split.sample_fps), &frame_dir)?;
+    let mut frames = std::fs::read_dir(&frame_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    frames.retain(|path| path.extension().is_some_and(|extension| extension == "jpg"));
+    frames.sort();
+    let detection =
+        scene::detect_with_duration(&frames, cfg.split.sample_fps, duration_s, &cfg.split)?;
+    let csv = scene::scores_csv(&detection.scores);
+    scene::write_scores_csv(&debug_dir.join("scores.csv"), &detection.scores)?;
+    print!("{csv}");
+    Ok(())
 }
 
 /// Task 1 stub. Each line becomes a real check as its task lands.
@@ -91,4 +140,20 @@ fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
     );
     println!("  threads       {} (0 = cores-2)", cfg.limits.threads);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_scenes_cli_shape_is_stable() {
+        let cli = Cli::try_parse_from(["crushctl", "debug", "scenes", "clip.mp4"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Debug {
+                command: DebugCommand::Scenes { video }
+            } if video == Path::new("clip.mp4")
+        ));
+    }
 }
