@@ -9,3 +9,30 @@ Agent: Cursor on the Mac. Branch: task/12c-search. Depends: 012b. UX spec: docs/
 
 ## Human review
 **John uses it for ten minutes on real footage and writes every annoyance into docs/smoke.md before Task 13.**
+
+## Implementation record (2026-08-28, Claude, branch `task/12c-search`)
+
+Built on top of Codex's uncommitted 12b tree (snapshot of `crates/app` taken 2026-08-28 10:56);
+rebase onto the merged 12b before review.
+
+- Rust: `tauri` gains the `protocol-asset` feature; `assetProtocol` is enabled with an empty static
+  scope that grows at runtime — the thumbs dir and every previously indexed video at startup,
+  the folder in `add_folder`, and the source file in `shot_detail`. New `shot_at_index(video_id, idx)`
+  command backs Prev/Next. `dialog:allow-save` added for Export clip.
+- UI: `ui/search.js` + `ui/search.css` (new files; `index.html` gets the search view, the 520 px
+  slide-over, and two link tags). Search is the launch view once models are present; Cmd-F focuses
+  it from anywhere. Debounced (160 ms) in-place results, 4-column grid of fixed 16:9 boxes with
+  duration + 0–100 score badges, filename, one-line transcript snippet, hover play overlay.
+  ↑↓←→ move through results, Enter opens, Esc closes/clears. Detail: `<video>` via
+  `convertFileSrc`, seeks to `start_s`, pauses at `end_s`, `L` loops, Space play/pause, ←/→ prev/next
+  shot; `HH:MM:SS.ff` timecodes from the video fps; Copy path + timecodes (`/path/file.mov  HH:MM:SS.ff – HH:MM:SS.ff`);
+  Export clip via native save dialog (default `file_shot012.mov`) with a toast + Reveal; Reveal in Finder;
+  transcript segments with query words highlighted.
+- States: nothing indexed (link to Library), idle, no matches (broader-words hint), error.
+- Harness: `tests/ui-harness.html` mocks `search`, `shot_detail`, `shot_at_index`, `export_clip`,
+  `dialog.save`, `convertFileSrc`. A headless Chrome run (playwright-core driving Google Chrome)
+  passed 20 checks: launch focus, results, keyboard selection, timecode format, prev/next, highlight,
+  export toast, Esc behaviour, no-matches, Library/Cmd-F round trip, nothing-indexed.
+- `cargo fmt`, `cargo clippy -p crush-app --all-targets -D warnings`, and `cargo check` pass.
+
+Hard stop remains: John's ten minutes on real footage, annoyances into `docs/smoke.md`.

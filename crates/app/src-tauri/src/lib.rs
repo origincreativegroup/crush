@@ -260,6 +260,7 @@ mod macos {
         if !input.exists() {
             return Err(format!("input does not exist: {}", input.display()));
         }
+        allow_asset_path(&app, &input)?;
         let job_id = Uuid::new_v4().to_string();
         let cancellation = CancellationToken::default();
         {
@@ -480,7 +481,11 @@ mod macos {
     }
 
     #[tauri::command]
-    fn shot_detail(id: String, state: State<'_, RuntimeState>) -> CommandResult<ShotDetailView> {
+    fn shot_detail(
+        id: String,
+        app: AppHandle,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<ShotDetailView> {
         command_result((|| {
             let store = Store::open(&state.paths.root)?;
             let shot = store
@@ -489,6 +494,7 @@ mod macos {
             let video = store
                 .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
                 .with_context(|| format!("video {} was not found", shot.video_id))?;
+            allow_asset_path(&app, Path::new(&video.path)).map_err(anyhow::Error::msg)?;
             let shot_count = store
                 .shots_for_video(DEFAULT_OWNER_ID, &shot.video_id)?
                 .len();
@@ -523,6 +529,34 @@ mod macos {
                 transcripts,
             })
         })())
+    }
+
+    #[tauri::command]
+    fn shot_at_index(
+        video_id: String,
+        idx: i64,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Option<String>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .shots_for_video(DEFAULT_OWNER_ID, &video_id)?
+                .into_iter()
+                .find(|shot| shot.idx == idx)
+                .map(|shot| shot.id))
+        })())
+    }
+
+    /// Lets the webview load a footage file or folder through Tauri's `asset:` protocol.
+    /// The scope starts empty and only ever grows with paths the user added or is viewing.
+    fn allow_asset_path(app: &AppHandle, path: &Path) -> CommandResult<()> {
+        let scope = app.asset_protocol_scope();
+        let result = if path.is_dir() {
+            scope.allow_directory(path, true)
+        } else {
+            scope.allow_file(path)
+        };
+        result.map_err(|error| format!("could not expose {} to the app: {error}", path.display()))
     }
 
     #[tauri::command]
@@ -698,7 +732,15 @@ mod macos {
                 let mut config = Config::load(None)?;
                 config.data_dir = Some(data_dir.clone());
                 let paths = AppPaths::resolve(config.data_dir.as_ref())?;
-                Store::open(&paths.root)?.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
+                let store = Store::open(&paths.root)?;
+                store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
+                let scope = app.asset_protocol_scope();
+                scope.allow_directory(paths.thumbs(), true)?;
+                for video in store.videos(DEFAULT_OWNER_ID)? {
+                    if let Err(error) = scope.allow_file(&video.path) {
+                        eprintln!("could not expose {} to the webview: {error}", video.path);
+                    }
+                }
                 app.manage(RuntimeState {
                     config,
                     paths,
@@ -719,6 +761,7 @@ mod macos {
                 reindex_video,
                 search,
                 shot_detail,
+                shot_at_index,
                 export_clip,
                 open_in_finder
             ])

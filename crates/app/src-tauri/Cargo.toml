@@ -25,7 +25,7 @@ crush-pipeline = { path = "../../pipeline" }
 crush-search = { path = "../../search" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-tauri = { version = "=2.11.3", features = [] }
+tauri = { version = "=2.11.3", features = ["protocol-asset"] }
 tauri-plugin-clipboard-manager = "=2.3.2"
 tauri-plugin-dialog = "=2.7.2"
 
