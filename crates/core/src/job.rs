@@ -29,6 +29,7 @@ pub struct JobRecord {
     pub status: JobStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub duration_ms: Option<i64>,
     pub error: Option<String>,
     pub debug_dir: Option<String>,
 }

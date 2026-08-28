@@ -8,3 +8,5 @@ license.workspace = true
 crush-core = { path = "../core" }
 anyhow.workspace = true
 tracing.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true

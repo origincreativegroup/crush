@@ -36,5 +36,8 @@
   CLIP inference, and Whisper Metal inference on 10 seconds of audio in 79.04 ms. The clean CoreML
   session compile took 201.11 seconds; see `docs/versions.md` for the caching requirement and full
   provenance.
-- John approved GO for TASK-000 on 2026-08-27. Merge its PR, then begin TASK-002 on an isolated
-  task branch.
+- John approved GO for TASK-000 on 2026-08-27; PR #1 was squash-merged as `fc50fb8`.
+- TASK-002 is complete on `task/02-store`: bundled SQLite 0.40.2, transactional schema v1,
+  owner-safe typed APIs, synchronized transcript FTS, exact little-endian vectors, jobs, cascading
+  deletion, and deep integrity checks. Six store acceptance tests pass; the 1000×512 vector load
+  measured 14.845 ms. Merge its PR before activating TASK-003.
