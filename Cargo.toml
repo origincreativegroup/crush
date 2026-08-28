@@ -9,6 +9,7 @@ members = [
   "crates/pipeline",
   "crates/search",
   "crates/cli",
+  "crates/app/src-tauri",
 ]
 exclude = ["spike"]
 # spike/ is intentionally NOT a workspace member. It is throwaway (Task 0).
@@ -44,6 +45,6 @@ whisper-rs = "=0.16.0"
 blake3 = "1.8"
 ctrlc = "3.4"
 # Pinned later by its implementation task:
-#   tauri
+#   tauri (pinned in the macOS-only app crate)
 # Blacklisted (dead or wrong for this project):
 #   onnxruntime-rs, ffmpeg-next, tch

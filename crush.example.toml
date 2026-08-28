@@ -1,5 +1,5 @@
 # Copy to crush.toml. All keys optional; these are the defaults.
-# data_dir = "/Users/you/Library/Application Support/Crush"
+# data_dir = "/Users/you/Library/Application Support/dev.crush.app"
 
 [split]
 sample_fps = 4.0

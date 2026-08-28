@@ -3,6 +3,8 @@
 /models/
 /sidecars/ffmpeg
 /sidecars/ffprobe
+/sidecars/ffmpeg-aarch64-apple-darwin
+/sidecars/ffprobe-aarch64-apple-darwin
 /debug/
 crush.toml
 *.log

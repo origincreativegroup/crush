@@ -1,0 +1,5 @@
+[env]
+# Tauri defaults its Cargo invocation to macOS 10.13, but whisper.cpp uses C++ filesystem APIs
+# introduced in 10.15. Keep dependency build scripts and the final bundle on the same floor.
+MACOSX_DEPLOYMENT_TARGET = { value = "10.15", force = true }
+CMAKE_OSX_DEPLOYMENT_TARGET = { value = "10.15", force = true }

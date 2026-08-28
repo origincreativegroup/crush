@@ -1,0 +1,12 @@
+{
+  "bundle": {
+    "externalBin": [
+      "../../../sidecars/ffmpeg",
+      "../../../sidecars/ffprobe"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
+    }
+  }
+}

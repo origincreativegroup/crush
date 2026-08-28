@@ -8,6 +8,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use std::os::unix::process::CommandExt;
 
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+static BUNDLE_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,8 +107,34 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Register Tauri's bundle resource directory before resolving production sidecars.
+pub fn register_bundle_resource_dir(directory: PathBuf) -> Result<()> {
+    if let Some(current) = BUNDLE_RESOURCE_DIR.get() {
+        if current == &directory {
+            return Ok(());
+        }
+        return Err(Error::InvalidArgument(format!(
+            "bundle resource directory is already registered as {}",
+            current.display()
+        )));
+    }
+    let _ = BUNDLE_RESOURCE_DIR.set(directory);
+    Ok(())
+}
+
 /// Resolve an FFmpeg/FFprobe pair in production-safe order.
 pub fn resolve() -> Result<Resolved> {
+    if let Some(resource_dir) = BUNDLE_RESOURCE_DIR.get() {
+        let macos_dir = resource_dir.parent().map(|contents| contents.join("MacOS"));
+        for directory in [Some(resource_dir.as_path()), macos_dir.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(resolved) = resolve_pair(directory, Source::Bundled) {
+                return Ok(resolved);
+            }
+        }
+    }
     let executable_dir = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
@@ -1013,6 +1041,21 @@ mod tests {
             resolve_with(Some(&bundle), Some(&development), Some(&path_value), true).unwrap();
         assert_eq!(resolved.source, Source::Path);
         assert!(resolve_with(None, None, Some(&path_value), false).is_err());
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn resolver_accepts_tauri_target_triple_sidecar_names() {
+        let temporary = tempfile::tempdir().unwrap();
+        executable(&temporary.path().join("ffmpeg-aarch64-apple-darwin"));
+        executable(&temporary.path().join("ffprobe-aarch64-apple-darwin"));
+
+        let resolved = resolve_pair(temporary.path(), Source::Bundled).unwrap();
+        assert_eq!(resolved.source, Source::Bundled);
+        assert!(resolved.path.ends_with("ffmpeg-aarch64-apple-darwin"));
+        assert!(resolved
+            .ffprobe_path
+            .ends_with("ffprobe-aarch64-apple-darwin"));
     }
 
     #[test]
