@@ -199,6 +199,11 @@ def generate(output_dir: Path) -> None:
 
         shutil.copyfile(MODEL_MANIFEST, staging / "manifest.json")
         write_json(staging / "fixtures-manifest.json", fixture_manifest)
+        # Search expectations are human-reviewed after the first Rust fixture run. Preserve that
+        # approved contract when regenerating model-derived goldens; never synthesize or overwrite it.
+        expected_search = output_dir / "expected_search.json"
+        if expected_search.is_file():
+            shutil.copyfile(expected_search, staging / expected_search.name)
 
         output_dir.mkdir(parents=True, exist_ok=True)
         staged_names = {path.name for path in staging.iterdir()}

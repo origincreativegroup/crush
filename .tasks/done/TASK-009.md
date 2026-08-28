@@ -1,5 +1,5 @@
 # TASK-009: Search + hybrid ranking
-Agent: Codex. Branch: task/09-search. Depends: 008 merged (for text embedding) â€” write against a trait so the search crate compiles without ort. Status: active.
+Agent: Codex. Branch: task/09-search. Depends: 008 merged (for text embedding) â€” write against a trait so the search crate compiles without ort. Status: done.
 
 ## Goal
 `crush-search`: text query â†’ ranked shots. In-process, no server.
@@ -14,7 +14,7 @@ Agent: Codex. Branch: task/09-search. Depends: 008 merged (for text embedding) â
 
 ## Acceptance
 - [x] Unit: 10k random unit vectors, top-1 equals brute-force argmax; runtime < 30 ms
-- [ ] Fixture integration (needs 008): the 5 canned queries from reference/Makefile each return the expected shot in top 3 (expected shot ids listed in `fixtures/golden/expected_search.json`, filled by John after first run)
+- [x] Fixture integration (needs 008): the 5 canned queries from reference/Makefile each return the expected shot in top 3 (expected shot ids listed in `fixtures/golden/expected_search.json`, filled by John after first run)
 - [x] Hybrid: a query word present only in a transcript lifts that shot above an otherwise-equal one
 
 ## Do not
@@ -22,6 +22,11 @@ Agent: Codex. Branch: task/09-search. Depends: 008 merged (for text embedding) â
 
 ## Human review
 Try three of your own queries on fixtures.
+
+Completed on 2026-08-28. John approved all five canonical representatives. Three additional queries
+(`a glowing rocket plume at night`, `a crescent planet behind a spacecraft`, and
+`rainbow broadcast color bars`) returned the matching rocket, planet, and test-pattern shots at
+rank 1.
 
 ## Implementation record
 
@@ -34,4 +39,7 @@ Try three of your own queries on fixtures.
 - Search refuses stale embedding metadata, hydrates paths/timecodes/thumbnails from SQLite, limits
   Unicode transcript snippets to 200 characters, and supports table or JSON CLI output.
 - The first full CPU fixture run produced semantically correct top-ranked candidates for all five
-  canned queries. `expected_search.json` remains intentionally absent until John approves them.
+  canned queries. John approved those five representatives on 2026-08-28; they are enforced by
+  `fixtures/golden/expected_search.json`.
+- The pinned arm64 Task 4 sidecars are published as `sidecars-v1`; macOS CI downloads, verifies, and
+  caches their recorded hashes before running the complete fixture split/embed/search gate.

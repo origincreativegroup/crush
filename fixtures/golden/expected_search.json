@@ -1,0 +1,24 @@
+{
+  "queries": [
+    {
+      "expected_shot_id": "rocket-launch-shot-000004",
+      "query": "a rocket launching into the sky"
+    },
+    {
+      "expected_shot_id": "goodnight-earth-vertical-shot-000000",
+      "query": "the Earth seen from space"
+    },
+    {
+      "expected_shot_id": "goodnight-earth-vertical-shot-000003",
+      "query": "the Moon's cratered surface"
+    },
+    {
+      "expected_shot_id": "synthetic-speech-shot-000000",
+      "query": "a colorful television test pattern"
+    },
+    {
+      "expected_shot_id": "rocket-launch-shot-000006",
+      "query": "bright engine flames"
+    }
+  ]
+}

@@ -122,9 +122,7 @@ fn five_fixture_queries_report_expected_shot_in_top_three() {
     let engine =
         SearchEngine::load(&store, DEFAULT_OWNER_ID, config.search.transcript_hit_boost).unwrap();
     let expectations_path = root.join("fixtures/golden/expected_search.json");
-    let expectations = expectations_path
-        .is_file()
-        .then(|| read_json::<serde_json::Value>(&expectations_path));
+    let expectations: serde_json::Value = read_json(&expectations_path);
     let queries = fixture_manifest["queries"].as_array().unwrap();
     for query in queries {
         let query = query.as_str().unwrap();
@@ -138,24 +136,35 @@ fn five_fixture_queries_report_expected_shot_in_top_three() {
                 result.shot_id, result.score, result.cosine
             );
         }
-        if let Some(expectations) = &expectations {
-            let expected = expectations["queries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|value| value["query"].as_str() == Some(query))
-                .and_then(|value| value["expected_shot_id"].as_str())
-                .unwrap_or_else(|| panic!("expected_search.json has no entry for {query:?}"));
-            assert!(
-                results.iter().any(|result| result.shot_id == expected),
-                "expected {expected} in the top three for {query:?}"
-            );
-        }
-    }
-    if expectations.is_none() {
-        eprintln!(
-            "candidate rankings only: fixtures/golden/expected_search.json awaits human review"
+        let expected = expectations["queries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["query"].as_str() == Some(query))
+            .and_then(|value| value["expected_shot_id"].as_str())
+            .unwrap_or_else(|| panic!("expected_search.json has no entry for {query:?}"));
+        assert!(
+            results.iter().any(|result| result.shot_id == expected),
+            "expected {expected} in the top three for {query:?}"
         );
+    }
+
+    if let Ok(review_queries) = std::env::var("CRUSH_REVIEW_QUERIES") {
+        for query in review_queries
+            .split('|')
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+        {
+            let mut text_embedder = |text: &str| embedder.embed_text(text);
+            let results = engine.search(&store, &mut text_embedder, query, 3).unwrap();
+            eprintln!("review query={query:?}");
+            for result in results {
+                eprintln!(
+                    "  shot={} score={:.9} cosine={:.9}",
+                    result.shot_id, result.score, result.cosine
+                );
+            }
+        }
     }
 }
 
