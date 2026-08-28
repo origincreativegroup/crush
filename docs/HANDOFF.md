@@ -23,7 +23,7 @@
 
 **Branch:** `task/NN-short-name`. One task per PR.
 
-## Current implementation state (2026-08-27)
+## Current implementation state (2026-08-28)
 
 - TASK-001 is complete: workspace build, all tests, Clippy with warnings denied, and rustfmt pass
   locally on macOS and in GitHub Actions/Linux CI run 33123337534.
@@ -75,3 +75,13 @@
   Pillow's scale-aware BICUBIC coefficient and 22-bit fixed-point two-pass behavior directly in Rust.
   JPEG and PNG decode coverage passes. John ran the required command twice on his Mac on 2026-08-27;
   both runs passed two tests with every fixture reporting `max_abs_diff=0`, satisfying the hard stop.
+- TASK-008 is complete on `task/08-embed`; PR #8 passed Linux and macOS CI runs 33168746223 and
+  33168749709. The human doctor gate also passed on the Mac. The
+  exact OpenCLIP BPE port matches all five token goldens; CPU and CoreML both return cosine
+  `1.000000000` for all four image and five text fixtures. Runtime provider evidence comes from an
+  ONNX Runtime profile after real inference. Doctor reports `active=coreml providers=cpu,coreml` and
+  5.29 ms/frame over 20 frames (CPU: 9.38 ms/frame). Clean keyed CoreML image+text initialization
+  measured 132.23 s. Derived ONNX copies append the official `COREML_CACHE_KEY` metadata using each
+  pinned SHA, so CLI and test processes reuse the same two cache entries without changing releases.
+  The missing-vector stage is resumable at batch one, and `crushctl debug vector` prints norm, first
+  eight values, and verified provider.
