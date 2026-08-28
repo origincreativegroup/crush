@@ -4,11 +4,11 @@ This is the primary test machine for the whole project. Fill in the header once.
 
 | | |
 |---|---|
-| Chip | _e.g. M2 Pro_ |
-| RAM | _GB_ |
-| macOS | _version_ |
-| Xcode CLT | `xcode-select -p` |
-| Rust | `rustc --version` |
+| Chip | Apple M4 Pro |
+| RAM | 24 GB |
+| macOS | 26.5.2 |
+| Xcode CLT | `/Library/Developer/CommandLineTools` |
+| Rust | `rustc 1.98.0 (88d9e12ae 2026-08-18)` |
 
 ## One-time setup (~20 min)
 1. `xcode-select --install`

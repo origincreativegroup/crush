@@ -41,8 +41,13 @@
   owner-safe typed APIs, synchronized transcript FTS, exact little-endian vectors, jobs, cascading
   deletion, and deep integrity checks. Six store acceptance tests pass; the 1000×512 vector load
   measured 14.845 ms.
-- TASK-003 is complete on `task/03-reference`. Four license-safe fixtures total 5.15 MiB. The pinned
+- TASK-003 was approved and squash-merged as `1c2750f`. Four license-safe fixtures total 5.15 MiB. The pinned
   Python 3.12 answer key exports the OpenAI CLIP ViT-B/32 QuickGELU encoders at opset 17 and produces
   scenes, transcripts, image tensors/embeddings, and text tokens/embeddings. Two full golden runs are
   byte-identical and `make -C reference check` passes. John approved the rocket-launch scene-boundary
-  review on 2026-08-27; PR #3 is ready to merge.
+  review on 2026-08-27.
+- TASK-004 is complete on `task/04-ffmpeg`. The mandatory LGPL build cannot use the task draft's GPL
+  `libx264` fallback, so clip re-encoding uses `h264_videotoolbox` plus native AAC instead. The
+  resolver, five operations, progress, process-group cancellation, debug command capture, exact
+  source rebuild, Mac fixture tests, and release-layout `source=bundled` doctor check pass locally.
+  Open the task PR and require Linux CI before merge.
