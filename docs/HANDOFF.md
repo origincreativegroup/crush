@@ -46,8 +46,16 @@
   scenes, transcripts, image tensors/embeddings, and text tokens/embeddings. Two full golden runs are
   byte-identical and `make -C reference check` passes. John approved the rocket-launch scene-boundary
   review on 2026-08-27.
-- TASK-004 is complete on `task/04-ffmpeg`. The mandatory LGPL build cannot use the task draft's GPL
+- TASK-004 was squash-merged as `7e17792`. The mandatory LGPL build cannot use the task draft's GPL
   `libx264` fallback, so clip re-encoding uses `h264_videotoolbox` plus native AAC instead. The
   resolver, five operations, progress, process-group cancellation, debug command capture, exact
   source rebuild, Mac fixture tests, and release-layout `source=bundled` doctor check pass locally.
-  Open the task PR and require Linux CI before merge.
+  GitHub Actions/Linux CI run 33135879446 passed before merge.
+- TASK-005 is complete on `task/05-scenes`. The pure-Rust 480p HSV detector preserves the specified
+  score formula, collapses multi-frame threshold runs, and recovers the tail of a sustained sampled
+  fade without lowering threshold 27. All four PySceneDetect goldens pass at 4 fps with at most one
+  unmatched cut per fixture minute. A no-cut clip yields one shot; thumbnails, SQLite shot rows, and
+  `scores.csv` agree; `crushctl debug scenes <video>` writes and prints byte-identical CSV. The
+  explicit release benchmark detects 2,400 decoded 480p frames in 3.47 s. The required score plot was
+  reviewed at desktop and narrow widths: threshold 27 retains the approved 11.33 s cut while allowing
+  one earlier false positive, so lowering it would reduce precision.

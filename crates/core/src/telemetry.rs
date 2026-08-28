@@ -11,7 +11,7 @@ pub fn init(log_dir: &Path) -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_env("CRUSH_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_target(false))
+        .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
         .with(fmt::layer().json().with_writer(file))
         .init();
     Ok(())
