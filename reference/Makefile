@@ -1,13 +1,19 @@
-# Regenerates fixtures/golden/. Run inside reference/.venv on the Mac.
-CLIPS := $(wildcard ../fixtures/clips/*.mp4 ../fixtures/clips/*.mov)
-QUERIES := "a person talking to camera" "wide shot of a building" "close up of hands" "car driving on a road" "text on screen"
+PYTHON := .venv/bin/python
+
+.PHONY: setup models golden check
+
+setup:
+	/opt/homebrew/bin/python3.12 -m venv .venv
+	$(PYTHON) -m pip install --upgrade pip
+	$(PYTHON) -m pip install -r requirements.lock.txt
+
+models:
+	$(PYTHON) export_clip_onnx.py
 
 golden:
-	mkdir -p ../fixtures/golden
-	@for c in $(CLIPS); do n=$$(basename $$c | cut -d. -f1); \
-	  python reference_scenes.py $$c > ../fixtures/golden/$$n.scenes.json; \
-	  python reference_transcribe.py $$c > ../fixtures/golden/$$n.transcript.json; \
-	  ffmpeg -y -loglevel error -ss 1.0 -i $$c -frames:v 1 ../fixtures/golden/$$n.frame.png; \
-	  python reference_embed.py image ../fixtures/golden/$$n.frame.png --dump-tensor > ../fixtures/golden/$$n.image.json; done
-	@i=0; for q in $(QUERIES); do i=$$((i+1)); python reference_embed.py text "$$q" > ../fixtures/golden/text$$i.json; done
+	$(PYTHON) generate_goldens.py
 	@echo "golden regenerated — commit with a message saying WHY"
+
+check:
+	$(PYTHON) -m compileall -q *.py
+	$(PYTHON) verify_goldens.py
