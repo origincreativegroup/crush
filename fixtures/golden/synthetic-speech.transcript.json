@@ -1,0 +1,1 @@
+{"clip":"fixtures/clips/synthetic-speech.mp4","language":"en","model":"small","segments":[{"end_s":4.08,"start_s":0.0,"text":"A camera follows a small red boat across the quiet blue water."},{"end_s":6.72,"start_s":4.08,"text":"The lighthouse is visible beyond the rocky shore."}]}

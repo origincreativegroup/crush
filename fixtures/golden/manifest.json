@@ -1,0 +1,46 @@
+{
+  "dim": 512,
+  "files": {
+    "bpe_simple_vocab_16e6.txt.gz": {
+      "bytes": 1356917,
+      "sha256": "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a"
+    },
+    "clip-image.onnx": {
+      "bytes": 351605911,
+      "sha256": "9a4c3b87ec5c78e3951b6e7e041981e55468efe8978ec5411b00510ae8726d01"
+    },
+    "clip-text.onnx": {
+      "bytes": 254186563,
+      "sha256": "cab3f1bb08bcb3a46e033c69b43015ba49c1308a3b7ff24bce61e08a41e476d8"
+    }
+  },
+  "model_name": "clip-vit-b-32-quickgelu-openai",
+  "opset": 17,
+  "preprocess": {
+    "center_crop": 224,
+    "interpolation": "bicubic",
+    "mean": [
+      0.48145466,
+      0.4578275,
+      0.40821073
+    ],
+    "resize_shorter": 224,
+    "std": [
+      0.26862954,
+      0.26130258,
+      0.27577711
+    ]
+  },
+  "preprocess_version": 1,
+  "toolchain": {
+    "numpy": "2.5.2",
+    "onnx": "1.22.0",
+    "onnxruntime": "1.29.0",
+    "open_clip_torch": "3.3.0",
+    "torch": "2.13.0"
+  },
+  "verification": {
+    "image_max_abs_error": 6.034970283508301e-07,
+    "text_max_abs_error": 1.7881393432617188e-07
+  }
+}

@@ -37,7 +37,11 @@
   session compile took 201.11 seconds; see `docs/versions.md` for the caching requirement and full
   provenance.
 - John approved GO for TASK-000 on 2026-08-27; PR #1 was squash-merged as `fc50fb8`.
-- TASK-002 is complete on `task/02-store`: bundled SQLite 0.40.2, transactional schema v1,
+- TASK-002 is complete and was squash-merged as `58ac826`: bundled SQLite 0.40.2, transactional schema v1,
   owner-safe typed APIs, synchronized transcript FTS, exact little-endian vectors, jobs, cascading
   deletion, and deep integrity checks. Six store acceptance tests pass; the 1000×512 vector load
-  measured 14.845 ms. Merge its PR before activating TASK-003.
+  measured 14.845 ms.
+- TASK-003 is active on `task/03-reference`. Four license-safe fixtures total 5.15 MiB. The pinned
+  Python 3.12 answer key exports the OpenAI CLIP ViT-B/32 QuickGELU encoders at opset 17 and produces
+  scenes, transcripts, image tensors/embeddings, and text tokens/embeddings. Two full golden runs are
+  byte-identical and `make -C reference check` passes. Human scene-boundary review remains.

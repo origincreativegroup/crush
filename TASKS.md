@@ -5,7 +5,7 @@
 | TASK-000 | Feasibility spike (CoreML / Metal / ffmpeg sidecar) | Codex (Mac) | done — human GO received 2026-08-27 |
 | TASK-001 | Workspace, config, tracing, job log, repo hygiene | Codex | done — macOS local gates + Linux CI green |
 | TASK-002 | SQLite store + migrations | Codex | done — typed API, FTS, vectors, jobs, integrity checks |
-| TASK-003 | Reference kit + fixtures | Codex + John (clips) | backlog (after 001) |
+| TASK-003 | Reference kit + fixtures | Codex + John (review) | active — deterministic goldens pass; awaiting scene review |
 | TASK-004 | Bundled ffmpeg + wrapper | Cursor (Mac) | backlog (after 001) |
 | TASK-005 | Scene detector | Codex | backlog (after 004) |
 | TASK-006 | CLIP ONNX export + model downloader | Cursor (Mac) | backlog (after 003) |
