@@ -17,4 +17,4 @@
 | TASK-012a | Tauri shell + commands | Codex (Mac) | done — signed `.app`, bundled sidecars, command bridge verified |
 | TASK-012b | First-run + Library screens | Cursor (Mac) | backlog |
 | TASK-012c | Search + Shot detail screens | Cursor (Mac) | backlog — **hard stop after** |
-| TASK-013 | Build, sign, smoke, clean-machine test | Cursor (Mac) | backlog |
+| TASK-013 | Build, sign, smoke, clean-machine test | Claude (Mac) | in review — release workflow, install doc, smoke template on `task/13-release`; tagged build + fresh-account test pending John |

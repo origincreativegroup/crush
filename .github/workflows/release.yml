@@ -1,0 +1,139 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    env:
+      CRUSH_SIDECARS: ${{ github.workspace }}/sidecars
+      # tauri-bundler skips the Finder AppleScript step in bundle_dmg.sh when CI=true;
+      # without it DMG creation hangs on a headless runner (tauri#592).
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: crush-release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: crush-release-${{ runner.os }}-
+
+      - name: Cache tauri-cli
+        id: tauri-cli-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-2.11.4-${{ runner.os }}-${{ runner.arch }}
+      - name: Install tauri-cli
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version 2.11.4 --locked
+
+      - name: Download and verify pinned FFmpeg sidecars
+        run: |
+          mkdir -p "$CRUSH_SIDECARS"
+          curl --fail --location --retry 4 --output "$CRUSH_SIDECARS/ffmpeg" https://github.com/origincreativegroup/crush/releases/download/sidecars-v1/ffmpeg
+          curl --fail --location --retry 4 --output "$CRUSH_SIDECARS/ffprobe" https://github.com/origincreativegroup/crush/releases/download/sidecars-v1/ffprobe
+          test "$(shasum -a 256 "$CRUSH_SIDECARS/ffmpeg" | cut -d ' ' -f 1)" = "73a2114706389cad8a87890bb77b0dbe2031647acf25d6dcf48baf32fae29d0d"
+          test "$(shasum -a 256 "$CRUSH_SIDECARS/ffprobe" | cut -d ' ' -f 1)" = "da8681f30f30c6b344a2e40899b5c5669d0e501712c1867305a5027b3d6380d8"
+          chmod +x "$CRUSH_SIDECARS/ffmpeg" "$CRUSH_SIDECARS/ffprobe"
+          cp "$CRUSH_SIDECARS/ffmpeg" "$CRUSH_SIDECARS/ffmpeg-aarch64-apple-darwin"
+          cp "$CRUSH_SIDECARS/ffprobe" "$CRUSH_SIDECARS/ffprobe-aarch64-apple-darwin"
+
+      - name: Decide signing mode
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ] \
+             && [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "mode=signed" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=unsigned" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Signed + notarized. The repo config pins signingIdentity "-" (ad-hoc) for local builds;
+      # tauri-bundler refuses APPLE_CERTIFICATE when that identity does not match, so the key is
+      # removed here (JSON merge-patch null) and the identity comes from the imported certificate.
+      # Notarization runs automatically inside `tauri build` when APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID are set.
+      - name: Build signed and notarized DMG
+        if: steps.signing.outputs.mode == 'signed'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cargo tauri build --bundles dmg --ci \
+            --config '{"bundle":{"macOS":{"signingIdentity":null}}}'
+
+      - name: Build unsigned DMG
+        if: steps.signing.outputs.mode == 'unsigned'
+        run: cargo tauri build --bundles dmg --ci
+
+      - name: Collect artifacts
+        id: artifacts
+        run: |
+          set -eu
+          DMG=$(ls target/release/bundle/dmg/*.dmg | head -n 1)
+          test -f "$DMG"
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUT="Crush-${VERSION}-aarch64.dmg"
+          cp "$DMG" "$OUT"
+          shasum -a 256 "$OUT" > "$OUT.sha256"
+          echo "dmg=$OUT" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.signing.outputs.mode }}" = "signed" ]; then
+            codesign --verify --deep --strict --verbose=2 target/release/bundle/macos/Crush.app
+            spctl --assess --type execute --verbose=2 target/release/bundle/macos/Crush.app || true
+          fi
+
+      - name: Job summary
+        run: |
+          {
+            echo "## Crush ${GITHUB_REF_NAME}"
+            echo
+            if [ "${{ steps.signing.outputs.mode }}" = "signed" ]; then
+              echo "✅ **Signed with Developer ID and notarized.** Users can open it normally."
+            else
+              echo "⚠️ **UNSIGNED build.** Apple signing secrets (\`APPLE_CERTIFICATE\`, \`APPLE_CERTIFICATE_PASSWORD\`, \`APPLE_ID\`, \`APPLE_PASSWORD\`, \`APPLE_TEAM_ID\`) were not all present, so the app is ad-hoc signed only."
+              echo "Users must right-click → Open on first launch (see docs/install.md). Do not ship this to people you have not talked to."
+            fi
+            echo
+            echo '```'
+            cat "${{ steps.artifacts.outputs.dmg }}.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crush-dmg
+          path: |
+            ${{ steps.artifacts.outputs.dmg }}
+            ${{ steps.artifacts.outputs.dmg }}.sha256
+          if-no-files-found: error
+
+      - name: Upload DMG to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTE="Signing: ${{ steps.signing.outputs.mode }}. See docs/install.md."
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "Crush $GITHUB_REF_NAME" --notes "$NOTE" --draft
+          gh release upload "$GITHUB_REF_NAME" \
+            "${{ steps.artifacts.outputs.dmg }}" "${{ steps.artifacts.outputs.dmg }}.sha256" --clobber
