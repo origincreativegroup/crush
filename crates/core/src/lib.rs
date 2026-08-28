@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod job;
+pub mod models;
 pub mod paths;
 pub mod telemetry;
 

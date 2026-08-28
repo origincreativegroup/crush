@@ -8,7 +8,7 @@
 | TASK-003 | Reference kit + fixtures | Codex + John (review) | done — deterministic goldens and scene review approved |
 | TASK-004 | Bundled ffmpeg + wrapper | Codex (Mac) | done — PR #4 squash-merged as `7e17792` |
 | TASK-005 | Scene detector | Codex | done — four goldens, store/CSV parity, and 3.47 s CPU acceptance pass |
-| TASK-006 | CLIP ONNX export + model downloader | Cursor (Mac) | backlog (after 003) |
+| TASK-006 | CLIP ONNX export + model downloader | Codex (Mac) | done — `models-v1` release and live resume/corruption acceptance pass |
 | TASK-007 | Embed preprocessing golden | Cursor (Mac) | backlog — **hard stop after** |
 | TASK-008 | Embed with ort (CoreML + CPU) | Cursor (Mac) | backlog |
 | TASK-009 | Search + hybrid ranking | Codex | backlog (after 008) |

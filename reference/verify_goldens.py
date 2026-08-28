@@ -34,8 +34,27 @@ def main() -> None:
         raise RuntimeError(f"expected 3–5 fixture clips, found {len(clips)}")
 
     copied_manifest = golden / "manifest.json"
-    if copied_manifest.read_bytes() != MODEL_MANIFEST.read_bytes():
-        raise RuntimeError("fixtures/golden/manifest.json is not an exact model manifest copy")
+    golden_model_manifest = load_json(copied_manifest)
+    release_manifest = load_json(MODEL_MANIFEST)
+    stable_fields = (
+        "dim",
+        "model_name",
+        "opset",
+        "preprocess",
+        "preprocess_version",
+        "toolchain",
+    )
+    if any(
+        golden_model_manifest.get(field) != release_manifest.get(field)
+        for field in stable_fields
+    ):
+        raise RuntimeError("golden and release manifests differ on the CLIP contract")
+    golden_files = golden_model_manifest.get("files", {})
+    if any(
+        release_manifest.get("files", {}).get(name) != metadata
+        for name, metadata in golden_files.items()
+    ):
+        raise RuntimeError("golden and release manifests differ on CLIP asset hashes")
     fixture_manifest = load_json(golden / "fixtures-manifest.json")
     if fixture_manifest.get("queries") != QUERIES:
         raise RuntimeError("fixture manifest queries differ from the generator")

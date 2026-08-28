@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 crush-core = { path = "../core" }
 crush-stage-split = { path = "../stage-split" }
+crush-store = { path = "../store" }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

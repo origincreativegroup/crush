@@ -3,8 +3,9 @@
 This is not product code. It defines the outputs that the Rust stages must match.
 
 - `export_clip_onnx.py` exports the pinned OpenAI CLIP ViT-B/32 QuickGELU image and text encoders
-  with fixed shapes and opset 17, validates them, checks ONNX Runtime parity, copies the BPE data,
-  and writes a hashed manifest.
+  with fixed shapes and opset 17, validates them against a real fixture, checks the CPU and CoreML
+  ONNX Runtime providers, copies the BPE data, and writes a hashed release manifest that also lists
+  the pinned Whisper assets.
 - `reference_embed.py` implements the exact image contract: resize the shorter side to 224 with
   bicubic interpolation, center-crop to 224×224, convert to RGB, divide by 255, apply CLIP mean/std,
   then produce CHW float32. It also produces 77-token text inputs and normalized 512-D embeddings.
@@ -12,7 +13,7 @@ This is not product code. It defines the outputs that the Rust stages must match
 - `reference_transcribe.py` runs pinned faster-whisper `small` on CPU with deterministic settings.
 - `generate_goldens.py` regenerates every committed artifact atomically.
 - `verify_goldens.py` checks the complete file set, fixture hashes/durations, tensor/token dimensions,
-  embedding dimensions/norms, queries, and the copied model manifest.
+  embedding dimensions/norms, queries, and the stable CLIP contract within the release manifest.
 
 ## Setup and regeneration
 

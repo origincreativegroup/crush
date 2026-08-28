@@ -1,0 +1,85 @@
+{
+  "dim": 512,
+  "embedding_sha256": "c29c784ed9a2ee4de5e5856b6551b7fbe40e9b25673788eb4e58f538074acb3e",
+  "files": {
+    "bpe_simple_vocab_16e6.txt.gz": {
+      "bytes": 1356917,
+      "sha256": "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a"
+    },
+    "clip-image.onnx": {
+      "bytes": 351605911,
+      "sha256": "9a4c3b87ec5c78e3951b6e7e041981e55468efe8978ec5411b00510ae8726d01"
+    },
+    "clip-text.onnx": {
+      "bytes": 254186563,
+      "sha256": "cab3f1bb08bcb3a46e033c69b43015ba49c1308a3b7ff24bce61e08a41e476d8"
+    },
+    "ggml-base.bin": {
+      "bytes": 147951465,
+      "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+    },
+    "ggml-small.bin": {
+      "bytes": 487601967,
+      "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+    }
+  },
+  "model_name": "clip-vit-b-32-quickgelu-openai",
+  "opset": 17,
+  "preprocess": {
+    "center_crop": 224,
+    "interpolation": "bicubic",
+    "mean": [
+      0.48145466,
+      0.4578275,
+      0.40821073
+    ],
+    "resize_shorter": 224,
+    "std": [
+      0.26862954,
+      0.26130258,
+      0.27577711
+    ]
+  },
+  "preprocess_version": 1,
+  "sources": {
+    "whisper_repository": "https://huggingface.co/ggerganov/whisper.cpp",
+    "whisper_revision": "5359861c739e955e79d9a303bcbc70fb988958b1"
+  },
+  "toolchain": {
+    "numpy": "2.5.2",
+    "onnx": "1.22.0",
+    "onnxruntime": "1.29.0",
+    "open_clip_torch": "3.3.0",
+    "torch": "2.13.0"
+  },
+  "verification": {
+    "coreml_image": {
+      "output_shape": [
+        1,
+        512
+      ],
+      "providers": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ]
+    },
+    "coreml_text": {
+      "output_shape": [
+        1,
+        512
+      ],
+      "providers": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ]
+    },
+    "image": {
+      "cosine": 1.0,
+      "max_abs_error": 5.541369318962097e-07
+    },
+    "text": {
+      "cosine": 1.0000001192092896,
+      "max_abs_error": 1.7881393432617188e-07
+    }
+  }
+}
