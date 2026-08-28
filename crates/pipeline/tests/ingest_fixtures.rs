@@ -7,11 +7,11 @@ use crush_core::cancellation::CancellationToken;
 use crush_core::job::{JobStatus, Stage};
 use crush_core::paths::AppPaths;
 use crush_core::{Config, DEFAULT_OWNER_ID};
-use crush_pipeline::Pipeline;
+use crush_pipeline::{sha256_file, Pipeline};
 use crush_search::SearchEngine;
 use crush_stage_embed::embedder::{Embedder, ProviderPreference};
 use crush_stage_split::ffmpeg;
-use crush_store::{JobFilter, NewJob, PhotoStatus, Store, VideoStatus};
+use crush_store::{JobFilter, NewJob, PhotoProxyProvenance, PhotoStatus, Store, VideoStatus};
 use image::{Rgb, RgbImage};
 
 fn repo_root() -> PathBuf {
@@ -77,6 +77,7 @@ fn photo_ingest_is_idempotent_and_searchable() {
         }
     });
     image.save(&photo_path).unwrap();
+    let original_sha256 = sha256_file(&photo_path).unwrap();
     let paths = AppPaths {
         root: temp.path().to_path_buf(),
     };
@@ -94,10 +95,29 @@ fn photo_ingest_is_idempotent_and_searchable() {
     let store = Store::open(temp.path()).unwrap();
     let photo = store.photos(DEFAULT_OWNER_ID).unwrap().pop().unwrap();
     assert_eq!(photo.status, PhotoStatus::Done);
+    assert_eq!(photo.sha256, original_sha256);
+    assert_eq!(sha256_file(&photo_path).unwrap(), original_sha256);
     assert!(store
         .thumbnail_path(photo.thumb_rel.as_deref().unwrap())
         .unwrap()
         .is_file());
+    let source_metadata = store
+        .photo_source_metadata(DEFAULT_OWNER_ID, &photo.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(source_metadata.decoder, "image-rs");
+    assert_eq!(
+        source_metadata.proxy_provenance,
+        PhotoProxyProvenance::DecodedOriginal
+    );
+    let proxy_path = store
+        .proxy_path(source_metadata.proxy_rel.as_deref().unwrap())
+        .unwrap();
+    assert!(proxy_path.is_file());
+    assert_eq!(
+        sha256_file(&proxy_path).unwrap(),
+        source_metadata.proxy_sha256.as_deref().unwrap()
+    );
     assert_eq!(
         store
             .vector_for_photo(DEFAULT_OWNER_ID, &photo.id)
@@ -125,6 +145,28 @@ fn photo_ingest_is_idempotent_and_searchable() {
     let second = pipeline.ingest(&input, false).unwrap();
     assert_eq!(second.indexed, 0);
     assert_eq!(second.skipped, 1);
+    assert_eq!(sha256_file(&photo_path).unwrap(), original_sha256);
+
+    let store = Store::open(temp.path()).unwrap();
+    let photo_id = store.photos(DEFAULT_OWNER_ID).unwrap().pop().unwrap().id;
+    drop(store);
+    rusqlite::Connection::open(temp.path().join("library.db"))
+        .unwrap()
+        .execute(
+            "DELETE FROM photo_source_metadata WHERE photo_id = ?1",
+            [&photo_id],
+        )
+        .unwrap();
+    let backfilled = pipeline.ingest(&input, false).unwrap();
+    assert_eq!(
+        backfilled.indexed, 1,
+        "v2 photo rows must gain v3 fidelity metadata"
+    );
+    assert!(Store::open(temp.path())
+        .unwrap()
+        .photo_source_metadata(DEFAULT_OWNER_ID, &photo_id)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -154,6 +196,25 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
     let videos = store.videos(DEFAULT_OWNER_ID).unwrap();
     assert_eq!(videos.len(), 4);
     assert!(videos.iter().all(|video| video.status == VideoStatus::Done));
+    for video in &videos {
+        assert_eq!(sha256_file(Path::new(&video.path)).unwrap(), video.sha256);
+        let metadata = store
+            .video_source_metadata(DEFAULT_OWNER_ID, &video.id)
+            .unwrap()
+            .unwrap();
+        assert!(!metadata.container.is_empty());
+        assert!(!metadata.video_codec.is_empty());
+        if metadata.proxy_required {
+            let proxy = store
+                .proxy_path(metadata.proxy_rel.as_deref().unwrap())
+                .unwrap();
+            assert!(proxy.is_file());
+            assert_eq!(
+                sha256_file(&proxy).unwrap(),
+                metadata.proxy_sha256.as_deref().unwrap()
+            );
+        }
+    }
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 12);
     assert!(jobs.iter().all(|job| job.status == JobStatus::Done));
@@ -345,6 +406,134 @@ fn bad_video_records_a_failed_job_and_does_not_block_other_files() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn packaged_pipeline_indexes_representative_professional_sources() {
+    let resolved = match ffmpeg::resolve() {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            eprintln!("skipping Task 016 packaged-pipeline test: sidecars are not installed");
+            return;
+        }
+    };
+    let temp = tempfile::tempdir().unwrap();
+    if !install_model_links(temp.path()) {
+        return;
+    }
+    let input = temp.path().join("professional-sources");
+    std::fs::create_dir(&input).unwrap();
+    let still = RgbImage::from_fn(96, 64, |x, y| Rgb([(x * 2) as u8, (y * 3) as u8, 112]));
+    let png = input.join("still.png");
+    still.save(&png).unwrap();
+    still
+        .save_with_format(input.join("still.jpg"), image::ImageFormat::Jpeg)
+        .unwrap();
+    still
+        .save_with_format(input.join("still.tiff"), image::ImageFormat::Tiff)
+        .unwrap();
+    let heic_status = Command::new("/usr/bin/sips")
+        .args(["-s", "format", "heic"])
+        .arg(&png)
+        .arg("--out")
+        .arg(input.join("still.heic"))
+        .status()
+        .unwrap();
+    assert!(heic_status.success());
+
+    let source = repo_root().join("fixtures/clips/synthetic-speech.mp4");
+    let video_cases = [
+        (
+            "prores.mov",
+            vec!["-an", "-c:v", "prores", "-profile:v", "2"],
+        ),
+        ("h264.m4v", vec!["-an", "-c:v", "h264_videotoolbox"]),
+        (
+            "dnx.mxf",
+            vec![
+                "-an",
+                "-vf",
+                "scale=1280:720",
+                "-c:v",
+                "dnxhd",
+                "-b:v",
+                "90M",
+            ],
+        ),
+        (
+            "hevc.mov",
+            vec!["-an", "-c:v", "hevc_videotoolbox", "-tag:v", "hvc1"],
+        ),
+    ];
+    for (name, arguments) in &video_cases {
+        let status = Command::new(&resolved.path)
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&source)
+            .args(["-t", "1"])
+            .args(arguments)
+            .arg(input.join(name))
+            .status()
+            .unwrap();
+        assert!(status.success(), "could not generate {name}");
+    }
+
+    let started = Instant::now();
+    let pipeline = Pipeline::new(
+        fixture_config(temp.path()),
+        AppPaths {
+            root: temp.path().to_path_buf(),
+        },
+        CancellationToken::default(),
+    );
+    let summary = pipeline.ingest(&input, true).unwrap();
+    let elapsed_ms = started.elapsed().as_millis();
+    assert_eq!(summary.discovered, 8);
+    assert_eq!(summary.discovered_photos, 4);
+    assert_eq!(summary.indexed, 8);
+    assert_eq!(summary.failed, 0, "{:?}", summary.errors);
+
+    let store = Store::open(temp.path()).unwrap();
+    let photos = store.photos(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(photos.len(), 4);
+    assert!(photos.iter().all(|photo| store
+        .photo_source_metadata(DEFAULT_OWNER_ID, &photo.id)
+        .unwrap()
+        .is_some()));
+    let videos = store.videos(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(videos.len(), 4);
+    let mut codec_policies = Vec::new();
+    for video in videos {
+        let metadata = store
+            .video_source_metadata(DEFAULT_OWNER_ID, &video.id)
+            .unwrap()
+            .unwrap();
+        codec_policies.push(serde_json::json!({
+            "source": Path::new(&video.path).file_name().unwrap().to_string_lossy(),
+            "container": metadata.container,
+            "codec": metadata.video_codec,
+            "bit_depth": metadata.bit_depth,
+            "color_space": metadata.color_space,
+            "proxy_required": metadata.proxy_required,
+            "proxy_reason": metadata.proxy_reason,
+        }));
+    }
+    let report = serde_json::json!({
+        "fixture_set": "Task 016 representative packaged pipeline",
+        "elapsed_ms": elapsed_ms,
+        "peak_resident_bytes": peak_resident_bytes(),
+        "failures": summary.errors,
+        "orientation_check": "EXIF orientation normalization covered by source_fidelity fixture",
+        "color_check": "source color fields persisted and derivatives visually decoded",
+        "photos": photos.len(),
+        "videos": codec_policies,
+    });
+    std::fs::write(
+        temp.path().join("task-016-packaged-pipeline-report.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+#[test]
 fn pre_cancelled_pipeline_stops_without_creating_jobs() {
     let temp = tempfile::tempdir().unwrap();
     let cancellation = CancellationToken::default();
@@ -364,6 +553,17 @@ fn pre_cancelled_pipeline_stops_without_creating_jobs() {
         .jobs(DEFAULT_OWNER_ID, &JobFilter::default())
         .unwrap()
         .is_empty());
+}
+
+#[cfg(target_os = "macos")]
+fn peak_resident_bytes() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if status == 0 {
+        u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 #[test]

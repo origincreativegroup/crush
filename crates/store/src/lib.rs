@@ -14,10 +14,11 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
+    (3, include_str!("../migrations/0003_source_fidelity.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,64 @@ pub struct Photo {
     pub thumb_rel: Option<String>,
     pub status: PhotoStatus,
     pub indexed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhotoProxyProvenance {
+    DecodedOriginal,
+    FullRender,
+    EmbeddedPreview,
+}
+
+/// Source facts needed to reproduce trustworthy photo derivatives without changing the original.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhotoSourceMetadata {
+    pub photo_id: String,
+    pub owner_id: String,
+    pub source_format: String,
+    pub decoder: String,
+    /// Path relative to `<data_dir>/proxies`.
+    pub proxy_rel: Option<String>,
+    pub proxy_width: Option<i64>,
+    pub proxy_height: Option<i64>,
+    pub proxy_sha256: Option<String>,
+    pub proxy_provenance: PhotoProxyProvenance,
+    pub orientation_applied: bool,
+    pub bit_depth: Option<i64>,
+    pub color_space: Option<String>,
+    pub icc_profile_name: Option<String>,
+    pub icc_profile_sha256: Option<String>,
+    pub exposure_json: String,
+    /// Coordinates are deliberately not stored by the default privacy policy.
+    pub gps_present: bool,
+    pub metadata_json: String,
+    pub original_size_bytes: i64,
+    pub extracted_at: DateTime<Utc>,
+}
+
+/// Source facts and edit-proxy policy for production video.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VideoSourceMetadata {
+    pub video_id: String,
+    pub owner_id: String,
+    pub container: String,
+    pub video_codec: String,
+    pub codec_profile: Option<String>,
+    pub pixel_format: Option<String>,
+    pub bit_depth: Option<i64>,
+    pub color_space: Option<String>,
+    pub color_primaries: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_range: Option<String>,
+    pub rotation: Option<i64>,
+    /// Path relative to `<data_dir>/proxies`.
+    pub proxy_rel: Option<String>,
+    pub proxy_sha256: Option<String>,
+    pub proxy_required: bool,
+    pub proxy_reason: Option<String>,
+    pub original_size_bytes: i64,
+    pub metadata_json: String,
+    pub probed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +295,8 @@ pub enum ProblemKind {
     MissingVector,
     MissingThumbnail,
     UnsafeThumbnailPath,
+    MissingProxy,
+    UnsafeProxyPath,
     OrphanVector,
     InvalidVectorBytes,
 }
@@ -260,6 +321,7 @@ impl Store {
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("failed to create data directory {}", data_dir.display()))?;
         std::fs::create_dir_all(data_dir.join("thumbs"))?;
+        std::fs::create_dir_all(data_dir.join("proxies"))?;
         let db_path = data_dir.join("library.db");
         let mut connection = Connection::open(&db_path)
             .with_context(|| format!("failed to open SQLite database {}", db_path.display()))?;
@@ -285,6 +347,15 @@ impl Store {
             "thumbnail path must be a safe path relative to the thumbs directory"
         );
         Ok(self.data_dir.join("thumbs").join(relative))
+    }
+
+    pub fn proxy_path(&self, relative: &str) -> anyhow::Result<PathBuf> {
+        let relative = Path::new(relative);
+        ensure!(
+            safe_relative_path(relative),
+            "proxy path must be a safe path relative to the proxies directory"
+        );
+        Ok(self.data_dir.join("proxies").join(relative))
     }
 
     pub fn schema_version(&self) -> anyhow::Result<i64> {
@@ -397,6 +468,84 @@ impl Store {
             params![owner_id, photo_id, photo_status_to_str(status), indexed_at],
         )?;
         ensure_changed(changed, "photo", photo_id)
+    }
+
+    pub fn upsert_photo_source_metadata(
+        &self,
+        owner_id: &str,
+        metadata: &PhotoSourceMetadata,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &metadata.owner_id, "photo source metadata")?;
+        validate_photo_source_metadata(metadata)?;
+        self.connection.execute(
+            "INSERT INTO photo_source_metadata (
+                photo_id, owner_id, source_format, decoder, proxy_rel, proxy_width, proxy_height,
+                proxy_sha256, proxy_provenance, orientation_applied, bit_depth, color_space,
+                icc_profile_name, icc_profile_sha256, exposure_json, gps_present, metadata_json,
+                original_size_bytes, extracted_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                       ?16, ?17, ?18, ?19)
+             ON CONFLICT(photo_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                source_format = excluded.source_format,
+                decoder = excluded.decoder,
+                proxy_rel = excluded.proxy_rel,
+                proxy_width = excluded.proxy_width,
+                proxy_height = excluded.proxy_height,
+                proxy_sha256 = excluded.proxy_sha256,
+                proxy_provenance = excluded.proxy_provenance,
+                orientation_applied = excluded.orientation_applied,
+                bit_depth = excluded.bit_depth,
+                color_space = excluded.color_space,
+                icc_profile_name = excluded.icc_profile_name,
+                icc_profile_sha256 = excluded.icc_profile_sha256,
+                exposure_json = excluded.exposure_json,
+                gps_present = excluded.gps_present,
+                metadata_json = excluded.metadata_json,
+                original_size_bytes = excluded.original_size_bytes,
+                extracted_at = excluded.extracted_at",
+            params![
+                metadata.photo_id,
+                owner_id,
+                metadata.source_format,
+                metadata.decoder,
+                metadata.proxy_rel,
+                metadata.proxy_width,
+                metadata.proxy_height,
+                metadata.proxy_sha256,
+                photo_proxy_provenance_to_str(metadata.proxy_provenance),
+                metadata.orientation_applied,
+                metadata.bit_depth,
+                metadata.color_space,
+                metadata.icc_profile_name,
+                metadata.icc_profile_sha256,
+                metadata.exposure_json,
+                metadata.gps_present,
+                metadata.metadata_json,
+                metadata.original_size_bytes,
+                metadata.extracted_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn photo_source_metadata(
+        &self,
+        owner_id: &str,
+        photo_id: &str,
+    ) -> anyhow::Result<Option<PhotoSourceMetadata>> {
+        self.connection
+            .query_row(
+                "SELECT photo_id, owner_id, source_format, decoder, proxy_rel, proxy_width,
+                        proxy_height, proxy_sha256, proxy_provenance, orientation_applied,
+                        bit_depth, color_space, icc_profile_name, icc_profile_sha256, exposure_json,
+                        gps_present, metadata_json, original_size_bytes, extracted_at
+                 FROM photo_source_metadata WHERE owner_id = ?1 AND photo_id = ?2",
+                params![owner_id, photo_id],
+                photo_source_metadata_from_row,
+            )
+            .optional()
+            .context("failed to query photo source metadata")
     }
 
     pub fn put_photo_vector(
@@ -904,6 +1053,84 @@ impl Store {
             params![owner_id, video_id, status_text, indexed_at],
         )?;
         ensure_changed(changed, "video", video_id)
+    }
+
+    pub fn upsert_video_source_metadata(
+        &self,
+        owner_id: &str,
+        metadata: &VideoSourceMetadata,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &metadata.owner_id, "video source metadata")?;
+        validate_video_source_metadata(metadata)?;
+        self.connection.execute(
+            "INSERT INTO video_source_metadata (
+                video_id, owner_id, container, video_codec, codec_profile, pixel_format,
+                bit_depth, color_space, color_primaries, color_transfer, color_range, rotation,
+                proxy_rel, proxy_sha256, proxy_required, proxy_reason, original_size_bytes,
+                metadata_json, probed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                       ?16, ?17, ?18, ?19)
+             ON CONFLICT(video_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                container = excluded.container,
+                video_codec = excluded.video_codec,
+                codec_profile = excluded.codec_profile,
+                pixel_format = excluded.pixel_format,
+                bit_depth = excluded.bit_depth,
+                color_space = excluded.color_space,
+                color_primaries = excluded.color_primaries,
+                color_transfer = excluded.color_transfer,
+                color_range = excluded.color_range,
+                rotation = excluded.rotation,
+                proxy_rel = excluded.proxy_rel,
+                proxy_sha256 = excluded.proxy_sha256,
+                proxy_required = excluded.proxy_required,
+                proxy_reason = excluded.proxy_reason,
+                original_size_bytes = excluded.original_size_bytes,
+                metadata_json = excluded.metadata_json,
+                probed_at = excluded.probed_at",
+            params![
+                metadata.video_id,
+                owner_id,
+                metadata.container,
+                metadata.video_codec,
+                metadata.codec_profile,
+                metadata.pixel_format,
+                metadata.bit_depth,
+                metadata.color_space,
+                metadata.color_primaries,
+                metadata.color_transfer,
+                metadata.color_range,
+                metadata.rotation,
+                metadata.proxy_rel,
+                metadata.proxy_sha256,
+                metadata.proxy_required,
+                metadata.proxy_reason,
+                metadata.original_size_bytes,
+                metadata.metadata_json,
+                metadata.probed_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn video_source_metadata(
+        &self,
+        owner_id: &str,
+        video_id: &str,
+    ) -> anyhow::Result<Option<VideoSourceMetadata>> {
+        self.connection
+            .query_row(
+                "SELECT video_id, owner_id, container, video_codec, codec_profile, pixel_format,
+                        bit_depth, color_space, color_primaries, color_transfer, color_range,
+                        rotation, proxy_rel, proxy_sha256, proxy_required, proxy_reason,
+                        original_size_bytes, metadata_json, probed_at
+                 FROM video_source_metadata WHERE owner_id = ?1 AND video_id = ?2",
+                params![owner_id, video_id],
+                video_source_metadata_from_row,
+            )
+            .optional()
+            .context("failed to query video source metadata")
     }
 
     pub fn insert_shots(&mut self, owner_id: &str, shots: &[Shot]) -> anyhow::Result<()> {
@@ -1596,6 +1823,41 @@ impl Store {
         }
         drop(statement);
 
+        let mut statement = self.connection.prepare(
+            "SELECT 'photo', photo_id, proxy_rel FROM photo_source_metadata WHERE proxy_rel IS NOT NULL
+             UNION ALL
+             SELECT 'video', video_id, proxy_rel FROM video_source_metadata WHERE proxy_rel IS NOT NULL
+             ORDER BY 1, 2",
+        )?;
+        let proxies = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for proxy in proxies {
+            let (kind, id, relative) = proxy?;
+            let relative_path = Path::new(&relative);
+            if !safe_relative_path(relative_path) {
+                problems.push(Problem {
+                    kind: ProblemKind::UnsafeProxyPath,
+                    entity_id: id,
+                    detail: format!("{kind} proxy path is not a safe relative path: {relative}"),
+                });
+            } else {
+                let path = self.data_dir.join("proxies").join(relative_path);
+                if !path.is_file() {
+                    problems.push(Problem {
+                        kind: ProblemKind::MissingProxy,
+                        entity_id: id,
+                        detail: format!("{kind} proxy does not exist: {}", path.display()),
+                    });
+                }
+            }
+        }
+        drop(statement);
+
         collect_string_pairs(
             &self.connection,
             "SELECT sv.shot_id, sv.owner_id
@@ -1801,6 +2063,58 @@ fn photo_from_row(row: &Row<'_>) -> rusqlite::Result<Photo> {
     })
 }
 
+fn photo_source_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<PhotoSourceMetadata> {
+    let provenance: String = row.get(8)?;
+    let extracted_at: String = row.get(18)?;
+    Ok(PhotoSourceMetadata {
+        photo_id: row.get(0)?,
+        owner_id: row.get(1)?,
+        source_format: row.get(2)?,
+        decoder: row.get(3)?,
+        proxy_rel: row.get(4)?,
+        proxy_width: row.get(5)?,
+        proxy_height: row.get(6)?,
+        proxy_sha256: row.get(7)?,
+        proxy_provenance: photo_proxy_provenance_from_str(&provenance)
+            .map_err(|error| conversion_message(8, error.to_string()))?,
+        orientation_applied: row.get(9)?,
+        bit_depth: row.get(10)?,
+        color_space: row.get(11)?,
+        icc_profile_name: row.get(12)?,
+        icc_profile_sha256: row.get(13)?,
+        exposure_json: row.get(14)?,
+        gps_present: row.get(15)?,
+        metadata_json: row.get(16)?,
+        original_size_bytes: row.get(17)?,
+        extracted_at: timestamp_from_str(&extracted_at, 18)?,
+    })
+}
+
+fn video_source_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<VideoSourceMetadata> {
+    let probed_at: String = row.get(18)?;
+    Ok(VideoSourceMetadata {
+        video_id: row.get(0)?,
+        owner_id: row.get(1)?,
+        container: row.get(2)?,
+        video_codec: row.get(3)?,
+        codec_profile: row.get(4)?,
+        pixel_format: row.get(5)?,
+        bit_depth: row.get(6)?,
+        color_space: row.get(7)?,
+        color_primaries: row.get(8)?,
+        color_transfer: row.get(9)?,
+        color_range: row.get(10)?,
+        rotation: row.get(11)?,
+        proxy_rel: row.get(12)?,
+        proxy_sha256: row.get(13)?,
+        proxy_required: row.get(14)?,
+        proxy_reason: row.get(15)?,
+        original_size_bytes: row.get(16)?,
+        metadata_json: row.get(17)?,
+        probed_at: timestamp_from_str(&probed_at, 18)?,
+    })
+}
+
 fn editorial_annotation_from_row(row: &Row<'_>) -> rusqlite::Result<EditorialAnnotation> {
     let media_kind: String = row.get(1)?;
     let updated_at: String = row.get(16)?;
@@ -1988,6 +2302,23 @@ fn photo_status_from_str(value: &str) -> anyhow::Result<PhotoStatus> {
     }
 }
 
+fn photo_proxy_provenance_to_str(value: PhotoProxyProvenance) -> &'static str {
+    match value {
+        PhotoProxyProvenance::DecodedOriginal => "decoded_original",
+        PhotoProxyProvenance::FullRender => "full_render",
+        PhotoProxyProvenance::EmbeddedPreview => "embedded_preview",
+    }
+}
+
+fn photo_proxy_provenance_from_str(value: &str) -> anyhow::Result<PhotoProxyProvenance> {
+    match value {
+        "decoded_original" => Ok(PhotoProxyProvenance::DecodedOriginal),
+        "full_render" => Ok(PhotoProxyProvenance::FullRender),
+        "embedded_preview" => Ok(PhotoProxyProvenance::EmbeddedPreview),
+        other => bail!("unknown photo proxy provenance {other:?}"),
+    }
+}
+
 fn media_kind_to_str(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Photo => "photo",
@@ -2138,6 +2469,99 @@ fn validate_photo(photo: &Photo) -> anyhow::Result<()> {
             "thumbnail path must be a safe path relative to the thumbs directory"
         );
     }
+    Ok(())
+}
+
+fn validate_photo_source_metadata(metadata: &PhotoSourceMetadata) -> anyhow::Result<()> {
+    ensure!(
+        !metadata.source_format.trim().is_empty(),
+        "source format is required"
+    );
+    ensure!(
+        !metadata.decoder.trim().is_empty(),
+        "photo decoder is required"
+    );
+    ensure!(
+        metadata.original_size_bytes >= 0,
+        "original size must be non-negative"
+    );
+    validate_json_object(&metadata.exposure_json, "exposure_json")?;
+    validate_json_object(&metadata.metadata_json, "metadata_json")?;
+    validate_proxy_fields(
+        metadata.proxy_rel.as_deref(),
+        metadata.proxy_sha256.as_deref(),
+        metadata.proxy_width,
+        metadata.proxy_height,
+    )?;
+    if let Some(bit_depth) = metadata.bit_depth {
+        ensure!(bit_depth > 0, "photo bit depth must be positive");
+    }
+    Ok(())
+}
+
+fn validate_video_source_metadata(metadata: &VideoSourceMetadata) -> anyhow::Result<()> {
+    ensure!(
+        !metadata.container.trim().is_empty(),
+        "video container is required"
+    );
+    ensure!(
+        !metadata.video_codec.trim().is_empty(),
+        "video codec is required"
+    );
+    ensure!(
+        metadata.original_size_bytes >= 0,
+        "original size must be non-negative"
+    );
+    validate_json_object(&metadata.metadata_json, "metadata_json")?;
+    if let Some(bit_depth) = metadata.bit_depth {
+        ensure!(bit_depth > 0, "video bit depth must be positive");
+    }
+    match (&metadata.proxy_rel, &metadata.proxy_sha256) {
+        (Some(relative), Some(hash)) => {
+            ensure!(
+                safe_relative_path(Path::new(relative)),
+                "proxy path must be a safe relative path"
+            );
+            ensure!(
+                !hash.trim().is_empty(),
+                "proxy SHA-256 is required when a proxy path is set"
+            );
+        }
+        (None, None) => {}
+        _ => bail!("video proxy path and SHA-256 must either both be set or both be absent"),
+    }
+    ensure!(
+        metadata.proxy_required || metadata.proxy_reason.is_none(),
+        "proxy reason requires proxy_required"
+    );
+    Ok(())
+}
+
+fn validate_proxy_fields(
+    relative: Option<&str>,
+    sha256: Option<&str>,
+    width: Option<i64>,
+    height: Option<i64>,
+) -> anyhow::Result<()> {
+    match (relative, sha256, width, height) {
+        (Some(relative), Some(hash), Some(width), Some(height)) => {
+            ensure!(
+                safe_relative_path(Path::new(relative)),
+                "proxy path must be a safe relative path"
+            );
+            ensure!(!hash.trim().is_empty(), "proxy SHA-256 is required");
+            ensure!(width > 0 && height > 0, "proxy dimensions must be positive");
+        }
+        (None, None, None, None) => {}
+        _ => bail!("photo proxy path, SHA-256, width, and height must be set together"),
+    }
+    Ok(())
+}
+
+fn validate_json_object(value: &str, name: &str) -> anyhow::Result<()> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).with_context(|| format!("{name} must be valid JSON"))?;
+    ensure!(parsed.is_object(), "{name} must be a JSON object");
     Ok(())
 }
 

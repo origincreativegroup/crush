@@ -1,0 +1,15 @@
+Supported Formats:
+-------------------------------------------
+com.adobe.raw-image          dng
+com.canon.cr2-raw-image      cr2
+com.canon.cr3-raw-image      cr3
+com.fuji.raw-image           raf
+com.nikon.raw-image          nef
+com.olympus.or-raw-image     orf
+com.panasonic.rw2-raw-image  rw2
+com.sony.arw-raw-image       arw
+public.heic                  heic  Writable
+public.heif                  heif
+public.jpeg                  jpeg  Writable
+public.png                   png   Writable
+public.tiff                  tiff  Writable

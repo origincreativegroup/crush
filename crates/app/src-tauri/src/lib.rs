@@ -537,7 +537,14 @@ mod macos {
             let video = store
                 .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
                 .with_context(|| format!("video {} was not found", shot.video_id))?;
-            allow_asset_path(&app, Path::new(&video.path)).map_err(anyhow::Error::msg)?;
+            let playback_path = store
+                .video_source_metadata(DEFAULT_OWNER_ID, &video.id)?
+                .and_then(|metadata| metadata.proxy_rel)
+                .map(|relative| store.proxy_path(&relative))
+                .transpose()?
+                .filter(|path| path.is_file())
+                .unwrap_or_else(|| PathBuf::from(&video.path));
+            allow_asset_path(&app, &playback_path).map_err(anyhow::Error::msg)?;
             let shot_count = store
                 .shots_for_video(DEFAULT_OWNER_ID, &shot.video_id)?
                 .len();
@@ -561,7 +568,7 @@ mod macos {
             Ok(ShotDetailView {
                 id: shot.id,
                 video_id: shot.video_id,
-                video_path: video.path,
+                video_path: playback_path.display().to_string(),
                 idx: shot.idx,
                 shot_count,
                 start_s: shot.start_s,
@@ -585,7 +592,14 @@ mod macos {
             let photo = store
                 .photo_by_id(DEFAULT_OWNER_ID, &id)?
                 .with_context(|| format!("photo {id} was not found"))?;
-            allow_asset_path(&app, Path::new(&photo.path)).map_err(anyhow::Error::msg)?;
+            let display_path = store
+                .photo_source_metadata(DEFAULT_OWNER_ID, &photo.id)?
+                .and_then(|metadata| metadata.proxy_rel)
+                .map(|relative| store.proxy_path(&relative))
+                .transpose()?
+                .filter(|path| path.is_file())
+                .unwrap_or_else(|| PathBuf::from(&photo.path));
+            allow_asset_path(&app, &display_path).map_err(anyhow::Error::msg)?;
             let annotation = store.editorial_annotation(
                 DEFAULT_OWNER_ID,
                 crush_store::MediaKind::Photo,
@@ -598,7 +612,7 @@ mod macos {
             )?;
             Ok(PhotoDetailView {
                 id: photo.id,
-                photo_path: photo.path,
+                photo_path: display_path.display().to_string(),
                 width: photo.width,
                 height: photo.height,
                 format: photo.format,
@@ -877,6 +891,9 @@ mod macos {
                 let thumbs_dir = paths.thumbs();
                 std::fs::create_dir_all(&thumbs_dir)?;
                 scope.allow_directory(&thumbs_dir, true)?;
+                let proxies_dir = paths.root.join("proxies");
+                std::fs::create_dir_all(&proxies_dir)?;
+                scope.allow_directory(&proxies_dir, true)?;
                 for video in store.videos(DEFAULT_OWNER_ID)? {
                     if let Err(error) = scope.allow_file(&video.path) {
                         eprintln!("could not expose {} to the webview: {error}", video.path);
@@ -948,7 +965,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=2"));
+            assert!(report.contains("schema=3"));
         }
     }
 }

@@ -54,6 +54,17 @@ pub struct Probe {
     pub width: u32,
     pub height: u32,
     pub has_audio: bool,
+    pub container: Option<String>,
+    pub video_codec: Option<String>,
+    pub codec_profile: Option<String>,
+    pub codec_tag: Option<String>,
+    pub pixel_format: Option<String>,
+    pub bit_depth: Option<u8>,
+    pub color_space: Option<String>,
+    pub color_primaries: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_range: Option<String>,
+    pub rotation: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -343,6 +354,66 @@ impl Runner {
             value: count,
             command,
         })
+    }
+
+    /// Generate a lightweight edit proxy for acquisition codecs that are expensive to seek.
+    /// The LGPL sidecar intentionally uses Apple's native H.264 encoder instead of libx264.
+    pub fn generate_edit_proxy_with_control<F>(
+        &self,
+        input: &Path,
+        output: &Path,
+        cancellation: &CancellationToken,
+        mut progress: F,
+    ) -> Result<Operation<()>>
+    where
+        F: FnMut(Progress),
+    {
+        ensure_parent(output)?;
+        let duration = self.probe(input)?.value.duration_s;
+        let file_name = output
+            .file_name()
+            .ok_or_else(|| Error::InvalidArgument("proxy output needs a file name".into()))?
+            .to_string_lossy();
+        let temporary = output.with_file_name(format!(".{file_name}.partial.mp4"));
+        if temporary.exists() {
+            fs::remove_file(&temporary)?;
+        }
+        let filter = "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p";
+        let spec = CommandSpec::new(&self.resolved.path)
+            .args(["-y", "-threads"])
+            .arg(self.threads.to_string())
+            .arg("-i")
+            .arg(input)
+            .args(["-map", "0:v:0", "-map", "0:a?", "-vf", filter])
+            .args([
+                "-c:v",
+                "h264_videotoolbox",
+                "-b:v",
+                "12M",
+                "-maxrate",
+                "16M",
+                "-bufsize",
+                "24M",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+            ])
+            .arg(&temporary);
+        let command = match self.run_progress(&spec, duration, cancellation, &mut progress) {
+            Ok(command) => command,
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(error);
+            }
+        };
+        fs::rename(&temporary, output)?;
+        Ok(Operation { value: (), command })
     }
 
     /// Extract 16 kHz mono signed-16-bit PCM for Whisper.
@@ -983,6 +1054,17 @@ impl ProbeDocument {
             width,
             height,
             has_audio,
+            container: self.format.format_name,
+            video_codec: video.and_then(|stream| stream.codec_name.clone()),
+            codec_profile: video.and_then(|stream| stream.profile.clone()),
+            codec_tag: video.and_then(|stream| stream.codec_tag_string.clone()),
+            pixel_format: video.and_then(|stream| stream.pix_fmt.clone()),
+            bit_depth: video.and_then(infer_bit_depth),
+            color_space: video.and_then(|stream| stream.color_space.clone()),
+            color_primaries: video.and_then(|stream| stream.color_primaries.clone()),
+            color_transfer: video.and_then(|stream| stream.color_transfer.clone()),
+            color_range: video.and_then(|stream| stream.color_range.clone()),
+            rotation: video.and_then(stream_rotation),
         })
     }
 }
@@ -990,16 +1072,65 @@ impl ProbeDocument {
 #[derive(Debug, Default, Deserialize)]
 struct ProbeFormat {
     duration: Option<String>,
+    format_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProbeStream {
     codec_type: Option<String>,
+    codec_name: Option<String>,
+    profile: Option<String>,
+    codec_tag_string: Option<String>,
+    pix_fmt: Option<String>,
+    bits_per_raw_sample: Option<String>,
+    color_space: Option<String>,
+    color_primaries: Option<String>,
+    color_transfer: Option<String>,
+    color_range: Option<String>,
     width: Option<u32>,
     height: Option<u32>,
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
     duration: Option<String>,
+    #[serde(default)]
+    tags: ProbeTags,
+    #[serde(default)]
+    side_data_list: Vec<ProbeSideData>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProbeTags {
+    rotate: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProbeSideData {
+    rotation: Option<i32>,
+}
+
+fn infer_bit_depth(stream: &ProbeStream) -> Option<u8> {
+    stream
+        .bits_per_raw_sample
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            let pixel_format = stream.pix_fmt.as_deref()?;
+            for depth in [16, 14, 12, 10, 9] {
+                if pixel_format.contains(&depth.to_string()) {
+                    return Some(depth);
+                }
+            }
+            Some(8)
+        })
+}
+
+fn stream_rotation(stream: &ProbeStream) -> Option<i32> {
+    stream
+        .side_data_list
+        .iter()
+        .find_map(|data| data.rotation)
+        .or_else(|| stream.tags.rotate.as_deref()?.parse().ok())
 }
 
 #[cfg(test)]
@@ -1061,7 +1192,7 @@ mod tests {
     #[test]
     fn parses_video_and_audio_probe_json() {
         let document: ProbeDocument = serde_json::from_str(
-            r#"{"streams":[{"codec_type":"video","width":640,"height":360,"avg_frame_rate":"30000/1001"},{"codec_type":"audio"}],"format":{"duration":"12.500000"}}"#,
+            r#"{"streams":[{"codec_type":"video","codec_name":"hevc","profile":"Main 10","codec_tag_string":"hvc1","pix_fmt":"yuv420p10le","bits_per_raw_sample":"10","color_space":"bt2020nc","color_primaries":"bt2020","color_transfer":"smpte2084","color_range":"tv","width":640,"height":360,"avg_frame_rate":"30000/1001","side_data_list":[{"rotation":-90}]},{"codec_type":"audio"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"12.500000"}}"#,
         )
         .unwrap();
         let probe = document.into_probe().unwrap();
@@ -1070,6 +1201,13 @@ mod tests {
         assert!((probe.fps - 29.970_029_97).abs() < 1e-8);
         assert_eq!(probe.duration_s, 12.5);
         assert!(probe.has_audio);
+        assert_eq!(probe.container.as_deref(), Some("mov,mp4,m4a,3gp,3g2,mj2"));
+        assert_eq!(probe.video_codec.as_deref(), Some("hevc"));
+        assert_eq!(probe.codec_profile.as_deref(), Some("Main 10"));
+        assert_eq!(probe.codec_tag.as_deref(), Some("hvc1"));
+        assert_eq!(probe.bit_depth, Some(10));
+        assert_eq!(probe.color_primaries.as_deref(), Some("bt2020"));
+        assert_eq!(probe.rotation, Some(-90));
     }
 
     #[test]

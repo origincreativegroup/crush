@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "captured_on": "macOS Apple Silicon, 2026-08-28",
+  "photos": [
+    {"format":"JPEG","extensions":["jpg","jpeg"],"decoder":"image-rs","support":"bundled_full_decode"},
+    {"format":"PNG","extensions":["png"],"decoder":"image-rs","support":"bundled_full_decode"},
+    {"format":"TIFF","extensions":["tif","tiff"],"decoder":"image-rs","support":"bundled_full_decode"},
+    {"format":"HEIC/HEIF","extensions":["heic","heif"],"decoder":"macos-imageio","support":"runtime_capability_checked"},
+    {"format":"DNG","extensions":["dng"],"decoder":"macos-imageio","support":"runtime_capability_checked"},
+    {"format":"Canon RAW","extensions":["cr2","cr3"],"decoder":"macos-imageio","support":"runtime_capability_checked"},
+    {"format":"Nikon RAW","extensions":["nef"],"decoder":"macos-imageio","support":"runtime_capability_checked"},
+    {"format":"Sony RAW","extensions":["arw"],"decoder":"macos-imageio","support":"runtime_capability_checked"},
+    {"format":"Olympus RAW","extensions":["orf"],"decoder":"macos-imageio","support":"runtime_capability_checked"},
+    {"format":"Fujifilm RAW","extensions":["raf"],"decoder":"macos-imageio","support":"runtime_capability_checked"},
+    {"format":"Panasonic RAW","extensions":["rw2"],"decoder":"macos-imageio","support":"runtime_capability_checked"}
+  ],
+  "videos": [
+    {"format":"MOV/MP4/M4V/MXF","decoder":"bundled-ffmpeg","support":"container_and_codec_probed"},
+    {"format":"ProRes","decoder":"bundled-ffmpeg","support":"direct_edit_allowlist"},
+    {"format":"H.264","decoder":"bundled-ffmpeg","support":"direct_or_proxy_by_cost"},
+    {"format":"H.265/HEVC","decoder":"bundled-ffmpeg","support":"working_proxy_required"},
+    {"format":"BRAW","decoder":"none","support":"disabled_proprietary_sdk_licensing"},
+    {"format":"R3D","decoder":"none","support":"disabled_proprietary_sdk_licensing"},
+    {"format":"ProRes RAW","decoder":"none","support":"disabled_no_approved_full_decoder"}
+  ]
+}

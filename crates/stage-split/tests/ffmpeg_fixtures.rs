@@ -78,6 +78,12 @@ fn probe_sampling_audio_and_frame_match_fixture_contracts() {
     assert!((probe.fps - 30.0).abs() < 0.001);
     assert_eq!((probe.width, probe.height), (640, 360));
     assert!(probe.has_audio);
+    assert_eq!(probe.video_codec.as_deref(), Some("mpeg4"));
+    assert_eq!(probe.bit_depth, Some(8));
+    assert!(probe
+        .container
+        .as_deref()
+        .is_some_and(|value| value.contains("mp4")));
 
     let frames = temporary.path().join("frames");
     let sampled = runner.sample_frames(&speech, 0.5, &frames).unwrap();
@@ -117,6 +123,28 @@ fn probe_sampling_audio_and_frame_match_fixture_contracts() {
     assert!(commands
         .lines()
         .all(|line| line.starts_with("/usr/bin/nice ") || line.contains("ffprobe")));
+}
+
+#[test]
+fn edit_proxy_is_playable_bounded_and_uses_lgpl_videotoolbox_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let input = fixture("synthetic-speech.mp4");
+    let output = temporary.path().join("working-proxy.mp4");
+    let operation = runner
+        .generate_edit_proxy_with_control(&input, &output, &CancellationToken::default(), |_| {})
+        .unwrap();
+    assert!(operation.command.contains("h264_videotoolbox"));
+    assert!(operation.command.contains("scale=w="));
+    let probe = runner.probe(&output).unwrap().value;
+    assert_eq!(probe.video_codec.as_deref(), Some("h264"));
+    assert!(probe.width <= 1920);
+    assert!(probe.height <= 1080);
+    assert!((probe.duration_s - 12.0).abs() < 0.1);
+    assert!(!temporary
+        .path()
+        .join(".working-proxy.mp4.partial.mp4")
+        .exists());
 }
 
 #[test]

@@ -20,6 +20,8 @@ tracing.workspace = true
 libc.workspace = true
 tempfile = "=3.27.0"
 image.workspace = true
+exif.workspace = true
 
 [dev-dependencies]
 serde.workspace = true
+rusqlite.workspace = true

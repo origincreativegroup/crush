@@ -10,8 +10,9 @@ use crush_core::{
 };
 use crush_store::{
     AestheticAssessment, EditorialAnnotation, EmbeddingMeta, FeedbackEvent, FeedbackSignal,
-    JobFilter, MediaKind, NewJob, Photo, PhotoStatus, ProblemKind, Shot, Store, StyleProfile,
-    TranscriptSegment, Video, VideoStatus,
+    JobFilter, MediaKind, NewJob, Photo, PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus,
+    ProblemKind, Shot, Store, StyleProfile, TranscriptSegment, Video, VideoSourceMetadata,
+    VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -75,7 +76,7 @@ fn shot(id: &str, video_id: &str, idx: i64) -> Shot {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.schema_version().unwrap(), 3);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -86,7 +87,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 2);
+    assert_eq!(reopened.schema_version().unwrap(), 3);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -128,6 +129,36 @@ fn photos_editorial_feedback_and_style_round_trip() {
     assert_eq!(
         store.upsert_photo(DEFAULT_OWNER_ID, &second).unwrap(),
         second
+    );
+    let photo_source = PhotoSourceMetadata {
+        photo_id: "photo-a".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        source_format: "jpeg".to_owned(),
+        decoder: "image-rs".to_owned(),
+        proxy_rel: Some("photos/photo-a.jpg".to_owned()),
+        proxy_width: Some(2560),
+        proxy_height: Some(1707),
+        proxy_sha256: Some("proxy-photo-sha".to_owned()),
+        proxy_provenance: PhotoProxyProvenance::DecodedOriginal,
+        orientation_applied: true,
+        bit_depth: Some(8),
+        color_space: Some("sRGB".to_owned()),
+        icc_profile_name: Some("sRGB IEC61966-2.1".to_owned()),
+        icc_profile_sha256: Some("icc-sha".to_owned()),
+        exposure_json: r#"{"f_number":"2.8","iso":400}"#.to_owned(),
+        gps_present: true,
+        metadata_json: r#"{"gps_policy":"presence_only"}"#.to_owned(),
+        original_size_bytes: 123_456,
+        extracted_at: now,
+    };
+    store
+        .upsert_photo_source_metadata(DEFAULT_OWNER_ID, &photo_source)
+        .unwrap();
+    assert_eq!(
+        store
+            .photo_source_metadata(DEFAULT_OWNER_ID, "photo-a")
+            .unwrap(),
+        Some(photo_source)
     );
     store
         .put_photo_vector(DEFAULT_OWNER_ID, "photo-a", &[1.0, -0.0, 0.25])
@@ -262,6 +293,55 @@ fn photos_editorial_feedback_and_style_round_trip() {
             },
         )
         .is_err());
+}
+
+#[test]
+fn video_source_metadata_round_trips_and_rejects_unsafe_proxies() {
+    let directory = TestDir::new("video-source-metadata");
+    let store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 28, 18, 30, 0).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-source", "source-sha"))
+        .unwrap();
+    let metadata = VideoSourceMetadata {
+        video_id: "video-source".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        container: "mov,mp4,m4a,3gp,3g2,mj2".to_owned(),
+        video_codec: "hevc".to_owned(),
+        codec_profile: Some("Main 10".to_owned()),
+        pixel_format: Some("yuv420p10le".to_owned()),
+        bit_depth: Some(10),
+        color_space: Some("bt2020nc".to_owned()),
+        color_primaries: Some("bt2020".to_owned()),
+        color_transfer: Some("smpte2084".to_owned()),
+        color_range: Some("tv".to_owned()),
+        rotation: Some(90),
+        proxy_rel: Some("videos/video-source.mp4".to_owned()),
+        proxy_sha256: Some("proxy-video-sha".to_owned()),
+        proxy_required: true,
+        proxy_reason: Some("HEVC Main 10 requires a working proxy".to_owned()),
+        original_size_bytes: 987_654,
+        metadata_json: r#"{"policy_version":1}"#.to_owned(),
+        probed_at: now,
+    };
+    store
+        .upsert_video_source_metadata(DEFAULT_OWNER_ID, &metadata)
+        .unwrap();
+    assert_eq!(
+        store
+            .video_source_metadata(DEFAULT_OWNER_ID, "video-source")
+            .unwrap(),
+        Some(metadata.clone())
+    );
+
+    let unsafe_metadata = VideoSourceMetadata {
+        proxy_rel: Some("../escape.mp4".to_owned()),
+        ..metadata
+    };
+    assert!(store
+        .upsert_video_source_metadata(DEFAULT_OWNER_ID, &unsafe_metadata)
+        .is_err());
+    assert!(store.proxy_path("../escape.mp4").is_err());
 }
 
 #[test]
