@@ -8,15 +8,115 @@
     <script src="app.js" defer></script>
   </head>
   <body>
-    <main>
-      <section class="card" aria-labelledby="title">
-        <div class="mark" aria-hidden="true">C</div>
-        <p class="eyebrow">Local video search</p>
-        <h1 id="title">Crush</h1>
-        <p class="lede">The desktop shell is ready. Check the local runtime before indexing footage.</p>
-        <button id="doctor" type="button">Run doctor</button>
-        <pre id="result" aria-live="polite">Ready.</pre>
+    <div id="boot" class="boot-screen">
+      <div class="boot-mark" aria-hidden="true">C</div>
+      <p>Opening Crush…</p>
+    </div>
+
+    <main id="first-run" class="first-run" hidden>
+      <section class="setup-card" aria-labelledby="setup-title">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">C</div>
+          <div>
+            <p class="eyebrow">First-run setup</p>
+            <h1 id="setup-title">Downloading models</h1>
+          </div>
+        </div>
+        <p class="setup-copy">About 700 MB, one time. Models stay on this Mac and your footage never leaves it.</p>
+        <div id="model-list" class="model-list" aria-live="polite"></div>
+        <p id="model-error" class="error-message" role="alert" hidden></p>
+        <div class="setup-actions">
+          <button id="retry-models" class="button secondary" type="button" hidden>Retry download</button>
+          <button id="continue-models" class="button primary" type="button" disabled>Continue</button>
+        </div>
       </section>
     </main>
+
+    <div id="app-shell" class="app-shell" hidden>
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark small" aria-hidden="true">C</div>
+          <span>Crush</span>
+        </div>
+        <nav aria-label="Primary">
+          <button class="nav-item" id="nav-search" type="button">
+            <span class="nav-icon" aria-hidden="true">⌕</span>
+            Search
+          </button>
+          <button class="nav-item active" id="nav-library" type="button">
+            <span class="nav-icon" aria-hidden="true">▦</span>
+            Library
+          </button>
+        </nav>
+        <footer class="sidebar-footer">
+          <div id="indexing-status" class="indexing-status">
+            <span class="status-dot idle" aria-hidden="true"></span>
+            <span>Library idle</span>
+          </div>
+          <button id="doctor-link" class="doctor-link" type="button">Run Doctor</button>
+        </footer>
+      </aside>
+
+      <main class="workspace" aria-labelledby="library-title">
+        <header class="toolbar">
+          <div>
+            <p class="eyebrow">Footage index</p>
+            <h1 id="library-title">Library</h1>
+          </div>
+          <div class="toolbar-actions">
+            <button id="reindex" class="button secondary" type="button" disabled>Re-index selected</button>
+            <button id="cancel" class="button danger" type="button" hidden>Cancel</button>
+            <button id="add-folder" class="button primary" type="button">Add Folder…</button>
+          </div>
+        </header>
+
+        <div id="library-message" class="library-message" role="status" hidden></div>
+
+        <section id="library-content" class="library-content" aria-live="polite">
+          <div id="empty-library" class="empty-state" hidden>
+            <div class="empty-icon" aria-hidden="true">＋</div>
+            <h2>No footage yet</h2>
+            <p>No footage indexed yet. Add a folder to start indexing, or run <span class="mono">crushctl ingest</span>.</p>
+            <button id="empty-add-folder" class="button primary" type="button">Add Folder…</button>
+          </div>
+
+          <div id="video-table-wrap" class="table-wrap" hidden>
+            <table class="video-table">
+              <thead>
+                <tr>
+                  <th class="select-column"><span class="sr-only">Select</span></th>
+                  <th>File</th>
+                  <th>Duration</th>
+                  <th>Resolution</th>
+                  <th>Status</th>
+                  <th class="number-column">Shots</th>
+                  <th class="expand-column"><span class="sr-only">Details</span></th>
+                </tr>
+              </thead>
+              <tbody id="video-rows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <div id="drop-overlay" class="drop-overlay" hidden>
+          <div>
+            <span aria-hidden="true">↓</span>
+            <strong>Drop folder to index</strong>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="doctor-dialog" class="doctor-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Local runtime</p>
+          <h2>Doctor</h2>
+        </div>
+        <button id="close-doctor" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+      <pre id="doctor-result">Ready.</pre>
+      <button id="run-doctor" class="button primary" type="button">Run Doctor</button>
+    </dialog>
   </body>
 </html>
