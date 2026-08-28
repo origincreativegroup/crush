@@ -24,7 +24,8 @@ Rust produces the exact same `[1,3,224,224]` f32 tensor as `reference_embed.py`.
 - Start Task 8. Touch ort. Loosen the tolerance.
 
 ## Human review
-**John runs the test himself on his Mac and posts the output before Task 8 is dispatched.**
+- [x] John ran `cargo test -p crush-stage-embed --test preprocess_golden -- --nocapture` twice on
+  his Mac on 2026-08-27. Both runs passed two tests; all four fixtures reported `max_abs_diff=0`.
 
 ## Implementation note
 
