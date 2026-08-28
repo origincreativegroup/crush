@@ -12,7 +12,7 @@
 | TASK-007 | Embed preprocessing golden | Codex (Mac) | done — exact goldens and John’s two-run Mac approval |
 | TASK-008 | Embed with ort (CoreML + CPU) | Codex (Mac) | done — CPU/CoreML cosines 1.0; doctor and Linux/macOS CI green |
 | TASK-009 | Search + hybrid ranking | Codex | done — five approved fixture queries, hybrid ranking, and 7.55 ms scan |
-| TASK-010 | Transcribe + alignment | Codex | backlog (after 004) |
+| TASK-010 | Transcribe + alignment | Codex (Mac) | done — WER 0.000; Metal active; silent fast path 0.149 ms |
 | TASK-011 | Ingest orchestration, cancel/resume, clip export | Cursor (Mac) | backlog |
 | TASK-012a | Tauri shell + commands | Cursor (Mac) | backlog |
 | TASK-012b | First-run + Library screens | Cursor (Mac) | backlog |

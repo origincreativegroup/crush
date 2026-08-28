@@ -45,7 +45,7 @@ pub struct SearchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AsrConfig {
-    /// "base" | "small". doctor picks base on 8 GB machines.
+    /// "auto" | "base" | "small". Auto picks base below 12 GiB, otherwise small.
     pub model: String,
     pub language: Option<String>,
 }
@@ -87,7 +87,7 @@ impl Default for SearchConfig {
 impl Default for AsrConfig {
     fn default() -> Self {
         Self {
-            model: "small".into(),
+            model: "auto".into(),
             language: None,
         }
     }

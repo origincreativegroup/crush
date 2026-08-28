@@ -16,7 +16,7 @@ fn example_config_loads_with_documented_defaults() {
     assert_eq!(config.embed.model, "clip-vit-b-32");
     assert_eq!(config.embed.provider, "coreml");
     assert_eq!(config.search.transcript_hit_boost, 0.15);
-    assert_eq!(config.asr.model, "small");
+    assert_eq!(config.asr.model, "auto");
     assert_eq!(config.asr.language, None);
     assert_eq!(config.limits.threads, 0);
     assert_eq!(config.limits.concurrent_videos, 1);

@@ -15,7 +15,7 @@ provider = "coreml"   # or "cpu"
 transcript_hit_boost = 0.15
 
 [asr]
-model = "small"       # or "base"
+model = "auto"        # auto: base below 12 GiB, otherwise small; may override with "base" or "small"
 # language = "en"
 
 [limits]
