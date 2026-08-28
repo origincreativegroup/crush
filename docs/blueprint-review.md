@@ -1,8 +1,5 @@
 # Crush — Blueprint Review and Implementation Protocol
 
-> Historical review for the original video-search foundation. Current sequencing, ownership, and
-> release gates live in `docs/dam-feedback-blueprint.md`, `TASKS.md`, and `.tasks/`.
-
 Reviewer stance: adversarial. The goal is to find what breaks before an agent spends a week on it.
 
 ## Part 1 — What's wrong or thin in the plan

@@ -1,6 +1,9 @@
-# TASK-017: Explainable technical and aesthetic analysis
+# TASK-017: General strong-shot and explainable aesthetic analysis
 
 Depends: Task 016.
+
+This is the independent cold-start judgment layer. It must work without user examples, feedback,
+identity recognition, or an active personal profile.
 
 ## Acceptance
 
@@ -12,4 +15,4 @@ Depends: Task 016.
       repetition without treating identity recognition as quality.
 - [ ] Store component values, confidence, model version, and plain-language evidence.
 - [ ] Human-reviewed still and video fixtures catch regressions and calibration drift.
-
+- [ ] A no-profile acceptance test produces useful strong-shot ordering and plain-language reasons.

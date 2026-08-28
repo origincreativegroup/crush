@@ -1,13 +1,14 @@
 # Crush
 
-Crush is a private, local-first DAM for photos and video. It searches media in plain English,
-supports editorial review and feedback, learns a user's visual preferences, plans selects and
-clips, and renders finished media without uploading originals.
+Crush is a private, local-first editorial intelligence system for photos and video. It recognizes
+strong shots, learns how a particular user defines even better and more consistent work, plans
+selects and clips, and renders finished media without uploading originals. A searchable DAM is the
+foundation that makes those decisions traceable; cataloging is not the product's only purpose.
 
 **Status:** pre-alpha. Video ingest/search/export and the JPEG/PNG DAM vertical slice work. The
-next milestone adds RAW/HEIF/TIFF photo sources, production-video proxies and metadata, followed by
-explainable aesthetic analysis, personal-style evaluation, and unified photo/video rendering. See
-`TASKS.md`.
+next milestone adds RAW/HEIF/TIFF photo sources, production-video proxies and metadata. The core
+general-quality model must work before personalization; user feedback and explicitly added examples
+of previous work then refine its style match. See `TASKS.md`.
 
 - Blueprint: `docs/project-blueprint.md`
 - DAM and feedback direction: `docs/dam-feedback-blueprint.md`

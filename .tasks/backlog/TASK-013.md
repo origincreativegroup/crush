@@ -1,12 +1,14 @@
-# TASK-013: Build, sign, smoke, clean-machine test (superseded)
+# TASK-013: Build, sign, smoke, clean-machine test (deferred)
 
-This video-only release target was written before the DAM pivot. PR #13 was closed rather than
-merged. Reusable lessons are carried into Task 023: tagged/manual macOS builds, pinned Tauri CLI,
-hash-verified FFmpeg sidecars, `CI=true` for headless DMG creation, optional Developer ID signing
-and notarization, checksummed artifacts, install instructions, and clean-machine smoke records.
+The original build/sign/smoke plan remains valid engineering architecture. Its Claude implementation
+PR #13 was closed because it targeted the product before the expanded photo/video objectives were
+ready. Reusable implementation lessons are carried into Task 023: tagged/manual macOS builds,
+pinned Tauri CLI, hash-verified FFmpeg sidecars, `CI=true` for headless DMG creation, optional
+Developer ID signing and notarization, checksummed artifacts, install instructions, and
+clean-machine smoke records.
 
-The new release gate must exercise RAW/still ingest, mixed-media review, and photo/video rendering.
-The original checklist is preserved below as historical context.
+The final release gate extends—not removes—the checklist below with RAW/still ingest, mixed-media
+review, editorial intelligence, and photo/video rendering.
 
 ## Instructions
 1. `.github/workflows/release.yml` on `macos-latest`: rust stable, `cargo tauri build`, upload .dmg as release asset on tag `v*`.

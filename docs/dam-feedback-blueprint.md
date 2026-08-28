@@ -1,11 +1,20 @@
-# Crush DAM + Feedback Blueprint
+# Crush Editorial Intelligence + DAM Foundation Blueprint
 
 ## Product direction
 
-Crush is a private, local-first digital asset manager for photos and video. It finds media by
-meaning, helps a user make editorial selections, and learns the user's visual taste from the
-decisions they make. The goal is not merely to identify who or what appears in a frame. The goal
-is to rank the frames, photos, and clips the way that particular user would rank them.
+This document extends `docs/project-blueprint.md`; it does not replace that build architecture,
+local-first stack, test discipline, staged pipeline, or release requirements.
+
+Crush is a private, local-first editorial intelligence system for photos and video. Its core goal
+is to recognize strong shots, then learn how to recognize better and more stylistically consistent
+matches for a particular user. The DAM catalogs originals, proxies, metadata, decisions, recipes,
+and outputs so that intelligence has durable evidence and provenance. Cataloging is foundational,
+but it is not the sole product objective.
+
+The system must be useful before it knows anything about a user. General technical, aesthetic,
+moment, and sequence judgment provides the cold-start baseline. Personal feedback and explicitly
+added examples of previous work adapt that baseline; they do not replace it or become the only way
+Crush can recognize good material.
 
 Reel Studio is the editorial starting point. Its `quality`, `standout`, `usable`, privacy flags,
 descriptions, tags, crops, grades, `used_in`, and final reel recipes are valuable training signals.
@@ -39,24 +48,46 @@ useful implicit evidence and remain distinguishable from explicit opinion.
 | Signal | Meaning | Default strength |
 |---|---|---:|
 | pairwise preference | A is preferred to B in the same context | strongest |
+| curated previous-work example | user says this finished/select asset represents their style | strong |
 | pick / reject | explicit editorial decision | strong |
 | 1–5 rating | explicit quality judgment | strong |
 | crop / grade edit | preferred treatment and framing | medium |
 | export / publish / used in | asset survived a real workflow | medium |
 | search click / detail view | weak interest only | weak |
+| uncurated imported folder | catalog evidence only until the user confirms its meaning | none |
 
 Feedback may include a context such as “homepage hero,” “warm family reel,” or “event selects.” A
 preference in one context must not silently become a universal rule.
 
+## Previous work as style evidence
+
+Users can add prior photo sets, finished videos, reels, campaigns, selects, or exported work as
+named reference sets. They can describe the context (“editorial portrait,” “quiet travel film,”
+“high-energy product launch”), choose whether the whole set or only selected assets are positive
+examples, and optionally supply crops, grades, sequence order, or final outputs.
+
+- Reference media uses the same local ingest and catalog pipeline as current work.
+- “Previous work” is an explicit evidence role, not a separate hidden library.
+- A folder is not automatically positive training data merely because it was imported.
+- Final work may contain repeated, client-mandated, or technically compromised assets; confidence
+  and context remain attached to each signal.
+- Example assets contribute visual/style affinity and treatment evidence. They do not override
+  technical failures, privacy flags, semantic relevance, or the general strong-shot model.
+- Users can remove a reference set and reproduce a profile from the remaining evidence.
+
 ## Personal style model
 
-The first useful local model is deliberately small and auditable:
+The first useful local personal model is deliberately small and auditable:
 
 - normalized CLIP embedding features for semantic and visual affinity;
 - normalized aesthetic/design features;
 - an owner-specific linear ranking head trained from positive/negative and pairwise feedback;
 - regularization toward the general model while the user has little evidence;
 - versioned model snapshots with sample count, feature weights, and training metadata.
+
+The non-personalized ranker remains a first-class model and fallback. Personalized ranking is an
+optional residual/adaptor over the general judgment, trained from explicit feedback and curated
+reference work. Disabling or resetting a style profile must leave strong-shot recognition intact.
 
 For a query and candidate asset, ranking is:
 
@@ -71,7 +102,10 @@ and boundary-safe frames, then adds motion stability, moment, transcript, pacing
 Photo and video feedback therefore improve the same style profile without pretending they are
 identical media.
 
-## Cold start from Reel Studio
+## Optional historical evidence from Reel Studio
+
+The general cold-start model does not require Reel Studio or any prior user work. When a user
+chooses to import an existing Reel Studio catalogue, it can seed the personal adaptor as follows:
 
 An importer maps existing Reel Studio data as follows:
 
@@ -104,13 +138,16 @@ Nothing in the real Reel Studio database or media library enters version control
    working proxies. Expand production-video probing and proxy generation. Publish a tested format
    matrix; camera-RAW video such as BRAW/R3D/ProRes RAW requires an explicit decoder/licensing
    decision rather than silent fallback.
-3. **Explainable judgment:** compute technical, composition/design, moment/story, and sequence
-   features for stills and representative video frames. Preserve each component and confidence.
-4. **Review and learning:** pairwise compare, picks/rejects, ratings, crops, grades, tags, notes,
-   privacy flags, collections, version stacks, and saved searches. Train context-aware personal
-   ranking and require held-out improvement before calling it learned.
-5. **Editorial planning:** create ranked photo selects and video clip/reel plans in the user's
-   style, with editable reasons, boundaries, pacing, crops, grades, and sequence order.
+3. **General strong-shot judgment:** compute technical, composition/design, moment/story, and
+   sequence features for stills and representative video frames. Preserve each component and
+   confidence. This cold-start path cannot depend on personal examples.
+4. **Review, examples, and learning:** pairwise compare, picks/rejects, ratings, crops, grades,
+   tags, notes, privacy flags, collections, version stacks, saved searches, and user-designated
+   previous-work reference sets. Train a context-aware personal adaptor and require held-out
+   improvement before calling it learned.
+5. **Editorial planning:** first identify generally strong candidates, then create separately
+   explainable personalized photo selects and video clip/reel plans, with editable reasons,
+   boundaries, pacing, crops, grades, and sequence order.
 6. **Render and export:** keep originals immutable; store non-destructive recipes and render photo
    derivatives plus video clips/reels through resumable jobs. Exports include deterministic presets,
    color/orientation handling, metadata policy, cancellation, manifests, and output verification.
@@ -121,6 +158,8 @@ Nothing in the real Reel Studio database or media library enters version control
 
 - Search and ingest work for both photos and video without uploading media.
 - General quality and personal taste are displayed separately.
+- General strong-shot recognition works with no personal profile or previous-work examples.
+- Users can add, scope, inspect, and remove previous-work reference sets as training evidence.
 - A style profile cannot be called “learned” without held-out improvement over the general ranker.
 - Pairwise and pick/reject feedback must change ranking predictably and reversibly.
 - Every result can explain the signals that helped or hurt it.

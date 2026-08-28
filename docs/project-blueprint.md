@@ -1,9 +1,5 @@
 # Project Blueprint: Crush
 
-> Historical foundation plan. Tasks 0–12c established the local video-search stack. Product scope
-> has moved to the photo/video DAM plan in `docs/dam-feedback-blueprint.md` and `TASKS.md`; the task
-> order and release target below are no longer authoritative.
-
 Name is final: **Crush**. CLI binary `crushctl` (avoids charmbracelet/crush on Homebrew).
 
 ## 1. One-Line Concept

@@ -1,6 +1,7 @@
 # TASK-023: DAM release packaging and clean-machine acceptance
 
-Depends: Tasks 016–022. Supersedes the pre-pivot Task 013 and obsolete routing PR #15.
+Depends: Tasks 016–022. Extends the retained Task 013 release plan to the complete product and
+supersedes only the obsolete implementation/routing PRs #13 and #15.
 
 ## Retained engineering from the closed Claude release branch
 
