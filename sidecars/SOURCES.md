@@ -31,6 +31,10 @@ dependencies. Static-linking LGPL compliance obligations still apply to distribu
 handled by the later packaging/license task. See FFmpeg's official
 [license and legal guidance](https://ffmpeg.org/legal.html).
 
+The verified binaries are published as project release assets at
+`https://github.com/origincreativegroup/crush/releases/tag/sidecars-v1` for reproducible CI and
+packaging; the official source archive and configuration above remain the build provenance.
+
 | File | Bytes | SHA-256 |
 |---|---:|---|
 | `sidecars/ffmpeg` | 21,952,040 | `73a2114706389cad8a87890bb77b0dbe2031647acf25d6dcf48baf32fae29d0d` |
