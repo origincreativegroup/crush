@@ -16,5 +16,5 @@
 | TASK-011 | Ingest orchestration, cancel/resume, clip export | Codex (Mac) | done — resumable pipeline, cancellation, reprocessing, clip export |
 | TASK-012a | Tauri shell + commands | Codex (Mac) | done — signed `.app`, bundled sidecars, command bridge verified |
 | TASK-012b | First-run + Library screens | Codex (Mac) | done — native Library workflow, recoverable ingest, and UI states verified |
-| TASK-012c | Search + Shot detail screens | Cursor (Mac) | backlog — **hard stop after** |
+| TASK-012c | Search + Shot detail screens | Codex (Mac) | in review on `task/12c-search` — **hard stop after** |
 | TASK-013 | Build, sign, smoke, clean-machine test | Cursor (Mac) | backlog |

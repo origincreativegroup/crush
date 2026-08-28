@@ -51,7 +51,8 @@
 
       window.__TAURI__ = {
         core: {
-          async invoke(command) {
+          convertFileSrc: (path) => `asset://localhost/${encodeURIComponent(path)}`,
+          async invoke(command, args = {}) {
             if (command === "models_status") return modelFiles;
             if (command === "models_download") {
               setTimeout(() => {
@@ -70,6 +71,24 @@
             if (command === "doctor") return "Crush doctor\nffmpeg source=Bundled\nmodels=4/4 present";
             if (command === "cancel_ingest") return true;
             if (command === "add_folder" || command === "reindex_video") return { jobId: "background-test" };
+            if (command === "search") {
+              if (scenario === "empty" || args.q === "zzz") return [];
+              return Array.from({ length: 8 }, (_, i) => ({
+                shot_id: `shot-${i}`, video_path: videos[i % videos.length].path,
+                start_s: i * 3.2, end_s: i * 3.2 + 2.75, thumb_path: null,
+                score: 0.31 - i * 0.02, cosine: 0.31 - i * 0.02,
+                transcript_snippet: i % 2 ? "…and then the rocket cleared the tower…" : null,
+              }));
+            }
+            if (command === "shot_detail") {
+              const idx = Number(args.id.split("-")[1]);
+              return { id: args.id, videoId: "video-one", videoPath: videos[0].path, idx, shotCount: 12,
+                startS: idx * 3.2, endS: idx * 3.2 + 2.75, repFrameS: idx * 3.2 + 1, fps: 29.97, thumbPath: null,
+                transcripts: idx % 2 ? [{ id: "seg", startS: idx * 3.2, endS: idx * 3.2 + 2, text: "and then the rocket cleared the tower", confidence: 0.9 }] : [] };
+            }
+            if (command === "shot_at_index") return `shot-${args.idx}`;
+            if (command === "export_clip") return { path: args.out, mode: "Copy" };
+            if (command === "open_in_finder") return null;
             throw new Error(`Unhandled command: ${command}`);
           },
         },
@@ -84,12 +103,14 @@
             return { async onDragDropEvent(handler) { listeners.set("drag-drop", handler); return () => {}; } };
           },
         },
-        dialog: { async open() { return null; } },
+        dialog: { async open() { return null; }, async save(options) { return `/tmp/${options.defaultPath}`; } },
         clipboardManager: { async writeText() {} },
       };
     </script>
     <link rel="stylesheet" href="../ui/styles.css" />
+    <link rel="stylesheet" href="../ui/search.css" />
     <script src="../ui/app.js" defer></script>
+    <script src="../ui/search.js" defer></script>
   </head>
   <body>
     <div id="boot" class="boot-screen"><div class="boot-mark">C</div><p>Opening Crush…</p></div>
@@ -104,12 +125,78 @@
     </main>
     <div id="app-shell" class="app-shell" hidden>
       <aside class="sidebar"><div class="sidebar-brand"><div class="brand-mark small">C</div><span>Crush</span></div><nav><button class="nav-item" id="nav-search"><span class="nav-icon">⌕</span>Search</button><button class="nav-item active" id="nav-library"><span class="nav-icon">▦</span>Library</button></nav><footer class="sidebar-footer"><div id="indexing-status" class="indexing-status"><span class="status-dot idle"></span><span>Library idle</span></div><button id="doctor-link" class="doctor-link">Run Doctor</button></footer></aside>
-      <main class="workspace" aria-labelledby="library-title">
+      <main id="library-view" class="workspace" aria-labelledby="library-title">
         <header class="toolbar"><div><p class="eyebrow">Footage index</p><h1 id="library-title">Library</h1></div><div class="toolbar-actions"><button id="reindex" class="button secondary" disabled>Re-index selected</button><button id="cancel" class="button danger" hidden>Cancel</button><button id="add-folder" class="button primary">Add Folder…</button></div></header>
         <div id="library-message" class="library-message" role="status" hidden></div>
         <section id="library-content" class="library-content"><div id="empty-library" class="empty-state" hidden><div class="empty-icon">＋</div><h2>No footage yet</h2><p>No footage indexed yet. Add a folder to start indexing, or run <span class="mono">crushctl ingest</span>.</p><button id="empty-add-folder" class="button primary">Add Folder…</button></div><div id="video-table-wrap" class="table-wrap" hidden><table class="video-table"><thead><tr><th class="select-column"></th><th>File</th><th>Duration</th><th>Resolution</th><th>Status</th><th class="number-column">Shots</th><th class="expand-column"></th></tr></thead><tbody id="video-rows"></tbody></table></div></section>
         <div id="drop-overlay" class="drop-overlay" hidden><div><span>↓</span><strong>Drop folder to index</strong></div></div>
       </main>
+      <main id="search-view" class="workspace search-workspace" aria-labelledby="search-title" hidden>
+        <header class="toolbar search-toolbar">
+          <div class="search-box">
+            <span class="search-icon" aria-hidden="true">⌕</span>
+            <input id="search-input" type="search" autocomplete="off" spellcheck="false"
+              placeholder="Describe the shot… e.g. wide shot of the storefront at dusk" aria-label="Search footage" />
+            <kbd class="search-kbd" aria-hidden="true">⌘F</kbd>
+          </div>
+          <div class="search-meta">
+            <span id="result-count" class="result-count" aria-live="polite"></span>
+            <label class="top-select"><span class="sr-only">Results to show</span>
+              <select id="top-select"><option value="25">Top 25</option><option value="50" selected>Top 50</option><option value="100">Top 100</option></select>
+            </label>
+          </div>
+        </header>
+        <h1 id="search-title" class="sr-only">Search</h1>
+        <div id="search-message" class="library-message search-message" role="status" hidden></div>
+        <section id="search-content" class="search-content">
+          <div id="search-nothing-indexed" class="empty-state" hidden>
+            <div class="empty-icon" aria-hidden="true">▦</div>
+            <h2>Nothing indexed yet</h2>
+            <p>Add a folder in the Library and Crush will split, describe, and transcribe every shot.</p>
+            <button id="go-library" class="button primary" type="button">Open Library</button>
+          </div>
+          <div id="search-idle" class="empty-state muted" hidden>
+            <p>Type what you're looking for and press Enter.</p>
+          </div>
+          <div id="search-no-matches" class="empty-state muted" hidden>
+            <h2>No matches</h2>
+            <p>Try broader words — CLIP understands objects, scenes, and actions better than names.</p>
+          </div>
+          <div id="search-error" class="error-message search-error" role="alert" hidden></div>
+          <div id="results-grid" class="results-grid" role="listbox" aria-label="Search results" hidden></div>
+        </section>
+      </main>
+
+      <aside id="detail" class="detail-panel" role="dialog" aria-label="Shot detail" tabindex="-1" hidden>
+        <div class="detail-head">
+          <div>
+            <p class="eyebrow">Shot detail</p>
+            <div id="detail-file" class="file-name detail-file"></div>
+          </div>
+          <button id="detail-close" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="player-box">
+          <video id="detail-video" preload="metadata" playsinline></video>
+          <div id="player-hint" class="player-hint" aria-hidden="true">Space play/pause · L loop · ← → shots</div>
+        </div>
+        <div class="detail-times">
+          <span id="detail-timecodes" class="mono"></span>
+          <span id="detail-shot-index" class="detail-shot-index"></span>
+        </div>
+        <div class="detail-actions">
+          <button id="copy-timecodes" class="button secondary" type="button">Copy path + timecodes</button>
+          <button id="export-clip" class="button secondary" type="button">Export clip…</button>
+          <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>
+        </div>
+        <div class="detail-nav">
+          <button id="prev-shot" class="button secondary" type="button">← Prev shot</button>
+          <button id="next-shot" class="button secondary" type="button">Next shot →</button>
+        </div>
+        <section class="detail-transcript" aria-label="Transcript">
+          <p class="eyebrow">Transcript</p>
+          <div id="detail-transcript"></div>
+        </section>
+      </aside>
     </div>
     <dialog id="doctor-dialog" class="doctor-dialog"><div class="dialog-heading"><div><p class="eyebrow">Local runtime</p><h2>Doctor</h2></div><button id="close-doctor" class="icon-button">×</button></div><pre id="doctor-result">Ready.</pre><button id="run-doctor" class="button primary">Run Doctor</button></dialog>
   </body>

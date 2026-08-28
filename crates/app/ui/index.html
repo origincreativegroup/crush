@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Crush</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="search.css" />
     <script src="app.js" defer></script>
+    <script src="search.js" defer></script>
   </head>
   <body>
     <div id="boot" class="boot-screen">
@@ -57,7 +59,7 @@
         </footer>
       </aside>
 
-      <main class="workspace" aria-labelledby="library-title">
+      <main id="library-view" class="workspace" aria-labelledby="library-title">
         <header class="toolbar">
           <div>
             <p class="eyebrow">Footage index</p>
@@ -105,6 +107,73 @@
           </div>
         </div>
       </main>
+
+      <main id="search-view" class="workspace search-workspace" aria-labelledby="search-title" hidden>
+        <header class="toolbar search-toolbar">
+          <div class="search-box">
+            <span class="search-icon" aria-hidden="true">⌕</span>
+            <input id="search-input" type="search" autocomplete="off" spellcheck="false"
+              placeholder="Describe the shot… e.g. wide shot of the storefront at dusk" aria-label="Search footage" />
+            <kbd class="search-kbd" aria-hidden="true">⌘F</kbd>
+          </div>
+          <div class="search-meta">
+            <span id="result-count" class="result-count" aria-live="polite"></span>
+            <label class="top-select"><span class="sr-only">Results to show</span>
+              <select id="top-select"><option value="25">Top 25</option><option value="50" selected>Top 50</option><option value="100">Top 100</option></select>
+            </label>
+          </div>
+        </header>
+        <h1 id="search-title" class="sr-only">Search</h1>
+        <div id="search-message" class="library-message search-message" role="status" hidden></div>
+        <section id="search-content" class="search-content">
+          <div id="search-nothing-indexed" class="empty-state" hidden>
+            <div class="empty-icon" aria-hidden="true">▦</div>
+            <h2>Nothing indexed yet</h2>
+            <p>Add a folder in the Library and Crush will split, describe, and transcribe every shot.</p>
+            <button id="go-library" class="button primary" type="button">Open Library</button>
+          </div>
+          <div id="search-idle" class="empty-state muted" hidden>
+            <p>Type what you're looking for and press Enter.</p>
+          </div>
+          <div id="search-no-matches" class="empty-state muted" hidden>
+            <h2>No matches</h2>
+            <p>Try broader words — CLIP understands objects, scenes, and actions better than names.</p>
+          </div>
+          <div id="search-error" class="error-message search-error" role="alert" hidden></div>
+          <div id="results-grid" class="results-grid" role="listbox" aria-label="Search results" hidden></div>
+        </section>
+      </main>
+
+      <aside id="detail" class="detail-panel" role="dialog" aria-label="Shot detail" tabindex="-1" hidden>
+        <div class="detail-head">
+          <div>
+            <p class="eyebrow">Shot detail</p>
+            <div id="detail-file" class="file-name detail-file"></div>
+          </div>
+          <button id="detail-close" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="player-box">
+          <video id="detail-video" preload="metadata" playsinline></video>
+          <div id="player-hint" class="player-hint" aria-hidden="true">Space play/pause · L loop · ← → shots</div>
+        </div>
+        <div class="detail-times">
+          <span id="detail-timecodes" class="mono"></span>
+          <span id="detail-shot-index" class="detail-shot-index"></span>
+        </div>
+        <div class="detail-actions">
+          <button id="copy-timecodes" class="button secondary" type="button">Copy path + timecodes</button>
+          <button id="export-clip" class="button secondary" type="button">Export clip…</button>
+          <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>
+        </div>
+        <div class="detail-nav">
+          <button id="prev-shot" class="button secondary" type="button">← Prev shot</button>
+          <button id="next-shot" class="button secondary" type="button">Next shot →</button>
+        </div>
+        <section class="detail-transcript" aria-label="Transcript">
+          <p class="eyebrow">Transcript</p>
+          <div id="detail-transcript"></div>
+        </section>
+      </aside>
     </div>
 
     <dialog id="doctor-dialog" class="doctor-dialog">
