@@ -85,3 +85,8 @@
   pinned SHA, so CLI and test processes reuse the same two cache entries without changing releases.
   The missing-vector stage is resumable at batch one, and `crushctl debug vector` prints norm, first
   eight values, and verified provider.
+- TASK-009 is active on `task/09-search`. The owner-scoped in-memory cosine index, bounded top-K
+  heap, FTS overlap boost, stale-model refusal, result hydration, and table/JSON CLI are implemented.
+  The 10k×512 exact scan measured 7.55 ms; hybrid and workspace tests pass. A full fixture run
+  produced visually correct candidates for all five canned queries. The task awaits John's approval
+  before those candidates are committed as `fixtures/golden/expected_search.json`.

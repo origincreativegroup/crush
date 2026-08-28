@@ -268,11 +268,14 @@ dependencies = [
  "anyhow",
  "clap",
  "crush-core",
+ "crush-search",
  "crush-stage-embed",
  "crush-stage-split",
  "crush-store",
  "image",
+ "serde",
  "serde_json",
+ "tempfile",
  "tracing",
 ]
 
@@ -301,6 +304,9 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "crush-core",
+ "crush-store",
+ "serde",
+ "tempfile",
  "tracing",
 ]
 

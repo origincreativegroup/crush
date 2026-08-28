@@ -11,6 +11,9 @@ rep_frame_pos = 0.4
 model = "clip-vit-b-32"
 provider = "coreml"   # or "cpu"
 
+[search]
+transcript_hit_boost = 0.15
+
 [asr]
 model = "small"       # or "base"
 # language = "en"

@@ -36,3 +36,4 @@ jobs:
           test "$(shasum -a 256 "$CRUSH_TEST_MODELS/bpe_simple_vocab_16e6.txt.gz" | cut -d ' ' -f 1)" = "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a"
       - run: cargo test -p crush-stage-embed --test embedding_goldens clip_token_ids_match_all_text_goldens -- --nocapture
       - run: cargo test -p crush-stage-embed --test embedding_goldens cpu_image_and_text_embeddings_match_goldens -- --nocapture
+      - run: cargo test -p crush-cli --test search_fixtures -- --nocapture
