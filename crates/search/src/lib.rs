@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{ensure, Context};
-use crush_store::Store;
+use crush_store::{FeedbackSignal, MediaKind, Store, StyleProfile};
 use serde::Serialize;
 
 pub const EMBEDDING_DIM: usize = 512;
@@ -51,6 +51,116 @@ pub struct SearchResult {
     pub transcript_snippet: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AssetSearchResult {
+    pub asset_type: String,
+    pub asset_id: String,
+    pub path: String,
+    pub start_s: Option<f64>,
+    pub end_s: Option<f64>,
+    pub thumb_path: Option<String>,
+    pub score: f32,
+    pub cosine: f32,
+    pub transcript_snippet: Option<String>,
+    pub editorial_quality: Option<i64>,
+    pub aesthetic_score: Option<f64>,
+    pub personal_style_score: Option<f32>,
+}
+
+/// Rebuild the active owner-specific visual preference vector from retained feedback.
+/// This is intentionally an auditable linear baseline; later trainers can replace it behind the
+/// versioned StyleProfile record without changing feedback or search contracts.
+pub fn retrain_style_profile(
+    store: &mut Store,
+    owner_id: &str,
+) -> anyhow::Result<Option<StyleProfile>> {
+    let events = store.feedback_events(owner_id)?;
+    let mut weights = vec![0.0_f32; EMBEDDING_DIM];
+    let mut sample_count = 0_i64;
+    for event in events {
+        let coefficient = match event.signal {
+            FeedbackSignal::Pick | FeedbackSignal::Publish => 1.0,
+            FeedbackSignal::Reject => -1.0,
+            FeedbackSignal::Rating => event.value.map_or(0.0, |value| (value - 3.0) / 2.0) as f32,
+            FeedbackSignal::Prefer => 1.0,
+            FeedbackSignal::Export => 0.5,
+            FeedbackSignal::Crop
+            | FeedbackSignal::Grade
+            | FeedbackSignal::Tag
+            | FeedbackSignal::Edit => 0.25,
+        };
+        if coefficient != 0.0 {
+            if let Some(vector) = media_vector(store, owner_id, event.media_kind, &event.media_id)?
+            {
+                add_scaled(&mut weights, &vector, coefficient)?;
+                sample_count += 1;
+            }
+        }
+        if event.signal == FeedbackSignal::Prefer {
+            if let (Some(kind), Some(id)) = (event.compared_media_kind, event.compared_media_id) {
+                if let Some(vector) = media_vector(store, owner_id, kind, &id)? {
+                    add_scaled(&mut weights, &vector, -1.0)?;
+                    sample_count += 1;
+                }
+            }
+        }
+    }
+    let norm = weights
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if sample_count == 0 || norm <= f32::EPSILON {
+        return Ok(None);
+    }
+    for value in &mut weights {
+        *value /= norm;
+    }
+    let previous_version = store
+        .active_style_profile(owner_id)?
+        .map_or(0, |profile| profile.version);
+    let profile = StyleProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        owner_id: owner_id.to_owned(),
+        name: "default".to_owned(),
+        version: previous_version + 1,
+        algorithm_version: "feedback-centroid-v1".to_owned(),
+        embedding_weights: weights,
+        feature_weights_json: "{}".to_owned(),
+        sample_count,
+        held_out_metric: None,
+        active: true,
+        trained_at: chrono::Utc::now(),
+    };
+    store.put_style_profile(owner_id, &profile)?;
+    Ok(Some(profile))
+}
+
+fn media_vector(
+    store: &Store,
+    owner_id: &str,
+    kind: MediaKind,
+    id: &str,
+) -> anyhow::Result<Option<Vec<f32>>> {
+    match kind {
+        MediaKind::Photo => store.vector_for_photo(owner_id, id),
+        MediaKind::Shot => store.vector_for_shot(owner_id, id),
+    }
+}
+
+fn add_scaled(target: &mut [f32], values: &[f32], scale: f32) -> anyhow::Result<()> {
+    ensure!(
+        target.len() == values.len(),
+        "feedback vector dimension {} does not match style dimension {}",
+        values.len(),
+        target.len()
+    );
+    for (target, value) in target.iter_mut().zip(values) {
+        *target += value * scale;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct VectorIndex {
     owner_id: String,
@@ -62,6 +172,16 @@ impl VectorIndex {
     pub fn load(store: &Store, owner_id: &str) -> anyhow::Result<Self> {
         validate_embedding_metadata(store, owner_id)?;
         let (shot_ids, matrix) = store.load_all_vectors(owner_id)?;
+        Self::from_parts(owner_id, shot_ids, matrix)
+    }
+
+    fn load_photos(store: &Store, owner_id: &str) -> anyhow::Result<Self> {
+        validate_embedding_metadata(store, owner_id)?;
+        let (photo_ids, matrix) = store.load_all_photo_vectors(owner_id)?;
+        Self::from_parts(owner_id, photo_ids, matrix)
+    }
+
+    fn from_parts(owner_id: &str, shot_ids: Vec<String>, matrix: Vec<f32>) -> anyhow::Result<Self> {
         ensure!(
             matrix.len() == shot_ids.len() * EMBEDDING_DIM,
             "vector matrix contains {} values for {} shots; expected dimension {EMBEDDING_DIM}",
@@ -171,6 +291,7 @@ impl VectorIndex {
 
 pub struct SearchEngine {
     index: VectorIndex,
+    photo_index: VectorIndex,
     owner_id: String,
     transcript_hit_boost: f32,
 }
@@ -183,21 +304,24 @@ impl SearchEngine {
         );
         Ok(Self {
             index: VectorIndex::load(store, owner_id)?,
+            photo_index: VectorIndex::load_photos(store, owner_id)?,
             owner_id: owner_id.to_owned(),
             transcript_hit_boost,
         })
     }
 
     pub fn reload(&mut self, store: &Store) -> anyhow::Result<()> {
-        self.index.reload(store, &self.owner_id)
+        self.index.reload(store, &self.owner_id)?;
+        self.photo_index = VectorIndex::load_photos(store, &self.owner_id)?;
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
-        self.index.len()
+        self.index.len() + self.photo_index.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
+        self.index.is_empty() && self.photo_index.is_empty()
     }
 
     pub fn search<E: TextEmbedder>(
@@ -272,6 +396,177 @@ impl SearchEngine {
         );
         Ok(results)
     }
+
+    pub fn search_assets<E: TextEmbedder>(
+        &self,
+        store: &Store,
+        embedder: &mut E,
+        query: &str,
+        top_k: usize,
+    ) -> anyhow::Result<Vec<AssetSearchResult>> {
+        ensure!(!query.trim().is_empty(), "search query must not be empty");
+        ensure!(top_k > 0, "top must be greater than zero");
+
+        let mut transcript_hits = HashMap::new();
+        if let Some(fts_query) = transcript_fts_query(query) {
+            for hit in store.transcript_shot_hits(&self.owner_id, &fts_query)? {
+                transcript_hits.entry(hit.shot_id).or_insert(hit.text);
+            }
+        }
+        let query_vector = embedder.embed_text(query)?;
+        let shot_matches = self.index.search_with_boosts(
+            &query_vector,
+            top_k,
+            &self.owner_id,
+            &transcript_hits,
+            self.transcript_hit_boost,
+        )?;
+        let photo_matches = self
+            .photo_index
+            .search(&query_vector, top_k, &self.owner_id)?;
+        let style_profile = store.active_style_profile(&self.owner_id)?;
+        let mut results = Vec::with_capacity(shot_matches.len() + photo_matches.len());
+
+        for found in shot_matches {
+            let context = store
+                .search_shot_context(&self.owner_id, &found.shot_id)?
+                .with_context(|| format!("indexed shot {} no longer exists", found.shot_id))?;
+            let transcript_snippet = if let Some(text) = transcript_hits.get(&found.shot_id) {
+                Some(snippet(text))
+            } else {
+                store
+                    .segments_overlapping(
+                        &self.owner_id,
+                        &context.video_id,
+                        context.start_s,
+                        context.end_s,
+                    )?
+                    .first()
+                    .map(|segment| snippet(&segment.text))
+            };
+            let annotation =
+                store.editorial_annotation(&self.owner_id, MediaKind::Shot, &found.shot_id)?;
+            let aesthetic =
+                store.aesthetic_assessment(&self.owner_id, MediaKind::Shot, &found.shot_id)?;
+            let personal_style_score = personal_style_score(
+                store,
+                &self.owner_id,
+                MediaKind::Shot,
+                &found.shot_id,
+                style_profile.as_ref(),
+            )?;
+            let score = found.score
+                + editorial_adjustment(annotation.as_ref())
+                + personal_style_score.unwrap_or(0.0) * 0.15;
+            results.push(AssetSearchResult {
+                asset_type: "video".to_owned(),
+                asset_id: found.shot_id,
+                path: context.video_path,
+                start_s: Some(context.start_s),
+                end_s: Some(context.end_s),
+                thumb_path: context
+                    .thumb_rel
+                    .as_deref()
+                    .map(|relative| store.thumbnail_path(relative))
+                    .transpose()?
+                    .map(|path| path.display().to_string()),
+                score,
+                cosine: found.cosine,
+                transcript_snippet,
+                editorial_quality: annotation.as_ref().and_then(|value| value.quality),
+                aesthetic_score: aesthetic.map(|value| value.overall),
+                personal_style_score,
+            });
+        }
+
+        for found in photo_matches {
+            let photo = store
+                .photo_by_id(&self.owner_id, &found.shot_id)?
+                .with_context(|| format!("indexed photo {} no longer exists", found.shot_id))?;
+            let annotation =
+                store.editorial_annotation(&self.owner_id, MediaKind::Photo, &found.shot_id)?;
+            let aesthetic =
+                store.aesthetic_assessment(&self.owner_id, MediaKind::Photo, &found.shot_id)?;
+            let personal_style_score = personal_style_score(
+                store,
+                &self.owner_id,
+                MediaKind::Photo,
+                &found.shot_id,
+                style_profile.as_ref(),
+            )?;
+            let score = found.score
+                + editorial_adjustment(annotation.as_ref())
+                + personal_style_score.unwrap_or(0.0) * 0.15;
+            results.push(AssetSearchResult {
+                asset_type: "photo".to_owned(),
+                asset_id: found.shot_id,
+                path: photo.path,
+                start_s: None,
+                end_s: None,
+                thumb_path: photo
+                    .thumb_rel
+                    .as_deref()
+                    .map(|relative| store.thumbnail_path(relative))
+                    .transpose()?
+                    .map(|path| path.display().to_string()),
+                score,
+                cosine: found.cosine,
+                transcript_snippet: None,
+                editorial_quality: annotation.as_ref().and_then(|value| value.quality),
+                aesthetic_score: aesthetic.map(|value| value.overall),
+                personal_style_score,
+            });
+        }
+
+        results.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.asset_id.cmp(&right.asset_id))
+        });
+        results.truncate(top_k);
+        tracing::info!(
+            job_id = "search",
+            stage = "search",
+            owner_id = self.owner_id,
+            query,
+            indexed_assets = self.len(),
+            results = results.len(),
+            "mixed-media search complete"
+        );
+        Ok(results)
+    }
+}
+
+fn editorial_adjustment(annotation: Option<&crush_store::EditorialAnnotation>) -> f32 {
+    let Some(annotation) = annotation else {
+        return 0.0;
+    };
+    if !annotation.usable {
+        return -1.0;
+    }
+    let quality = annotation
+        .quality
+        .map_or(0.0, |value| (value as f32 - 3.0) * 0.025);
+    quality + if annotation.standout { 0.05 } else { 0.0 }
+}
+
+fn personal_style_score(
+    store: &Store,
+    owner_id: &str,
+    media_kind: MediaKind,
+    media_id: &str,
+    profile: Option<&StyleProfile>,
+) -> anyhow::Result<Option<f32>> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    if profile.embedding_weights.len() != EMBEDDING_DIM {
+        return Ok(None);
+    }
+    Ok(media_vector(store, owner_id, media_kind, media_id)?
+        .filter(|vector| vector.len() == EMBEDDING_DIM)
+        .map(|vector| dot_512(&vector, &profile.embedding_weights)))
 }
 
 fn validate_embedding_metadata(store: &Store, owner_id: &str) -> anyhow::Result<()> {
@@ -366,7 +661,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crush_core::DEFAULT_OWNER_ID;
-    use crush_store::{EmbeddingMeta, Shot, TranscriptSegment, Video, VideoStatus};
+    use crush_store::{
+        EmbeddingMeta, FeedbackEvent, FeedbackSignal, MediaKind, Shot, TranscriptSegment, Video,
+        VideoStatus,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -473,6 +771,57 @@ mod tests {
         assert!(error
             .to_string()
             .contains("models changed, run `crushctl reembed --all`"));
+    }
+
+    #[test]
+    fn explicit_feedback_trains_a_personal_ranker_that_changes_order() {
+        let (_directory, mut store) = populated_store();
+        let mut preferred = [0.0_f32; EMBEDDING_DIM];
+        preferred[1] = 1.0;
+        store
+            .put_vector(DEFAULT_OWNER_ID, "shot-b", &preferred)
+            .unwrap();
+        for (id, media_id, signal, value) in [
+            ("feedback-pick", "shot-b", FeedbackSignal::Pick, Some(1.0)),
+            (
+                "feedback-reject",
+                "shot-a",
+                FeedbackSignal::Reject,
+                Some(-1.0),
+            ),
+        ] {
+            store
+                .append_feedback(
+                    DEFAULT_OWNER_ID,
+                    &FeedbackEvent {
+                        id: id.to_owned(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        media_kind: MediaKind::Shot,
+                        media_id: media_id.to_owned(),
+                        signal,
+                        value,
+                        compared_media_kind: None,
+                        compared_media_id: None,
+                        context_json: "{}".to_owned(),
+                        created_at: chrono::Utc::now(),
+                    },
+                )
+                .unwrap();
+        }
+        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.sample_count, 2);
+        assert_eq!(profile.algorithm_version, "feedback-centroid-v1");
+
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
+        let results = engine
+            .search_assets(&store, &mut embedder, "same semantics", 2)
+            .unwrap();
+        assert_eq!(results[0].asset_id, "shot-b");
+        assert!(results[0].personal_style_score.unwrap() > 0.0);
+        assert!(results[1].personal_style_score.unwrap() < 0.0);
     }
 
     fn populated_store() -> (TempDir, Store) {

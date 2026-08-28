@@ -14,8 +14,11 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 1;
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_init.sql"))];
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_init.sql")),
+    (2, include_str!("../migrations/0002_dam_feedback.sql")),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoStatus {
@@ -40,6 +43,124 @@ pub struct Video {
     pub has_audio: bool,
     pub status: VideoStatus,
     pub indexed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhotoStatus {
+    Pending,
+    Embedded,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Photo {
+    pub id: String,
+    pub owner_id: String,
+    pub path: String,
+    pub sha256: String,
+    pub width: i64,
+    pub height: i64,
+    pub format: String,
+    pub orientation: Option<i64>,
+    pub captured_at: Option<DateTime<Utc>>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens: Option<String>,
+    /// Path relative to `<data_dir>/thumbs`.
+    pub thumb_rel: Option<String>,
+    pub status: PhotoStatus,
+    pub indexed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Photo,
+    Shot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditorialAnnotation {
+    pub owner_id: String,
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    pub description: String,
+    pub subjects: String,
+    pub action: String,
+    pub tags: String,
+    pub quality: Option<i64>,
+    pub standout: bool,
+    pub usable: bool,
+    pub faces_visible: bool,
+    pub nametags_visible: bool,
+    pub blur_required: bool,
+    pub crop_x: Option<f64>,
+    pub grade_json: Option<String>,
+    pub notes: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AestheticAssessment {
+    pub owner_id: String,
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    pub sharpness: f64,
+    pub exposure: f64,
+    pub contrast: f64,
+    pub color_harmony: f64,
+    pub balance: f64,
+    pub subject_placement: f64,
+    pub negative_space: f64,
+    pub visual_clarity: f64,
+    pub overall: f64,
+    pub confidence: f64,
+    pub explanation_json: String,
+    pub model_version: String,
+    pub assessed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackSignal {
+    Pick,
+    Reject,
+    Rating,
+    Prefer,
+    Crop,
+    Grade,
+    Export,
+    Publish,
+    Tag,
+    Edit,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeedbackEvent {
+    pub id: String,
+    pub owner_id: String,
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    pub signal: FeedbackSignal,
+    pub value: Option<f64>,
+    pub compared_media_kind: Option<MediaKind>,
+    pub compared_media_id: Option<String>,
+    pub context_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleProfile {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub version: i64,
+    pub algorithm_version: String,
+    pub embedding_weights: Vec<f32>,
+    pub feature_weights_json: String,
+    pub sample_count: i64,
+    pub held_out_metric: Option<f64>,
+    pub active: bool,
+    pub trained_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +295,506 @@ impl Store {
                 |row| row.get(0),
             )
             .context("failed to read schema version")
+    }
+
+    pub fn upsert_photo(&self, owner_id: &str, photo: &Photo) -> anyhow::Result<Photo> {
+        ensure_owner_matches(owner_id, &photo.owner_id, "photo")?;
+        validate_photo(photo)?;
+        self.connection.execute(
+            "INSERT INTO photos (
+                id, owner_id, path, sha256, width, height, format, orientation, captured_at,
+                camera_make, camera_model, lens, thumb_rel, status, indexed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             ON CONFLICT(owner_id, sha256) DO UPDATE SET
+                path = excluded.path,
+                width = excluded.width,
+                height = excluded.height,
+                format = excluded.format,
+                orientation = excluded.orientation,
+                captured_at = excluded.captured_at,
+                camera_make = excluded.camera_make,
+                camera_model = excluded.camera_model,
+                lens = excluded.lens,
+                thumb_rel = excluded.thumb_rel,
+                status = excluded.status,
+                indexed_at = excluded.indexed_at",
+            params![
+                photo.id,
+                owner_id,
+                photo.path,
+                photo.sha256,
+                photo.width,
+                photo.height,
+                photo.format,
+                photo.orientation,
+                photo.captured_at.map(|value| value.to_rfc3339()),
+                photo.camera_make,
+                photo.camera_model,
+                photo.lens,
+                photo.thumb_rel,
+                photo_status_to_str(photo.status),
+                photo.indexed_at.map(|value| value.to_rfc3339()),
+            ],
+        )?;
+        self.photo_by_sha(owner_id, &photo.sha256)?
+            .context("upserted photo could not be read back")
+    }
+
+    pub fn photo_by_sha(&self, owner_id: &str, sha256: &str) -> anyhow::Result<Option<Photo>> {
+        self.photo_query(
+            "SELECT id, owner_id, path, sha256, width, height, format, orientation, captured_at,
+                    camera_make, camera_model, lens, thumb_rel, status, indexed_at
+             FROM photos WHERE owner_id = ?1 AND sha256 = ?2",
+            owner_id,
+            sha256,
+        )
+    }
+
+    pub fn photo_by_id(&self, owner_id: &str, photo_id: &str) -> anyhow::Result<Option<Photo>> {
+        self.photo_query(
+            "SELECT id, owner_id, path, sha256, width, height, format, orientation, captured_at,
+                    camera_make, camera_model, lens, thumb_rel, status, indexed_at
+             FROM photos WHERE owner_id = ?1 AND id = ?2",
+            owner_id,
+            photo_id,
+        )
+    }
+
+    pub fn photo_by_path(&self, owner_id: &str, path: &str) -> anyhow::Result<Option<Photo>> {
+        self.photo_query(
+            "SELECT id, owner_id, path, sha256, width, height, format, orientation, captured_at,
+                    camera_make, camera_model, lens, thumb_rel, status, indexed_at
+             FROM photos WHERE owner_id = ?1 AND path = ?2",
+            owner_id,
+            path,
+        )
+    }
+
+    pub fn photos(&self, owner_id: &str) -> anyhow::Result<Vec<Photo>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, path, sha256, width, height, format, orientation, captured_at,
+                    camera_make, camera_model, lens, thumb_rel, status, indexed_at
+             FROM photos WHERE owner_id = ?1 ORDER BY path, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], photo_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list photos")
+    }
+
+    pub fn set_photo_status(
+        &self,
+        owner_id: &str,
+        photo_id: &str,
+        status: PhotoStatus,
+    ) -> anyhow::Result<()> {
+        let indexed_at = (status == PhotoStatus::Done).then(|| Utc::now().to_rfc3339());
+        let changed = self.connection.execute(
+            "UPDATE photos
+             SET status = ?3,
+                 indexed_at = CASE WHEN ?3 = 'done' THEN COALESCE(indexed_at, ?4)
+                                   ELSE indexed_at END
+             WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, photo_id, photo_status_to_str(status), indexed_at],
+        )?;
+        ensure_changed(changed, "photo", photo_id)
+    }
+
+    pub fn put_photo_vector(
+        &self,
+        owner_id: &str,
+        photo_id: &str,
+        values: &[f32],
+    ) -> anyhow::Result<()> {
+        ensure!(!values.is_empty(), "vector must not be empty");
+        self.connection.execute(
+            "INSERT INTO photo_vectors (photo_id, owner_id, dim, vec)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(photo_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                dim = excluded.dim,
+                vec = excluded.vec",
+            params![
+                photo_id,
+                owner_id,
+                values.len() as i64,
+                vector_bytes(values)
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn vector_for_photo(
+        &self,
+        owner_id: &str,
+        photo_id: &str,
+    ) -> anyhow::Result<Option<Vec<f32>>> {
+        self.vector_row(
+            "SELECT dim, vec FROM photo_vectors WHERE owner_id = ?1 AND photo_id = ?2",
+            owner_id,
+            photo_id,
+        )
+    }
+
+    pub fn load_all_photo_vectors(
+        &self,
+        owner_id: &str,
+    ) -> anyhow::Result<(Vec<String>, Vec<f32>)> {
+        self.load_vector_matrix(
+            "SELECT photo_id, dim, vec FROM photo_vectors WHERE owner_id = ?1 ORDER BY photo_id",
+            owner_id,
+        )
+    }
+
+    pub fn upsert_editorial_annotation(
+        &self,
+        owner_id: &str,
+        annotation: &EditorialAnnotation,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &annotation.owner_id, "editorial annotation")?;
+        if let Some(quality) = annotation.quality {
+            ensure!(
+                (1..=5).contains(&quality),
+                "quality must be between 1 and 5"
+            );
+        }
+        if let Some(crop_x) = annotation.crop_x {
+            ensure_unit_score(crop_x, "crop_x")?;
+        }
+        self.connection.execute(
+            "INSERT INTO editorial_annotations (
+                owner_id, media_kind, media_id, description, subjects, action, tags, quality,
+                standout, usable, faces_visible, nametags_visible, blur_required, crop_x,
+                grade_json, notes, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(owner_id, media_kind, media_id) DO UPDATE SET
+                description = excluded.description,
+                subjects = excluded.subjects,
+                action = excluded.action,
+                tags = excluded.tags,
+                quality = excluded.quality,
+                standout = excluded.standout,
+                usable = excluded.usable,
+                faces_visible = excluded.faces_visible,
+                nametags_visible = excluded.nametags_visible,
+                blur_required = excluded.blur_required,
+                crop_x = excluded.crop_x,
+                grade_json = excluded.grade_json,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at",
+            params![
+                owner_id,
+                media_kind_to_str(annotation.media_kind),
+                annotation.media_id,
+                annotation.description,
+                annotation.subjects,
+                annotation.action,
+                annotation.tags,
+                annotation.quality,
+                annotation.standout,
+                annotation.usable,
+                annotation.faces_visible,
+                annotation.nametags_visible,
+                annotation.blur_required,
+                annotation.crop_x,
+                annotation.grade_json,
+                annotation.notes,
+                annotation.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn editorial_annotation(
+        &self,
+        owner_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+    ) -> anyhow::Result<Option<EditorialAnnotation>> {
+        self.connection
+            .query_row(
+                "SELECT owner_id, media_kind, media_id, description, subjects, action, tags,
+                        quality, standout, usable, faces_visible, nametags_visible, blur_required,
+                        crop_x, grade_json, notes, updated_at
+                 FROM editorial_annotations
+                 WHERE owner_id = ?1 AND media_kind = ?2 AND media_id = ?3",
+                params![owner_id, media_kind_to_str(media_kind), media_id],
+                editorial_annotation_from_row,
+            )
+            .optional()
+            .context("failed to read editorial annotation")
+    }
+
+    pub fn upsert_aesthetic_assessment(
+        &self,
+        owner_id: &str,
+        assessment: &AestheticAssessment,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &assessment.owner_id, "aesthetic assessment")?;
+        for (name, score) in [
+            ("sharpness", assessment.sharpness),
+            ("exposure", assessment.exposure),
+            ("contrast", assessment.contrast),
+            ("color_harmony", assessment.color_harmony),
+            ("balance", assessment.balance),
+            ("subject_placement", assessment.subject_placement),
+            ("negative_space", assessment.negative_space),
+            ("visual_clarity", assessment.visual_clarity),
+            ("overall", assessment.overall),
+            ("confidence", assessment.confidence),
+        ] {
+            ensure_unit_score(score, name)?;
+        }
+        self.connection.execute(
+            "INSERT INTO aesthetic_assessments (
+                owner_id, media_kind, media_id, sharpness, exposure, contrast, color_harmony,
+                balance, subject_placement, negative_space, visual_clarity, overall, confidence,
+                explanation_json, model_version, assessed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(owner_id, media_kind, media_id) DO UPDATE SET
+                sharpness = excluded.sharpness,
+                exposure = excluded.exposure,
+                contrast = excluded.contrast,
+                color_harmony = excluded.color_harmony,
+                balance = excluded.balance,
+                subject_placement = excluded.subject_placement,
+                negative_space = excluded.negative_space,
+                visual_clarity = excluded.visual_clarity,
+                overall = excluded.overall,
+                confidence = excluded.confidence,
+                explanation_json = excluded.explanation_json,
+                model_version = excluded.model_version,
+                assessed_at = excluded.assessed_at",
+            params![
+                owner_id,
+                media_kind_to_str(assessment.media_kind),
+                assessment.media_id,
+                assessment.sharpness,
+                assessment.exposure,
+                assessment.contrast,
+                assessment.color_harmony,
+                assessment.balance,
+                assessment.subject_placement,
+                assessment.negative_space,
+                assessment.visual_clarity,
+                assessment.overall,
+                assessment.confidence,
+                assessment.explanation_json,
+                assessment.model_version,
+                assessment.assessed_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn aesthetic_assessment(
+        &self,
+        owner_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+    ) -> anyhow::Result<Option<AestheticAssessment>> {
+        self.connection
+            .query_row(
+                "SELECT owner_id, media_kind, media_id, sharpness, exposure, contrast,
+                        color_harmony, balance, subject_placement, negative_space, visual_clarity,
+                        overall, confidence, explanation_json, model_version, assessed_at
+                 FROM aesthetic_assessments
+                 WHERE owner_id = ?1 AND media_kind = ?2 AND media_id = ?3",
+                params![owner_id, media_kind_to_str(media_kind), media_id],
+                aesthetic_assessment_from_row,
+            )
+            .optional()
+            .context("failed to read aesthetic assessment")
+    }
+
+    pub fn append_feedback(&self, owner_id: &str, event: &FeedbackEvent) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &event.owner_id, "feedback event")?;
+        let has_comparison =
+            event.compared_media_kind.is_some() && event.compared_media_id.is_some();
+        ensure!(
+            event.compared_media_kind.is_some() == event.compared_media_id.is_some(),
+            "compared media kind and id must be supplied together"
+        );
+        ensure!(
+            event.signal == FeedbackSignal::Prefer || !has_comparison,
+            "only prefer feedback may compare two assets"
+        );
+        ensure!(
+            event.signal != FeedbackSignal::Prefer || has_comparison,
+            "prefer feedback requires a compared asset"
+        );
+        if event.signal == FeedbackSignal::Rating {
+            ensure!(
+                event
+                    .value
+                    .is_some_and(|value| (1.0..=5.0).contains(&value)),
+                "rating feedback requires a value from 1 to 5"
+            );
+        }
+        self.connection.execute(
+            "INSERT INTO feedback_events (
+                id, owner_id, media_kind, media_id, signal, value, compared_media_kind,
+                compared_media_id, context_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                event.id,
+                owner_id,
+                media_kind_to_str(event.media_kind),
+                event.media_id,
+                feedback_signal_to_str(event.signal),
+                event.value,
+                event.compared_media_kind.map(media_kind_to_str),
+                event.compared_media_id,
+                event.context_json,
+                event.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn feedback_events(&self, owner_id: &str) -> anyhow::Result<Vec<FeedbackEvent>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, media_kind, media_id, signal, value, compared_media_kind,
+                    compared_media_id, context_json, created_at
+             FROM feedback_events WHERE owner_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], feedback_event_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list feedback events")
+    }
+
+    pub fn put_style_profile(
+        &mut self,
+        owner_id: &str,
+        profile: &StyleProfile,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &profile.owner_id, "style profile")?;
+        ensure!(
+            profile.version > 0,
+            "style profile version must be positive"
+        );
+        ensure!(
+            !profile.embedding_weights.is_empty(),
+            "style profile embedding weights must not be empty"
+        );
+        ensure!(
+            profile.sample_count >= 0,
+            "sample count must be non-negative"
+        );
+        ensure!(
+            profile
+                .embedding_weights
+                .iter()
+                .all(|value| value.is_finite()),
+            "style profile contains non-finite embedding weights"
+        );
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if profile.active {
+            transaction.execute(
+                "UPDATE style_profiles SET active = 0 WHERE owner_id = ?1",
+                params![owner_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO style_profiles (
+                id, owner_id, name, version, algorithm_version, embedding_dim,
+                embedding_weights, feature_weights_json, sample_count, held_out_metric, active,
+                trained_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                version = excluded.version,
+                algorithm_version = excluded.algorithm_version,
+                embedding_dim = excluded.embedding_dim,
+                embedding_weights = excluded.embedding_weights,
+                feature_weights_json = excluded.feature_weights_json,
+                sample_count = excluded.sample_count,
+                held_out_metric = excluded.held_out_metric,
+                active = excluded.active,
+                trained_at = excluded.trained_at",
+            params![
+                profile.id,
+                owner_id,
+                profile.name,
+                profile.version,
+                profile.algorithm_version,
+                profile.embedding_weights.len() as i64,
+                vector_bytes(&profile.embedding_weights),
+                profile.feature_weights_json,
+                profile.sample_count,
+                profile.held_out_metric,
+                profile.active,
+                profile.trained_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn active_style_profile(&self, owner_id: &str) -> anyhow::Result<Option<StyleProfile>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, name, version, algorithm_version, embedding_dim,
+                        embedding_weights, feature_weights_json, sample_count, held_out_metric,
+                        active, trained_at
+                 FROM style_profiles WHERE owner_id = ?1 AND active = 1",
+                params![owner_id],
+                style_profile_from_row,
+            )
+            .optional()
+            .context("failed to read active style profile")
+    }
+
+    fn photo_query(&self, sql: &str, owner_id: &str, value: &str) -> anyhow::Result<Option<Photo>> {
+        self.connection
+            .query_row(sql, params![owner_id, value], photo_from_row)
+            .optional()
+            .context("failed to query photo")
+    }
+
+    fn vector_row(
+        &self,
+        sql: &str,
+        owner_id: &str,
+        media_id: &str,
+    ) -> anyhow::Result<Option<Vec<f32>>> {
+        let row = self
+            .connection
+            .query_row(sql, params![owner_id, media_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .optional()?;
+        row.map(|(dim, bytes)| decode_vector(dim, bytes, media_id))
+            .transpose()
+    }
+
+    fn load_vector_matrix(
+        &self,
+        sql: &str,
+        owner_id: &str,
+    ) -> anyhow::Result<(Vec<String>, Vec<f32>)> {
+        let mut statement = self.connection.prepare(sql)?;
+        let mut rows = statement.query(params![owner_id])?;
+        let mut ids = Vec::new();
+        let mut matrix = Vec::new();
+        let mut expected_dim = None;
+        while let Some(row) = rows.next()? {
+            let media_id: String = row.get(0)?;
+            let dim: i64 = row.get(1)?;
+            let values = decode_vector(dim, row.get(2)?, &media_id)?;
+            if let Some(previous) = expected_dim {
+                ensure!(
+                    previous == values.len(),
+                    "vector {media_id} has inconsistent dimension"
+                );
+            } else {
+                expected_dim = Some(values.len());
+            }
+            ids.push(media_id);
+            matrix.extend(values);
+        }
+        Ok((ids, matrix))
     }
 
     pub fn upsert_video(&self, owner_id: &str, video: &Video) -> anyhow::Result<Video> {
@@ -1152,6 +1773,131 @@ fn video_from_row(row: &Row<'_>) -> rusqlite::Result<Video> {
     })
 }
 
+fn photo_from_row(row: &Row<'_>) -> rusqlite::Result<Photo> {
+    let captured_at: Option<String> = row.get(8)?;
+    let status: String = row.get(13)?;
+    let indexed_at: Option<String> = row.get(14)?;
+    Ok(Photo {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        path: row.get(2)?,
+        sha256: row.get(3)?,
+        width: row.get(4)?,
+        height: row.get(5)?,
+        format: row.get(6)?,
+        orientation: row.get(7)?,
+        captured_at: captured_at
+            .map(|value| timestamp_from_str(&value, 8))
+            .transpose()?,
+        camera_make: row.get(9)?,
+        camera_model: row.get(10)?,
+        lens: row.get(11)?,
+        thumb_rel: row.get(12)?,
+        status: photo_status_from_str(&status)
+            .map_err(|error| conversion_message(13, error.to_string()))?,
+        indexed_at: indexed_at
+            .map(|value| timestamp_from_str(&value, 14))
+            .transpose()?,
+    })
+}
+
+fn editorial_annotation_from_row(row: &Row<'_>) -> rusqlite::Result<EditorialAnnotation> {
+    let media_kind: String = row.get(1)?;
+    let updated_at: String = row.get(16)?;
+    Ok(EditorialAnnotation {
+        owner_id: row.get(0)?,
+        media_kind: media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(1, error.to_string()))?,
+        media_id: row.get(2)?,
+        description: row.get(3)?,
+        subjects: row.get(4)?,
+        action: row.get(5)?,
+        tags: row.get(6)?,
+        quality: row.get(7)?,
+        standout: row.get(8)?,
+        usable: row.get(9)?,
+        faces_visible: row.get(10)?,
+        nametags_visible: row.get(11)?,
+        blur_required: row.get(12)?,
+        crop_x: row.get(13)?,
+        grade_json: row.get(14)?,
+        notes: row.get(15)?,
+        updated_at: timestamp_from_str(&updated_at, 16)?,
+    })
+}
+
+fn aesthetic_assessment_from_row(row: &Row<'_>) -> rusqlite::Result<AestheticAssessment> {
+    let media_kind: String = row.get(1)?;
+    let assessed_at: String = row.get(15)?;
+    Ok(AestheticAssessment {
+        owner_id: row.get(0)?,
+        media_kind: media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(1, error.to_string()))?,
+        media_id: row.get(2)?,
+        sharpness: row.get(3)?,
+        exposure: row.get(4)?,
+        contrast: row.get(5)?,
+        color_harmony: row.get(6)?,
+        balance: row.get(7)?,
+        subject_placement: row.get(8)?,
+        negative_space: row.get(9)?,
+        visual_clarity: row.get(10)?,
+        overall: row.get(11)?,
+        confidence: row.get(12)?,
+        explanation_json: row.get(13)?,
+        model_version: row.get(14)?,
+        assessed_at: timestamp_from_str(&assessed_at, 15)?,
+    })
+}
+
+fn feedback_event_from_row(row: &Row<'_>) -> rusqlite::Result<FeedbackEvent> {
+    let media_kind: String = row.get(2)?;
+    let signal: String = row.get(4)?;
+    let compared_media_kind: Option<String> = row.get(6)?;
+    let created_at: String = row.get(9)?;
+    Ok(FeedbackEvent {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        media_kind: media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(2, error.to_string()))?,
+        media_id: row.get(3)?,
+        signal: feedback_signal_from_str(&signal)
+            .map_err(|error| conversion_message(4, error.to_string()))?,
+        value: row.get(5)?,
+        compared_media_kind: compared_media_kind
+            .map(|value| {
+                media_kind_from_str(&value)
+                    .map_err(|error| conversion_message(6, error.to_string()))
+            })
+            .transpose()?,
+        compared_media_id: row.get(7)?,
+        context_json: row.get(8)?,
+        created_at: timestamp_from_str(&created_at, 9)?,
+    })
+}
+
+fn style_profile_from_row(row: &Row<'_>) -> rusqlite::Result<StyleProfile> {
+    let dim: i64 = row.get(5)?;
+    let bytes: Vec<u8> = row.get(6)?;
+    let trained_at: String = row.get(11)?;
+    let id: String = row.get(0)?;
+    let embedding_weights =
+        decode_vector(dim, bytes, &id).map_err(|error| conversion_message(6, error.to_string()))?;
+    Ok(StyleProfile {
+        id,
+        owner_id: row.get(1)?,
+        name: row.get(2)?,
+        version: row.get(3)?,
+        algorithm_version: row.get(4)?,
+        embedding_weights,
+        feature_weights_json: row.get(7)?,
+        sample_count: row.get(8)?,
+        held_out_metric: row.get(9)?,
+        active: row.get(10)?,
+        trained_at: timestamp_from_str(&trained_at, 11)?,
+    })
+}
+
 fn shot_from_row(row: &Row<'_>) -> rusqlite::Result<Shot> {
     Ok(Shot {
         id: row.get(0)?,
@@ -1220,6 +1966,71 @@ fn video_status_from_str(value: &str) -> anyhow::Result<VideoStatus> {
         "done" => Ok(VideoStatus::Done),
         "failed" => Ok(VideoStatus::Failed),
         _ => bail!("unknown video status {value:?}"),
+    }
+}
+
+fn photo_status_to_str(status: PhotoStatus) -> &'static str {
+    match status {
+        PhotoStatus::Pending => "pending",
+        PhotoStatus::Embedded => "embedded",
+        PhotoStatus::Done => "done",
+        PhotoStatus::Failed => "failed",
+    }
+}
+
+fn photo_status_from_str(value: &str) -> anyhow::Result<PhotoStatus> {
+    match value {
+        "pending" => Ok(PhotoStatus::Pending),
+        "embedded" => Ok(PhotoStatus::Embedded),
+        "done" => Ok(PhotoStatus::Done),
+        "failed" => Ok(PhotoStatus::Failed),
+        _ => bail!("unknown photo status {value:?}"),
+    }
+}
+
+fn media_kind_to_str(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Photo => "photo",
+        MediaKind::Shot => "shot",
+    }
+}
+
+fn media_kind_from_str(value: &str) -> anyhow::Result<MediaKind> {
+    match value {
+        "photo" => Ok(MediaKind::Photo),
+        "shot" => Ok(MediaKind::Shot),
+        _ => bail!("unknown media kind {value:?}"),
+    }
+}
+
+fn feedback_signal_to_str(signal: FeedbackSignal) -> &'static str {
+    match signal {
+        FeedbackSignal::Pick => "pick",
+        FeedbackSignal::Reject => "reject",
+        FeedbackSignal::Rating => "rating",
+        FeedbackSignal::Prefer => "prefer",
+        FeedbackSignal::Crop => "crop",
+        FeedbackSignal::Grade => "grade",
+        FeedbackSignal::Export => "export",
+        FeedbackSignal::Publish => "publish",
+        FeedbackSignal::Tag => "tag",
+        FeedbackSignal::Edit => "edit",
+    }
+}
+
+fn feedback_signal_from_str(value: &str) -> anyhow::Result<FeedbackSignal> {
+    match value {
+        "pick" => Ok(FeedbackSignal::Pick),
+        "reject" => Ok(FeedbackSignal::Reject),
+        "rating" => Ok(FeedbackSignal::Rating),
+        "prefer" => Ok(FeedbackSignal::Prefer),
+        "crop" => Ok(FeedbackSignal::Crop),
+        "grade" => Ok(FeedbackSignal::Grade),
+        "export" => Ok(FeedbackSignal::Export),
+        "publish" => Ok(FeedbackSignal::Publish),
+        "tag" => Ok(FeedbackSignal::Tag),
+        "edit" => Ok(FeedbackSignal::Edit),
+        _ => bail!("unknown feedback signal {value:?}"),
     }
 }
 
@@ -1309,6 +2120,59 @@ fn validate_shot(shot: &Shot) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn validate_photo(photo: &Photo) -> anyhow::Result<()> {
+    ensure!(photo.width > 0, "photo width must be positive");
+    ensure!(photo.height > 0, "photo height must be positive");
+    ensure!(!photo.format.trim().is_empty(), "photo format is required");
+    if let Some(orientation) = photo.orientation {
+        ensure!(
+            (1..=8).contains(&orientation),
+            "EXIF orientation must be 1 through 8"
+        );
+    }
+    if let Some(relative) = &photo.thumb_rel {
+        ensure!(
+            safe_relative_path(Path::new(relative)),
+            "thumbnail path must be a safe path relative to the thumbs directory"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_unit_score(value: f64, name: &str) -> anyhow::Result<()> {
+    ensure!(
+        value.is_finite() && (0.0..=1.0).contains(&value),
+        "{name} must be finite and between 0 and 1"
+    );
+    Ok(())
+}
+
+fn vector_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(values));
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn decode_vector(dim: i64, bytes: Vec<u8>, media_id: &str) -> anyhow::Result<Vec<f32>> {
+    let dim = usize::try_from(dim).context("vector dimension was negative")?;
+    let expected_bytes = dim
+        .checked_mul(size_of::<f32>())
+        .context("vector byte length overflowed usize")?;
+    ensure!(
+        bytes.len() == expected_bytes,
+        "vector {media_id} contains {} bytes; expected {expected_bytes} for dim {dim}",
+        bytes.len()
+    );
+    Ok(bytes
+        .as_chunks::<{ size_of::<f32>() }>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
 }
 
 fn safe_relative_path(path: &Path) -> bool {

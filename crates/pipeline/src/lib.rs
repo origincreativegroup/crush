@@ -17,13 +17,16 @@ use crush_stage_asr::{
 };
 use crush_stage_embed::embed_missing_shots_with_control;
 use crush_stage_embed::embedder::{Embedder, ProviderPreference};
+use crush_stage_embed::preprocess::preprocess;
 use crush_stage_split::{ffmpeg, scene};
-use crush_store::{EmbeddingMeta, NewJob, Store, Video, VideoStatus};
+use crush_store::{EmbeddingMeta, NewJob, Photo, PhotoStatus, Store, Video, VideoStatus};
+use image::{GenericImageView, ImageFormat};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "m4v", "mkv", "avi", "mts"];
+const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestSummary {
@@ -31,6 +34,8 @@ pub struct IngestSummary {
     pub indexed: usize,
     pub skipped: usize,
     pub failed: usize,
+    pub discovered_photos: usize,
+    pub indexed_photos: usize,
     pub recovered_jobs: usize,
     pub search_vectors: usize,
     pub errors: Vec<(PathBuf, String)>,
@@ -57,22 +62,24 @@ impl Pipeline {
 
     pub fn ingest(&self, input: &Path, debug: bool) -> anyhow::Result<IngestSummary> {
         lower_priority();
-        let files = collect_video_files(input)?;
+        let videos = collect_video_files(input)?;
+        let photos = collect_photo_files(input)?;
         ensure!(
-            !files.is_empty(),
-            "no supported video files found at {}",
+            !videos.is_empty() || !photos.is_empty(),
+            "no supported photo or video files found at {}",
             input.display()
         );
         let mut store = Store::open(&self.paths.root)?;
         let recovered_jobs = store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
         ensure_embedding_metadata(&store)?;
         let mut summary = IngestSummary {
-            discovered: files.len(),
+            discovered: videos.len() + photos.len(),
+            discovered_photos: photos.len(),
             recovered_jobs,
             ..IngestSummary::default()
         };
 
-        for path in files {
+        for path in videos {
             if self.cancellation.is_cancelled() {
                 anyhow::bail!("ingest cancelled");
             }
@@ -90,6 +97,32 @@ impl Pipeline {
             }
         }
 
+        if !photos.is_empty() {
+            let preference = ProviderPreference::parse(&self.config.embed.provider)?;
+            let mut embedder =
+                Embedder::new(self.paths.models(), preference, self.config.limits.threads)?;
+            for path in photos {
+                if self.cancellation.is_cancelled() {
+                    anyhow::bail!("ingest cancelled");
+                }
+                match self.ingest_photo_one(&store, &path, &mut embedder) {
+                    Ok(IngestOne::Indexed) => {
+                        summary.indexed += 1;
+                        summary.indexed_photos += 1;
+                    }
+                    Ok(IngestOne::Skipped) => summary.skipped += 1,
+                    Err(error) if self.cancellation.is_cancelled() => {
+                        return Err(error).context("ingest cancelled");
+                    }
+                    Err(error) => {
+                        tracing::error!(path = %path.display(), error = %error, "photo ingest failed");
+                        summary.failed += 1;
+                        summary.errors.push((path, format!("{error:#}")));
+                    }
+                }
+            }
+        }
+
         let index = SearchEngine::load(
             &store,
             DEFAULT_OWNER_ID,
@@ -97,6 +130,76 @@ impl Pipeline {
         )?;
         summary.search_vectors = index.len();
         Ok(summary)
+    }
+
+    fn ingest_photo_one(
+        &self,
+        store: &Store,
+        path: &Path,
+        embedder: &mut Embedder,
+    ) -> anyhow::Result<IngestOne> {
+        let sha256 = sha256_file(path)?;
+        if let Some(existing) = store.photo_by_sha(DEFAULT_OWNER_ID, &sha256)? {
+            if existing.status == PhotoStatus::Done {
+                tracing::info!(path = %path.display(), "skip: photo already indexed");
+                return Ok(IngestOne::Skipped);
+            }
+        }
+        let photo_id = format!("photo-{}", &sha256[..32]);
+        let result = (|| {
+            ensure!(
+                !self.cancellation.is_cancelled(),
+                "photo embedding cancelled"
+            );
+            let image = image::open(path)
+                .with_context(|| format!("failed to decode photo {}", path.display()))?;
+            let (width, height) = image.dimensions();
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("image")
+                .to_ascii_lowercase();
+            let thumb_rel = format!("photos/{photo_id}.jpg");
+            store.upsert_photo(
+                DEFAULT_OWNER_ID,
+                &Photo {
+                    id: photo_id.clone(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    sha256: sha256.clone(),
+                    width: i64::from(width),
+                    height: i64::from(height),
+                    format: extension,
+                    orientation: None,
+                    captured_at: None,
+                    camera_make: None,
+                    camera_model: None,
+                    lens: None,
+                    thumb_rel: Some(thumb_rel.clone()),
+                    status: PhotoStatus::Pending,
+                    indexed_at: None,
+                },
+            )?;
+            let thumbnail_path = store.thumbnail_path(&thumb_rel)?;
+            if let Some(parent) = thumbnail_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            image
+                .thumbnail(960, 960)
+                .save_with_format(&thumbnail_path, ImageFormat::Jpeg)
+                .with_context(|| {
+                    format!("failed to write thumbnail {}", thumbnail_path.display())
+                })?;
+            let vector = embedder.embed_image(&preprocess(&image))?;
+            store.put_photo_vector(DEFAULT_OWNER_ID, &photo_id, &vector)?;
+            store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Embedded)?;
+            store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Done)?;
+            Ok(IngestOne::Indexed)
+        })();
+        if result.is_err() && store.photo_by_id(DEFAULT_OWNER_ID, &photo_id)?.is_some() {
+            store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Failed)?;
+        }
+        result
     }
 
     pub fn resplit(&self, target: &str, debug: bool) -> anyhow::Result<()> {
@@ -480,6 +583,47 @@ fn collect_video_files(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn collect_photo_files(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    collect_files(input, is_photo)
+}
+
+fn collect_files(input: &Path, predicate: fn(&Path) -> bool) -> anyhow::Result<Vec<PathBuf>> {
+    ensure!(input.exists(), "input does not exist: {}", input.display());
+    let mut files = Vec::new();
+    collect_files_inner(input, predicate, &mut files)?;
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn collect_files_inner(
+    input: &Path,
+    predicate: fn(&Path) -> bool,
+    files: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    if input.is_file() {
+        if predicate(input) {
+            files.push(input.canonicalize().unwrap_or_else(|_| input.to_path_buf()));
+        }
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(input)
+        .with_context(|| format!("failed to read directory {}", input.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_files_inner(&entry.path(), predicate, files)?;
+        } else if file_type.is_file() && predicate(&entry.path()) {
+            files.push(entry.path().canonicalize().unwrap_or_else(|_| entry.path()));
+        }
+    }
+    Ok(())
+}
+
 fn collect_video_files_inner(input: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     if input.is_file() {
         if is_video(input) {
@@ -509,6 +653,16 @@ fn is_video(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .is_some_and(|extension| {
             VIDEO_EXTENSIONS
+                .iter()
+                .any(|expected| extension.eq_ignore_ascii_case(expected))
+        })
+}
+
+fn is_photo(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| {
+            PHOTO_EXTENSIONS
                 .iter()
                 .any(|expected| extension.eq_ignore_ascii_case(expected))
         })

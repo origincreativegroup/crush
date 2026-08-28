@@ -230,7 +230,8 @@
   background: #000;
 }
 
-.player-box video {
+.player-box video,
+.player-box img {
   display: block;
   width: 100%;
   height: 100%;
@@ -273,6 +274,28 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.detail-feedback {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #303039;
+  border-radius: 8px;
+  background: #19191d;
+}
+
+.detail-feedback .eyebrow {
+  margin-right: auto;
+}
+
+.rating-control select {
+  min-height: 32px;
+  border: 1px solid #3a3a43;
+  border-radius: 6px;
+  color: #e8e8ea;
+  background: #24242a;
 }
 
 .detail-nav {

@@ -25,9 +25,12 @@
     grid: $("#results-grid"),
     goLibrary: $("#go-library"),
     detail: $("#detail"),
+    detailKind: $("#detail-kind"),
     detailClose: $("#detail-close"),
     detailFile: $("#detail-file"),
     video: $("#detail-video"),
+    photo: $("#detail-photo"),
+    playerHint: $("#player-hint"),
     timecodes: $("#detail-timecodes"),
     shotIndex: $("#detail-shot-index"),
     copy: $("#copy-timecodes"),
@@ -36,6 +39,10 @@
     prev: $("#prev-shot"),
     next: $("#next-shot"),
     transcript: $("#detail-transcript"),
+    notesLabel: $("#detail-notes-label"),
+    feedbackPick: $("#feedback-pick"),
+    feedbackReject: $("#feedback-reject"),
+    feedbackRating: $("#feedback-rating"),
   };
 
   const state = {
@@ -114,7 +121,9 @@
   async function refreshIndexedState() {
     try {
       const videos = await invoke("list_videos");
-      state.hasIndexedShots = videos.some((video) => video.shots > 0);
+      state.hasIndexedShots = videos.some(
+        (asset) => asset.shots > 0 || (asset.assetType === "photo" && asset.status === "done"),
+      );
     } catch {
       state.hasIndexedShots = true; // don't block searching on a transient store error
     }
@@ -204,10 +213,12 @@
       const play = document.createElement("span");
       play.className = "play-overlay";
       play.setAttribute("aria-hidden", "true");
-      play.textContent = "▶";
+      play.textContent = result.asset_type === "photo" ? "PHOTO" : "▶";
       const duration = document.createElement("span");
       duration.className = "badge badge-duration mono";
-      duration.textContent = durationBadge(result.end_s - result.start_s);
+      duration.textContent = result.asset_type === "photo"
+        ? (result.editorial_quality ? `★ ${result.editorial_quality}` : "STILL")
+        : durationBadge(result.end_s - result.start_s);
       const score = document.createElement("span");
       score.className = "badge badge-score mono";
       score.textContent = String(displayScore(result.score));
@@ -216,17 +227,23 @@
 
       const name = document.createElement("div");
       name.className = "file-name result-name";
-      name.textContent = fileName(result.video_path);
-      name.title = result.video_path;
+      name.textContent = fileName(result.path);
+      name.title = result.path;
       const snippet = document.createElement("div");
       snippet.className = "result-snippet";
-      snippet.textContent = result.transcript_snippet || "";
-      snippet.hidden = !result.transcript_snippet;
+      const aesthetic = Number.isFinite(result.aesthetic_score)
+        ? `Design ${Math.round(result.aesthetic_score * 100)}`
+        : "";
+      const personal = Number.isFinite(result.personal_style_score)
+        ? `Style ${result.personal_style_score >= 0 ? "+" : ""}${Math.round(result.personal_style_score * 100)}`
+        : "";
+      snippet.textContent = result.transcript_snippet || [personal, aesthetic].filter(Boolean).join(" · ");
+      snippet.hidden = !snippet.textContent;
 
       card.append(thumb, name, snippet);
       card.addEventListener("click", () => {
         selectResult(index);
-        openDetail(result.shot_id);
+        openAssetDetail(result);
       });
       el.grid.append(card);
     });
@@ -245,10 +262,25 @@
   }
 
   // ---------- detail ----------
+  async function openAssetDetail(result) {
+    if (result.asset_type === "photo") return openPhotoDetail(result.asset_id);
+    return openDetail(result.asset_id);
+  }
+
   async function openDetail(shotId) {
     try {
       const detail = await invoke("shot_detail", { id: shotId });
-      state.detail = detail;
+      state.detail = { ...detail, kind: "video" };
+      renderDetail();
+    } catch (error) {
+      showMessage(String(error), { error: true });
+    }
+  }
+
+  async function openPhotoDetail(photoId) {
+    try {
+      const detail = await invoke("photo_detail", { id: photoId });
+      state.detail = { ...detail, kind: "photo" };
       renderDetail();
     } catch (error) {
       showMessage(String(error), { error: true });
@@ -260,6 +292,7 @@
     el.video.pause();
     el.video.removeAttribute("src");
     el.video.load();
+    el.photo.removeAttribute("src");
     el.detail.hidden = true;
     state.detail = null;
     if (state.view === "search") el.input.focus();
@@ -269,6 +302,28 @@
     const d = state.detail;
     el.detail.hidden = false;
     el.detail.focus();
+    const isPhoto = d.kind === "photo";
+    el.detailKind.textContent = isPhoto ? "Photo detail" : "Shot detail";
+    el.video.hidden = isPhoto;
+    el.photo.hidden = !isPhoto;
+    el.playerHint.hidden = isPhoto;
+    el.exportClip.hidden = isPhoto;
+    el.prev.hidden = isPhoto;
+    el.next.hidden = isPhoto;
+    el.notesLabel.textContent = isPhoto ? "Editorial context" : "Transcript";
+    el.copy.textContent = isPhoto ? "Copy path" : "Copy path + timecodes";
+    if (isPhoto) {
+      el.detailFile.textContent = fileName(d.photoPath);
+      el.detailFile.title = d.photoPath;
+      el.timecodes.textContent = `${d.width} × ${d.height} · ${d.format.toUpperCase()}`;
+      const scores = [];
+      if (d.quality) scores.push(`editorial ★ ${d.quality}`);
+      if (Number.isFinite(d.aestheticScore)) scores.push(`design ${Math.round(d.aestheticScore * 100)}`);
+      el.shotIndex.textContent = scores.join(" · ") || "Unreviewed";
+      el.photo.src = fileSrc(d.photoPath);
+      renderPhotoContext(d);
+      return;
+    }
     el.detailFile.textContent = fileName(d.videoPath);
     el.detailFile.title = d.videoPath;
     const length = Math.max(0, d.endS - d.startS);
@@ -287,9 +342,18 @@
     seekAndPlay();
   }
 
+  function renderPhotoContext(detail) {
+    el.transcript.replaceChildren();
+    const values = [detail.description, detail.tags && `Tags: ${detail.tags}`, detail.notes].filter(Boolean);
+    const text = document.createElement("p");
+    text.className = values.length ? "transcript-text" : "transcript-empty";
+    text.textContent = values.length ? values.join("\n") : "No editorial feedback yet.";
+    el.transcript.append(text);
+  }
+
   function seekAndPlay() {
     const d = state.detail;
-    if (!d) return;
+    if (!d || d.kind !== "video") return;
     const start = () => {
       el.video.currentTime = d.startS;
       el.video.play().catch(() => {});
@@ -357,7 +421,7 @@
 
   async function stepShot(delta) {
     const d = state.detail;
-    if (!d) return;
+    if (!d || d.kind !== "video") return;
     const idx = d.idx + delta;
     if (idx < 0 || idx >= d.shotCount) return;
     try {
@@ -371,7 +435,9 @@
   async function copyTimecodes() {
     const d = state.detail;
     if (!d) return;
-    const text = `${d.videoPath}  ${timecode(d.startS, d.fps)} – ${timecode(d.endS, d.fps)}`;
+    const text = d.kind === "photo"
+      ? d.photoPath
+      : `${d.videoPath}  ${timecode(d.startS, d.fps)} – ${timecode(d.endS, d.fps)}`;
     try {
       await bridge.clipboardManager.writeText(text);
       showMessage("Path and timecodes copied.");
@@ -382,7 +448,7 @@
 
   async function exportClip() {
     const d = state.detail;
-    if (!d) return;
+    if (!d || d.kind !== "video") return;
     const stem = fileName(d.videoPath).replace(/\.[^.]+$/, "");
     const defaultName = `${stem}_shot${pad(d.idx + 1, 3)}.mov`;
     try {
@@ -410,9 +476,26 @@
     const d = state.detail;
     if (!d) return;
     try {
-      await invoke("open_in_finder", { path: d.videoPath });
+      await invoke("open_in_finder", { path: d.kind === "photo" ? d.photoPath : d.videoPath });
     } catch (error) {
       showMessage(String(error), { error: true });
+    }
+  }
+
+  async function recordFeedback(signal, value = null) {
+    const detail = state.detail;
+    if (!detail) return;
+    try {
+      await invoke("record_feedback", {
+        assetType: detail.kind,
+        id: detail.id,
+        signal,
+        value,
+        context: state.query,
+      });
+      showMessage(signal === "rating" ? `Rated ${value} of 5.` : signal === "pick" ? "Marked as a pick." : "Marked as rejected.");
+    } catch (error) {
+      showMessage(`Could not save feedback: ${String(error)}`, { error: true });
     }
   }
 
@@ -440,6 +523,7 @@
       return;
     }
     if (detailOpen) {
+      if (state.detail?.kind === "photo") return;
       if (event.key === "ArrowLeft") { event.preventDefault(); stepShot(-1); }
       else if (event.key === "ArrowRight") { event.preventDefault(); stepShot(1); }
       else if (event.key === " " && !inInput) {
@@ -463,7 +547,7 @@
       const result = state.results[state.selected < 0 ? 0 : state.selected];
       if (result) {
         selectResult(state.selected < 0 ? 0 : state.selected);
-        openDetail(result.shot_id);
+        openAssetDetail(result);
       }
     }
   }
@@ -484,6 +568,12 @@
   el.copy.addEventListener("click", copyTimecodes);
   el.exportClip.addEventListener("click", exportClip);
   el.reveal.addEventListener("click", revealFile);
+  el.feedbackPick.addEventListener("click", () => recordFeedback("pick", 1));
+  el.feedbackReject.addEventListener("click", () => recordFeedback("reject", -1));
+  el.feedbackRating.addEventListener("change", () => {
+    const value = Number(el.feedbackRating.value);
+    if (value) recordFeedback("rating", value);
+  });
   el.prev.addEventListener("click", () => stepShot(-1));
   el.next.addEventListener("click", () => stepShot(1));
   document.addEventListener("keydown", onKeydown);

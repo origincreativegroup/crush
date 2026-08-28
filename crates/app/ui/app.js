@@ -222,7 +222,8 @@ function renderVideos() {
   if (state.selectedVideoId && !state.videos.some((video) => video.id === state.selectedVideoId)) {
     state.selectedVideoId = null;
   }
-  elements.reindex.disabled = !state.selectedVideoId || isIngestActive();
+  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
+  elements.reindex.disabled = !selectedAsset || selectedAsset.assetType === "photo" || isIngestActive();
 
   for (const video of state.videos) {
     const presentation = videoPresentation(video);
@@ -279,7 +280,7 @@ function renderVideos() {
     }
     statusCell.append(statusBox);
 
-    const shotsCell = cell("number-column mono", String(video.shots));
+    const shotsCell = cell("number-column mono", video.assetType === "photo" ? "—" : String(video.shots));
     const expandCell = cell("expand-column");
     if (details) {
       const expand = document.createElement("button");
@@ -358,7 +359,8 @@ function renderIndexingStatus() {
   const active = isIngestActive();
   elements.cancel.hidden = !active;
   elements.addFolder.disabled = active;
-  elements.reindex.disabled = !state.selectedVideoId || active;
+  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
+  elements.reindex.disabled = !selectedAsset || selectedAsset.assetType === "photo" || active;
   const dot = document.createElement("span");
   dot.className = `status-dot${active ? "" : " idle"}`;
   dot.setAttribute("aria-hidden", "true");
@@ -373,7 +375,7 @@ function renderIndexingStatus() {
     text.textContent = `Indexing ${done} of ${total} · ${percent}%`;
   } else {
     text.textContent = state.videos.length
-      ? `${state.videos.length} video${state.videos.length === 1 ? "" : "s"} indexed`
+      ? `${state.videos.length} asset${state.videos.length === 1 ? "" : "s"} indexed`
       : "Library idle";
   }
   elements.indexingStatus.replaceChildren(dot, text);
@@ -423,7 +425,7 @@ async function chooseFolder() {
     const path = await bridge.dialog.open({
       directory: true,
       multiple: false,
-      title: "Add footage folder",
+      title: "Add photo or video folder",
     });
     if (typeof path === "string") await addPath(path);
   } catch (error) {
@@ -441,7 +443,8 @@ async function cancelIngest() {
 }
 
 async function reindexSelected() {
-  if (!state.selectedVideoId || isIngestActive()) return;
+  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
+  if (!selectedAsset || selectedAsset.assetType === "photo" || isIngestActive()) return;
   try {
     const started = await invoke("reindex_video", { id: state.selectedVideoId });
     showMessage(`Re-index started · job ${started.jobId.slice(0, 8)}`);
