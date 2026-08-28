@@ -136,13 +136,23 @@ fn five_fixture_queries_report_expected_shot_in_top_three() {
                 result.shot_id, result.score, result.cosine
             );
         }
-        let expected = expectations["queries"]
+        let expectation = expectations["queries"]
             .as_array()
             .unwrap()
             .iter()
             .find(|value| value["query"].as_str() == Some(query))
-            .and_then(|value| value["expected_shot_id"].as_str())
             .unwrap_or_else(|| panic!("expected_search.json has no entry for {query:?}"));
+        let expected_video = expectation["expected_video"].as_str().unwrap();
+        let expected_idx = expectation["expected_shot_idx"].as_i64().unwrap();
+        let expected = store
+            .shots_for_video(DEFAULT_OWNER_ID, expected_video)
+            .unwrap()
+            .into_iter()
+            .find(|shot| shot.idx == expected_idx)
+            .unwrap_or_else(|| {
+                panic!("expected video {expected_video} has no shot index {expected_idx}")
+            })
+            .id;
         assert!(
             results.iter().any(|result| result.shot_id == expected),
             "expected {expected} in the top three for {query:?}"

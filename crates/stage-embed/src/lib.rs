@@ -5,6 +5,7 @@ pub mod preprocess;
 pub mod tokenizer;
 
 use anyhow::{ensure, Context};
+use crush_core::cancellation::CancellationToken;
 use crush_store::Store;
 use embedder::Embedder;
 
@@ -18,8 +19,25 @@ pub fn embed_missing_shots(
     video_id: &str,
     embedder: &mut Embedder,
 ) -> anyhow::Result<usize> {
+    embed_missing_shots_with_control(
+        store,
+        owner_id,
+        video_id,
+        embedder,
+        &CancellationToken::default(),
+    )
+}
+
+pub fn embed_missing_shots_with_control(
+    store: &Store,
+    owner_id: &str,
+    video_id: &str,
+    embedder: &mut Embedder,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<usize> {
     let mut embedded = 0;
     for shot in store.shots_for_video(owner_id, video_id)? {
+        ensure!(!cancellation.is_cancelled(), "embedding cancelled");
         if store.vector_for_shot(owner_id, &shot.id)?.is_some() {
             continue;
         }
@@ -41,5 +59,6 @@ pub fn embed_missing_shots(
         store.put_vector(owner_id, &shot.id, &vector)?;
         embedded += 1;
     }
+    ensure!(!cancellation.is_cancelled(), "embedding cancelled");
     Ok(embedded)
 }

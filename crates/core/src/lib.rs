@@ -1,6 +1,7 @@
 //! crush-core — shared contracts: config, paths, tracing, job log types, errors.
 //! Every other crate depends on this one. This one depends on nothing in the workspace.
 
+pub mod cancellation;
 pub mod config;
 pub mod job;
 pub mod models;

@@ -7,8 +7,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -80,18 +79,7 @@ pub struct ExportResult {
     pub mode: ExportMode,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
-
-impl CancellationToken {
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
+pub use crush_core::cancellation::CancellationToken;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -371,6 +359,16 @@ impl Runner {
 
     /// Extract one JPEG with input-side seeking for speed.
     pub fn frame_at(&self, input: &Path, time_s: f64, output_jpg: &Path) -> Result<Operation<()>> {
+        self.frame_at_with_control(input, time_s, output_jpg, &CancellationToken::default())
+    }
+
+    pub fn frame_at_with_control(
+        &self,
+        input: &Path,
+        time_s: f64,
+        output_jpg: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<Operation<()>> {
         if !time_s.is_finite() || time_s < 0.0 {
             return Err(Error::InvalidArgument(
                 "frame time must be finite and non-negative".into(),
@@ -384,12 +382,11 @@ impl Runner {
             .arg(input)
             .args(["-frames:v", "1", "-update", "1", "-q:v", "2", "-threads"])
             .arg(self.threads.to_string())
+            .args(["-progress", "pipe:1", "-nostats"])
             .arg(output_jpg);
-        let output = self.run_capture(&spec, true)?;
-        Ok(Operation {
-            value: (),
-            command: output.command,
-        })
+        let mut ignore_progress = |_| {};
+        let command = self.run_progress(&spec, 1.0, cancellation, &mut ignore_progress)?;
+        Ok(Operation { value: (), command })
     }
 
     /// Export a clip, preferring stream copy and falling back to the LGPL VideoToolbox encoder.

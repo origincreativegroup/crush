@@ -253,6 +253,19 @@ impl Store {
             .context("failed to query video by path")
     }
 
+    pub fn videos(&self, owner_id: &str) -> anyhow::Result<Vec<Video>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, path, sha256, duration_s, fps, width, height, has_audio,
+                    status, indexed_at
+             FROM videos
+             WHERE owner_id = ?1
+             ORDER BY path, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], video_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list videos")
+    }
+
     pub fn set_video_status(
         &self,
         owner_id: &str,
@@ -304,6 +317,75 @@ impl Store {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Replace a video's shot graph and advance it to `split` in one transaction.
+    pub fn replace_shots(
+        &mut self,
+        owner_id: &str,
+        video_id: &str,
+        shots: &[Shot],
+    ) -> anyhow::Result<()> {
+        ensure!(!shots.is_empty(), "cannot replace with an empty shot list");
+        for shot in shots {
+            ensure_owner_matches(owner_id, &shot.owner_id, "shot")?;
+            ensure!(
+                shot.video_id == video_id,
+                "shot belongs to a different video"
+            );
+            validate_shot(shot)?;
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "DELETE FROM shots WHERE owner_id = ?1 AND video_id = ?2",
+            params![owner_id, video_id],
+        )?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT INTO shots (
+                    id, video_id, owner_id, idx, start_s, end_s, rep_frame_s, thumb_rel,
+                    scene_score
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?;
+            for shot in shots {
+                statement.execute(params![
+                    shot.id,
+                    video_id,
+                    owner_id,
+                    shot.idx,
+                    shot.start_s,
+                    shot.end_s,
+                    shot.rep_frame_s,
+                    shot.thumb_rel,
+                    shot.scene_score,
+                ])?;
+            }
+        }
+        let changed = transaction.execute(
+            "UPDATE videos SET status = 'split' WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, video_id],
+        )?;
+        ensure_changed(changed, "video", video_id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_vectors_for_video(
+        &self,
+        owner_id: &str,
+        video_id: &str,
+    ) -> anyhow::Result<usize> {
+        self.connection
+            .execute(
+                "DELETE FROM shot_vectors
+                 WHERE owner_id = ?1 AND shot_id IN (
+                     SELECT id FROM shots WHERE owner_id = ?1 AND video_id = ?2
+                 )",
+                params![owner_id, video_id],
+            )
+            .context("failed to delete video vectors")
     }
 
     pub fn shots_for_video(&self, owner_id: &str, video_id: &str) -> anyhow::Result<Vec<Shot>> {
@@ -717,6 +799,50 @@ impl Store {
         )?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to list jobs")
+    }
+
+    pub fn fail_running_jobs_as_interrupted(&self, owner_id: &str) -> anyhow::Result<usize> {
+        let now = Utc::now();
+        let jobs = self.jobs(
+            owner_id,
+            &JobFilter {
+                status: Some(JobStatus::Running),
+                ..JobFilter::default()
+            },
+        )?;
+        for job in &jobs {
+            self.job_fail(owner_id, &job.id, now, "interrupted")?;
+        }
+        Ok(jobs.len())
+    }
+
+    /// Recover the last completed stage after a process or stage marked the video failed.
+    pub fn restore_failed_video_status(
+        &self,
+        owner_id: &str,
+        video_id: &str,
+    ) -> anyhow::Result<VideoStatus> {
+        let video = self
+            .video_by_id(owner_id, video_id)?
+            .with_context(|| format!("video {video_id} was not found"))?;
+        if video.status != VideoStatus::Failed {
+            return Ok(video.status);
+        }
+        let failed = self.jobs(
+            owner_id,
+            &JobFilter {
+                video_id: Some(video_id.to_owned()),
+                status: Some(JobStatus::Failed),
+                ..JobFilter::default()
+            },
+        )?;
+        let status = match failed.first().map(|job| job.stage) {
+            Some(Stage::Split) | None => VideoStatus::Pending,
+            Some(Stage::Embed) => VideoStatus::Split,
+            Some(Stage::Transcribe) => VideoStatus::Embedded,
+        };
+        self.set_video_status(owner_id, video_id, status)?;
+        Ok(status)
     }
 
     pub fn embedding_meta_get(&self, owner_id: &str) -> anyhow::Result<Option<EmbeddingMeta>> {
