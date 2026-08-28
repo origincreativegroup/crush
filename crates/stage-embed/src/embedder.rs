@@ -9,8 +9,9 @@ use std::{
 };
 
 use anyhow::{ensure, Context};
+#[cfg(target_os = "macos")]
+use ort::ep::{self, ExecutionProvider};
 use ort::{
-    ep::{self, ExecutionProvider},
     logging::{LogLevel, LoggerFunction},
     session::Session,
     value::Tensor as OrtTensor,
@@ -127,8 +128,7 @@ impl Embedder {
         };
 
         let mut warnings = Vec::new();
-        let coreml_available = provider == ProviderPreference::CoreMl
-            && ep::CoreML::default().is_available().unwrap_or(false);
+        let coreml_available = provider == ProviderPreference::CoreMl && coreml_is_available();
         if provider == ProviderPreference::CoreMl && !coreml_available {
             warnings
                 .push("ONNX Runtime reports CoreML unavailable on this host; using CPU".to_owned());
@@ -358,6 +358,16 @@ fn push_varint(output: &mut Vec<u8>, mut value: u64) {
     output.push(value as u8);
 }
 
+#[cfg(target_os = "macos")]
+fn coreml_is_available() -> bool {
+    ep::CoreML::default().is_available().unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn coreml_is_available() -> bool {
+    false
+}
+
 fn build_with_fallback(
     model: &Path,
     cache_dir: &Path,
@@ -393,7 +403,7 @@ fn build_with_fallback(
 
 fn build_session(
     model: &Path,
-    cache_dir: &Path,
+    _cache_dir: &Path,
     kind: &str,
     provider: ActiveProvider,
     threads: usize,
@@ -420,22 +430,27 @@ fn build_session(
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let profile_pending = provider == ActiveProvider::CoreMl;
     if profile_pending {
-        std::fs::create_dir_all(cache_dir)?;
-        let dispatch = ep::CoreML::default()
-            .with_compute_units(ep::coreml::ComputeUnits::All)
-            .with_model_format(ep::coreml::ModelFormat::MLProgram)
-            .with_static_input_shapes(true)
-            .with_model_cache_dir(cache_dir.display().to_string())
-            .build()
-            .error_on_failure();
-        builder = builder
-            .with_execution_providers([dispatch])
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        // Keep diagnostics deterministic and leave cache invalidation to COREML_CACHE_KEY.
-        let profile_prefix = cache_dir.join(format!("{kind}-provider-profile.json"));
-        builder = builder
-            .with_profiling(profile_prefix)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        #[cfg(target_os = "macos")]
+        {
+            std::fs::create_dir_all(_cache_dir)?;
+            let dispatch = ep::CoreML::default()
+                .with_compute_units(ep::coreml::ComputeUnits::All)
+                .with_model_format(ep::coreml::ModelFormat::MLProgram)
+                .with_static_input_shapes(true)
+                .with_model_cache_dir(_cache_dir.display().to_string())
+                .build()
+                .error_on_failure();
+            builder = builder
+                .with_execution_providers([dispatch])
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            // Keep diagnostics deterministic and leave cache invalidation to COREML_CACHE_KEY.
+            let profile_prefix = _cache_dir.join(format!("{kind}-provider-profile.json"));
+            builder = builder
+                .with_profiling(profile_prefix)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        anyhow::bail!("CoreML execution is available only on macOS");
     }
     let session = builder
         .commit_from_file(model)

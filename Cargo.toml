@@ -35,7 +35,7 @@ libc = "=0.2.189"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "pnm"] }
 sha2 = "=0.11.0"
 ureq = { version = "=3.4.0", default-features = false, features = ["rustls"] }
-ort = { version = "=2.0.0-rc.13", features = ["coreml"] }
+ort = "=2.0.0-rc.13"
 flate2 = "=1.1.9"
 regex = "=1.12.3"
 # Pinned later by Task 0 outcome — do NOT add here yet:
