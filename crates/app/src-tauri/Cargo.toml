@@ -12,9 +12,6 @@ edition.workspace = true
 name = "crush_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[build-dependencies]
-tauri-build = { version = "=2.6.3", features = [] }
-
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
@@ -29,6 +26,9 @@ crush-search = { path = "../../search" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "=2.11.3", features = [] }
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
