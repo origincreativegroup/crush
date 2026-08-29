@@ -9,10 +9,50 @@ use std::{
 };
 
 use anyhow::{ensure, Context};
-use crush_store::{FeedbackSignal, MediaKind, Store, StyleProfile};
+use crush_store::{MediaKind, Store, StyleProfile};
 use serde::Serialize;
 
+pub mod style;
+
+pub use style::trainer::{retrain_style_profile, retrain_style_profile_for_context};
+
 pub const EMBEDDING_DIM: usize = 512;
+
+/// Weight of the personal residual term in the composed score (the previously magic 0.15).
+pub const PERSONAL_WEIGHT: f32 = 0.15;
+
+/// Named persisted aesthetic features the personal residual may weight, in fixed order.
+/// `aesthetic_feature_vector` fills them in exactly this order from an assessment row.
+pub(crate) const AESTHETIC_FEATURES: [&str; 28] = [
+    "sharpness",
+    "exposure",
+    "contrast",
+    "color_harmony",
+    "balance",
+    "subject_placement",
+    "negative_space",
+    "visual_clarity",
+    "technical_quality",
+    "blur_control",
+    "clipping_control",
+    "noise_control",
+    "compression_quality",
+    "resolution_quality",
+    "motion_stability",
+    "duplicate_confidence",
+    "composition_quality",
+    "hierarchy",
+    "leading_lines",
+    "symmetry",
+    "crop_potential",
+    "moment_story",
+    "expression",
+    "gesture",
+    "action",
+    "novelty",
+    "pacing",
+    "repetition_risk",
+];
 
 const STOPWORDS: &[&str] = &[
     "and", "are", "but", "for", "from", "has", "have", "into", "not", "that", "the", "this", "was",
@@ -51,15 +91,6 @@ pub struct SearchResult {
     pub transcript_snippet: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct ScoreBreakdown {
-    pub semantic: f32,
-    pub transcript_boost: f32,
-    pub editorial: f32,
-    pub general_aesthetic: f32,
-    pub personal_style: f32,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AssetSearchResult {
     pub asset_type: String,
@@ -74,79 +105,40 @@ pub struct AssetSearchResult {
     pub editorial_quality: Option<i64>,
     pub aesthetic_score: Option<f64>,
     pub personal_style_score: Option<f32>,
-    pub breakdown: ScoreBreakdown,
+    pub score_breakdown: Option<ScoreBreakdown>,
 }
 
-/// Rebuild the active owner-specific visual preference vector from retained feedback.
-/// This is intentionally an auditable linear baseline; later trainers can replace it behind the
-/// versioned StyleProfile record without changing feedback or search contracts.
-pub fn retrain_style_profile(
-    store: &mut Store,
-    owner_id: &str,
-) -> anyhow::Result<Option<StyleProfile>> {
-    let events = store.feedback_events(owner_id)?;
-    let mut weights = vec![0.0_f32; EMBEDDING_DIM];
-    let mut sample_count = 0_i64;
-    for event in events {
-        let coefficient = match event.signal {
-            FeedbackSignal::Pick | FeedbackSignal::Publish => 1.0,
-            FeedbackSignal::Reject => -1.0,
-            FeedbackSignal::Rating => event.value.map_or(0.0, |value| (value - 3.0) / 2.0) as f32,
-            FeedbackSignal::Prefer => 1.0,
-            FeedbackSignal::Export => 0.5,
-            FeedbackSignal::Crop
-            | FeedbackSignal::Grade
-            | FeedbackSignal::Tag
-            | FeedbackSignal::Edit => 0.25,
-        };
-        if coefficient != 0.0 {
-            if let Some(vector) = media_vector(store, owner_id, event.media_kind, &event.media_id)?
-            {
-                add_scaled(&mut weights, &vector, coefficient)?;
-                sample_count += 1;
-            }
-        }
-        if event.signal == FeedbackSignal::Prefer {
-            if let (Some(kind), Some(id)) = (event.compared_media_kind, event.compared_media_id) {
-                if let Some(vector) = media_vector(store, owner_id, kind, &id)? {
-                    add_scaled(&mut weights, &vector, -1.0)?;
-                    sample_count += 1;
-                }
-            }
-        }
-    }
-    let norm = weights
-        .iter()
-        .map(|value| value * value)
-        .sum::<f32>()
-        .sqrt();
-    if sample_count == 0 || norm <= f32::EPSILON {
-        return Ok(None);
-    }
-    for value in &mut weights {
-        *value /= norm;
-    }
-    let previous_version = store
-        .active_style_profile(owner_id)?
-        .map_or(0, |profile| profile.version);
-    let profile = StyleProfile {
-        id: uuid::Uuid::new_v4().to_string(),
-        owner_id: owner_id.to_owned(),
-        name: "default".to_owned(),
-        version: previous_version + 1,
-        algorithm_version: "feedback-centroid-v1".to_owned(),
-        embedding_weights: weights,
-        feature_weights_json: "{}".to_owned(),
-        sample_count,
-        held_out_metric: None,
-        active: true,
-        trained_at: chrono::Utc::now(),
-    };
-    store.put_style_profile(owner_id, &profile)?;
-    Ok(Some(profile))
+/// Plain-language decomposition of one asset's composed score
+/// (docs/dam-feedback-blueprint.md: "The UI should expose that breakdown in plain language").
+/// The components sum to `total` (== `AssetSearchResult::score`) up to float tolerance; every
+/// field is always exported, using `0.0` (never `null`) when a term is absent so consumers
+/// never have to invent certainty.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct ScoreBreakdown {
+    /// Cosine similarity between the query and the asset embedding.
+    pub semantic: f32,
+    /// Additive transcript keyword boost, `0.0` when the query has no transcript hits.
+    pub transcript_boost: f32,
+    /// Editorial annotation quality adjustment (the usable-false penalty is exported
+    /// separately as `penalties` so general quality and safety stay individually readable).
+    pub editorial: f32,
+    /// General strong-shot aesthetic adjustment, ±0.08 around `overall` 0.5.
+    pub general_aesthetic: f32,
+    /// Safety/usability penalty (`-1.0` when the annotation marks the asset unusable).
+    pub penalties: f32,
+    /// Personal residual affinity for the default-context profile, already scaled by
+    /// [`PERSONAL_WEIGHT`]; `0.0` when no profile passes the held-out evaluation gate.
+    pub personal_affinity: f32,
+    /// Affinity of the request's context profile beyond the default-context profile, scaled
+    /// by [`PERSONAL_WEIGHT`]; `0.0` when no context was requested.
+    pub context_fit: f32,
+    /// The composed total: the sum of every component above.
+    pub total: f32,
 }
 
-fn media_vector(
+/// Resolve one stored media vector (photos and shots share the shape). The trainer and the
+/// scoring path both read through this so personal affinity and training features agree.
+pub(crate) fn media_vector(
     store: &Store,
     owner_id: &str,
     kind: MediaKind,
@@ -156,19 +148,6 @@ fn media_vector(
         MediaKind::Photo => store.vector_for_photo(owner_id, id),
         MediaKind::Shot => store.vector_for_shot(owner_id, id),
     }
-}
-
-fn add_scaled(target: &mut [f32], values: &[f32], scale: f32) -> anyhow::Result<()> {
-    ensure!(
-        target.len() == values.len(),
-        "feedback vector dimension {} does not match style dimension {}",
-        values.len(),
-        target.len()
-    );
-    for (target, value) in target.iter_mut().zip(values) {
-        *target += value * scale;
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +393,20 @@ impl SearchEngine {
         query: &str,
         top_k: usize,
     ) -> anyhow::Result<Vec<AssetSearchResult>> {
+        self.search_assets_in_context(store, embedder, query, top_k, None)
+    }
+
+    /// Mixed-media search with an optional context key: a per-context profile adjusts ranking
+    /// on top of the default-context profile (see [`ScoreBreakdown::context_fit`]). Without a
+    /// context key the ranking is identical to [`SearchEngine::search_assets`].
+    pub fn search_assets_in_context<E: TextEmbedder>(
+        &self,
+        store: &Store,
+        embedder: &mut E,
+        query: &str,
+        top_k: usize,
+        context_key: Option<&str>,
+    ) -> anyhow::Result<Vec<AssetSearchResult>> {
         ensure!(!query.trim().is_empty(), "search query must not be empty");
         ensure!(top_k > 0, "top must be greater than zero");
 
@@ -434,7 +427,7 @@ impl SearchEngine {
         let photo_matches = self
             .photo_index
             .search(&query_vector, top_k, &self.owner_id)?;
-        let style_profile = store.active_style_profile(&self.owner_id)?;
+        let personal = PersonalScorer::load(store, &self.owner_id, context_key)?;
         let mut results = Vec::with_capacity(shot_matches.len() + photo_matches.len());
 
         for found in shot_matches {
@@ -458,19 +451,17 @@ impl SearchEngine {
                 store.editorial_annotation(&self.owner_id, MediaKind::Shot, &found.shot_id)?;
             let aesthetic =
                 store.aesthetic_assessment(&self.owner_id, MediaKind::Shot, &found.shot_id)?;
-            let personal_style_score = personal_style_score_with_profile(
-                store,
-                &self.owner_id,
-                MediaKind::Shot,
-                &found.shot_id,
-                style_profile.as_ref(),
-            )?;
-            let semantic = found.cosine;
-            let transcript_boost = found.score - found.cosine;
-            let editorial = editorial_adjustment(annotation.as_ref());
-            let general_aesthetic = general_aesthetic_adjustment(aesthetic.as_ref());
-            let personal_style = personal_style_score.unwrap_or(0.0) * 0.15;
-            let score = found.score + editorial + general_aesthetic + personal_style;
+            let vector = media_vector(store, &self.owner_id, MediaKind::Shot, &found.shot_id)?;
+            let aesthetic_features = aesthetic_feature_vector(aesthetic.as_ref());
+            let (score, breakdown, personal_style_score) = compose_score(
+                found.score,
+                found.cosine,
+                annotation.as_ref(),
+                aesthetic.as_ref(),
+                vector.as_ref(),
+                &aesthetic_features,
+                &personal,
+            );
             results.push(AssetSearchResult {
                 asset_type: "video".to_owned(),
                 asset_id: found.shot_id,
@@ -487,15 +478,9 @@ impl SearchEngine {
                 cosine: found.cosine,
                 transcript_snippet,
                 editorial_quality: annotation.as_ref().and_then(|value| value.quality),
-                aesthetic_score: aesthetic.map(|value| value.overall),
+                aesthetic_score: aesthetic.as_ref().map(|value| value.overall),
                 personal_style_score,
-                breakdown: ScoreBreakdown {
-                    semantic,
-                    transcript_boost,
-                    editorial,
-                    general_aesthetic,
-                    personal_style,
-                },
+                score_breakdown: Some(breakdown),
             });
         }
 
@@ -507,19 +492,17 @@ impl SearchEngine {
                 store.editorial_annotation(&self.owner_id, MediaKind::Photo, &found.shot_id)?;
             let aesthetic =
                 store.aesthetic_assessment(&self.owner_id, MediaKind::Photo, &found.shot_id)?;
-            let personal_style_score = personal_style_score_with_profile(
-                store,
-                &self.owner_id,
-                MediaKind::Photo,
-                &found.shot_id,
-                style_profile.as_ref(),
-            )?;
-            let semantic = found.cosine;
-            let transcript_boost = found.score - found.cosine;
-            let editorial = editorial_adjustment(annotation.as_ref());
-            let general_aesthetic = general_aesthetic_adjustment(aesthetic.as_ref());
-            let personal_style = personal_style_score.unwrap_or(0.0) * 0.15;
-            let score = found.score + editorial + general_aesthetic + personal_style;
+            let vector = media_vector(store, &self.owner_id, MediaKind::Photo, &found.shot_id)?;
+            let aesthetic_features = aesthetic_feature_vector(aesthetic.as_ref());
+            let (score, breakdown, personal_style_score) = compose_score(
+                found.score,
+                found.cosine,
+                annotation.as_ref(),
+                aesthetic.as_ref(),
+                vector.as_ref(),
+                &aesthetic_features,
+                &personal,
+            );
             results.push(AssetSearchResult {
                 asset_type: "photo".to_owned(),
                 asset_id: found.shot_id,
@@ -536,15 +519,9 @@ impl SearchEngine {
                 cosine: found.cosine,
                 transcript_snippet: None,
                 editorial_quality: annotation.as_ref().and_then(|value| value.quality),
-                aesthetic_score: aesthetic.map(|value| value.overall),
+                aesthetic_score: aesthetic.as_ref().map(|value| value.overall),
                 personal_style_score,
-                breakdown: ScoreBreakdown {
-                    semantic,
-                    transcript_boost,
-                    editorial,
-                    general_aesthetic,
-                    personal_style,
-                },
+                score_breakdown: Some(breakdown),
             });
         }
 
@@ -568,12 +545,20 @@ impl SearchEngine {
     }
 }
 
-fn editorial_adjustment(annotation: Option<&crush_store::EditorialAnnotation>) -> f32 {
+fn general_aesthetic_adjustment(assessment: Option<&crush_store::AestheticAssessment>) -> f32 {
+    assessment.map_or(0.0, |value| ((value.overall - 0.5) * 0.16) as f32)
+}
+
+/// The general editorial term with the usability penalty moved out, so the breakdown can show
+/// general quality and penalties separately. `editorial_quality_adjustment +
+/// editorial_penalty` equals the original single term in every case: a not-usable annotation
+/// contributes the `-1.0` penalty and no quality term, a usable one contributes no penalty.
+fn editorial_quality_adjustment(annotation: Option<&crush_store::EditorialAnnotation>) -> f32 {
     let Some(annotation) = annotation else {
         return 0.0;
     };
     if !annotation.usable {
-        return -1.0;
+        return 0.0;
     }
     let quality = annotation
         .quality
@@ -581,38 +566,246 @@ fn editorial_adjustment(annotation: Option<&crush_store::EditorialAnnotation>) -
     quality + if annotation.standout { 0.05 } else { 0.0 }
 }
 
-fn general_aesthetic_adjustment(assessment: Option<&crush_store::AestheticAssessment>) -> f32 {
-    assessment.map_or(0.0, |value| ((value.overall - 0.5) * 0.16) as f32)
+fn editorial_penalty(annotation: Option<&crush_store::EditorialAnnotation>) -> f32 {
+    match annotation {
+        Some(annotation) if !annotation.usable => -1.0,
+        _ => 0.0,
+    }
 }
 
-/// Personal-style affinity for one asset (-1..1), or `None` without an active profile.
-/// Loads the active profile itself so callers outside ranking (detail views) stay simple.
+/// Aesthetic features in [`AESTHETIC_FEATURES`] order, centered/scaled to [-0.5, 0.5] for the
+/// personal residual; the raw `overall` stays untouched for the general adjustment. With no
+/// assessment every feature is 0.0, so the aesthetic residual contributes nothing.
+fn aesthetic_feature_vector(
+    assessment: Option<&crush_store::AestheticAssessment>,
+) -> [f32; AESTHETIC_FEATURES.len()] {
+    let mut features = [0.0; AESTHETIC_FEATURES.len()];
+    let Some(assessment) = assessment else {
+        return features;
+    };
+    for (feature, name) in features.iter_mut().zip(AESTHETIC_FEATURES) {
+        let value = aesthetic_component(assessment, name);
+        *feature = (value - 0.5) as f32;
+    }
+    features
+}
+
+fn aesthetic_component(assessment: &crush_store::AestheticAssessment, name: &str) -> f64 {
+    match name {
+        "sharpness" => assessment.sharpness,
+        "exposure" => assessment.exposure,
+        "contrast" => assessment.contrast,
+        "color_harmony" => assessment.color_harmony,
+        "balance" => assessment.balance,
+        "subject_placement" => assessment.subject_placement,
+        "negative_space" => assessment.negative_space,
+        "visual_clarity" => assessment.visual_clarity,
+        "technical_quality" => assessment.technical_quality,
+        "blur_control" => assessment.blur_control,
+        "clipping_control" => assessment.clipping_control,
+        "noise_control" => assessment.noise_control,
+        "compression_quality" => assessment.compression_quality,
+        "resolution_quality" => assessment.resolution_quality,
+        "motion_stability" => assessment.motion_stability,
+        "duplicate_confidence" => assessment.duplicate_confidence,
+        "composition_quality" => assessment.composition_quality,
+        "hierarchy" => assessment.hierarchy,
+        "leading_lines" => assessment.leading_lines,
+        "symmetry" => assessment.symmetry,
+        "crop_potential" => assessment.crop_potential,
+        "moment_story" => assessment.moment_story,
+        "expression" => assessment.expression,
+        "gesture" => assessment.gesture,
+        "action" => assessment.action,
+        "novelty" => assessment.novelty,
+        "pacing" => assessment.pacing,
+        "repetition_risk" => assessment.repetition_risk,
+        _ => 0.5,
+    }
+}
+
+/// Aesthetic-feature residual parsed from a profile's `feature_weights_json`; zeros when
+/// absent or malformed, so a broken payload degrades to the CLIP-only residual gracefully.
+fn aesthetic_weights(profile: &StyleProfile) -> [f32; AESTHETIC_FEATURES.len()] {
+    let mut weights = [0.0; AESTHETIC_FEATURES.len()];
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&profile.feature_weights_json) else {
+        return weights;
+    };
+    let Some(feature_weights) = value.get("feature_weights") else {
+        return weights;
+    };
+    for (slot, name) in weights.iter_mut().zip(AESTHETIC_FEATURES) {
+        *slot = feature_weights
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0) as f32;
+    }
+    weights
+}
+
+/// Active, held-out-gated personal profiles for one search request. The default-context
+/// profile carries the personal affinity; a requested context adds the context-fit difference
+/// on top. Profiles that failed the held-out evaluation gate are ignored here even if somehow
+/// active (defense in depth: the gate is set at train time and re-checked at ranking time).
+struct PersonalScorer {
+    default_profile: Option<(StyleProfile, [f32; AESTHETIC_FEATURES.len()])>,
+    context_profile: Option<(StyleProfile, [f32; AESTHETIC_FEATURES.len()])>,
+    context_requested: bool,
+}
+
+impl PersonalScorer {
+    fn load(store: &Store, owner_id: &str, context_key: Option<&str>) -> anyhow::Result<Self> {
+        let default_profile = gated_profile(store.active_style_profile(owner_id)?).map(|profile| {
+            let weights = aesthetic_weights(&profile);
+            (profile, weights)
+        });
+        let context_profile = match context_key {
+            Some(key) if key != style::trainer::DEFAULT_CONTEXT_KEY => gated_profile(
+                store.active_style_profile_for_context(owner_id, key)?,
+            )
+            .map(|profile| {
+                let weights = aesthetic_weights(&profile);
+                (profile, weights)
+            }),
+            _ => None,
+        };
+        Ok(Self {
+            default_profile,
+            context_profile,
+            context_requested: context_key.is_some(),
+        })
+    }
+
+    /// Raw (unscaled) personal affinity: the CLIP residual plus the aesthetic-feature
+    /// residual, matching the residual the trainer and the held-out evaluation measure.
+    fn raw_affinity(
+        profile: &(StyleProfile, [f32; AESTHETIC_FEATURES.len()]),
+        vector: &[f32],
+        aesthetic_features: &[f32; AESTHETIC_FEATURES.len()],
+    ) -> Option<f32> {
+        if profile.0.embedding_weights.len() != EMBEDDING_DIM || vector.len() != EMBEDDING_DIM {
+            return None;
+        }
+        let clip = dot_512(vector, &profile.0.embedding_weights);
+        let aesthetic_term = profile
+            .1
+            .iter()
+            .zip(aesthetic_features)
+            .map(|(weight, feature)| weight * feature)
+            .sum::<f32>();
+        Some(clip + aesthetic_term)
+    }
+
+    /// Scaled personal affinity (default-context profile) and context fit (the context
+    /// profile's affinity beyond the default). Both are `0.0` when no gated profile applies —
+    /// the score never invents certainty from an absent or unlearned profile.
+    fn terms(
+        &self,
+        vector: Option<&Vec<f32>>,
+        aesthetic_features: &[f32; AESTHETIC_FEATURES.len()],
+    ) -> (f32, f32) {
+        let Some(vector) = vector else {
+            return (0.0, 0.0);
+        };
+        let default_raw = self
+            .default_profile
+            .as_ref()
+            .and_then(|profile| Self::raw_affinity(profile, vector, aesthetic_features))
+            .unwrap_or(0.0);
+        let context_raw = if self.context_requested {
+            self.context_profile
+                .as_ref()
+                .and_then(|profile| Self::raw_affinity(profile, vector, aesthetic_features))
+        } else {
+            None
+        };
+        let personal_affinity = default_raw * PERSONAL_WEIGHT;
+        let context_fit = match context_raw {
+            Some(context_raw) => (context_raw - default_raw) * PERSONAL_WEIGHT,
+            None => 0.0,
+        };
+        (personal_affinity, context_fit)
+    }
+
+    /// The exported raw personal affinity: the effective affinity for this request
+    /// (context profile when one was requested and applies, else the default profile).
+    fn exported_affinity(
+        &self,
+        vector: Option<&Vec<f32>>,
+        aesthetic_features: &[f32; AESTHETIC_FEATURES.len()],
+    ) -> Option<f32> {
+        let vector = vector?;
+        if self.context_requested {
+            if let Some(profile) = self.context_profile.as_ref() {
+                return Self::raw_affinity(profile, vector, aesthetic_features);
+            }
+        }
+        self.default_profile
+            .as_ref()
+            .and_then(|profile| Self::raw_affinity(profile, vector, aesthetic_features))
+    }
+}
+
+/// Ranking-time re-check of the train-time gate: an unlearned profile never contributes.
+fn gated_profile(profile: Option<StyleProfile>) -> Option<StyleProfile> {
+    profile.filter(|profile| {
+        profile.learned
+            && profile
+                .held_out_metric
+                .is_some_and(|held_out| held_out > profile.baseline_metric.unwrap_or(0.0))
+    })
+}
+
+/// Compose the score exactly as the general ranker did while exporting every term. With no
+/// gated profile the personal and context-fit terms are `0.0` and the left-to-right addition
+/// order matches the pre-breakdown composition, keeping the no-profile path bit-identical:
+/// `hybrid index score + editorial + general aesthetic + penalties (+ personal + context)`.
+fn compose_score(
+    semantic: f32,
+    cosine: f32,
+    annotation: Option<&crush_store::EditorialAnnotation>,
+    assessment: Option<&crush_store::AestheticAssessment>,
+    vector: Option<&Vec<f32>>,
+    aesthetic_features: &[f32; AESTHETIC_FEATURES.len()],
+    personal: &PersonalScorer,
+) -> (f32, ScoreBreakdown, Option<f32>) {
+    let transcript_boost = semantic - cosine;
+    let editorial = editorial_quality_adjustment(annotation);
+    let penalties = editorial_penalty(annotation);
+    let general_aesthetic = general_aesthetic_adjustment(assessment);
+    let (personal_affinity, context_fit) = personal.terms(vector, aesthetic_features);
+    let total =
+        semantic + editorial + general_aesthetic + penalties + personal_affinity + context_fit;
+    let breakdown = ScoreBreakdown {
+        semantic,
+        transcript_boost,
+        editorial,
+        general_aesthetic,
+        penalties,
+        personal_affinity,
+        context_fit,
+        total,
+    };
+    let personal_style_score = personal.exported_affinity(vector, aesthetic_features);
+    (total, breakdown, personal_style_score)
+}
+
+/// Personal-style affinity for one asset under the owner's gated default-context profile.
+/// `None` when the asset has no stored vector or no gated profile applies — detail views
+/// show no personal score rather than inventing one.
 pub fn personal_style_score(
     store: &Store,
     owner_id: &str,
-    media_kind: MediaKind,
-    media_id: &str,
+    kind: MediaKind,
+    id: &str,
 ) -> anyhow::Result<Option<f32>> {
-    let profile = store.active_style_profile(owner_id)?;
-    personal_style_score_with_profile(store, owner_id, media_kind, media_id, profile.as_ref())
-}
-
-fn personal_style_score_with_profile(
-    store: &Store,
-    owner_id: &str,
-    media_kind: MediaKind,
-    media_id: &str,
-    profile: Option<&StyleProfile>,
-) -> anyhow::Result<Option<f32>> {
-    let Some(profile) = profile else {
+    let personal = PersonalScorer::load(store, owner_id, None)?;
+    let Some(vector) = media_vector(store, owner_id, kind, id)? else {
         return Ok(None);
     };
-    if profile.embedding_weights.len() != EMBEDDING_DIM {
-        return Ok(None);
-    }
-    Ok(media_vector(store, owner_id, media_kind, media_id)?
-        .filter(|vector| vector.len() == EMBEDDING_DIM)
-        .map(|vector| dot_512(&vector, &profile.embedding_weights)))
+    let aesthetic = store.aesthetic_assessment(owner_id, kind, id)?;
+    let aesthetic_features = aesthetic_feature_vector(aesthetic.as_ref());
+    Ok(personal.exported_affinity(Some(&vector), &aesthetic_features))
 }
 
 fn validate_embedding_metadata(store: &Store, owner_id: &str) -> anyhow::Result<()> {
@@ -821,53 +1014,456 @@ mod tests {
 
     #[test]
     fn explicit_feedback_trains_a_personal_ranker_that_changes_order() {
-        let (_directory, mut store) = populated_store();
-        let mut preferred = [0.0_f32; EMBEDDING_DIM];
-        preferred[1] = 1.0;
-        store
-            .put_vector(DEFAULT_OWNER_ID, "shot-b", &preferred)
-            .unwrap();
-        for (id, media_id, signal, value) in [
-            ("feedback-pick", "shot-b", FeedbackSignal::Pick, Some(1.0)),
-            (
-                "feedback-reject",
-                "shot-a",
-                FeedbackSignal::Reject,
-                Some(-1.0),
-            ),
-        ] {
-            store
-                .append_feedback(
-                    DEFAULT_OWNER_ID,
-                    &FeedbackEvent {
-                        id: id.to_owned(),
-                        owner_id: DEFAULT_OWNER_ID.to_owned(),
-                        media_kind: MediaKind::Shot,
-                        media_id: media_id.to_owned(),
-                        signal,
-                        value,
-                        compared_media_kind: None,
-                        compared_media_id: None,
-                        context_json: "{}".to_owned(),
-                        created_at: chrono::Utc::now(),
-                    },
-                )
-                .unwrap();
-        }
+        let (_directory, mut store) = style_store();
+        append_default_picks_and_rejects(&mut store);
         let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
             .unwrap()
             .unwrap();
-        assert_eq!(profile.sample_count, 2);
-        assert_eq!(profile.algorithm_version, "feedback-centroid-v1");
+        assert_eq!(profile.algorithm_version, "personal-residual-v1");
+        assert_eq!(profile.context_key, "default");
+        assert_eq!(profile.sample_count, 12);
 
         let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
         let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
         let results = engine
-            .search_assets(&store, &mut embedder, "same semantics", 2)
+            .search_assets(&store, &mut embedder, "same semantics", 12)
             .unwrap();
-        assert_eq!(results[0].asset_id, "shot-b");
+        assert!(results[0].asset_id.starts_with("shot-good"));
+        assert!(results[11].asset_id.starts_with("shot-bad"));
+        for result in &results {
+            let breakdown = result.score_breakdown.expect("breakdown exported");
+            let sum = breakdown.semantic
+                + breakdown.transcript_boost
+                + breakdown.editorial
+                + breakdown.general_aesthetic
+                + breakdown.penalties
+                + breakdown.personal_affinity
+                + breakdown.context_fit;
+            assert!((sum - breakdown.total).abs() < 1e-5);
+            assert_eq!(breakdown.total, result.score);
+            assert_eq!(breakdown.penalties, 0.0);
+        }
         assert!(results[0].personal_style_score.unwrap() > 0.0);
-        assert!(results[1].personal_style_score.unwrap() < 0.0);
+        assert!(results[11].personal_style_score.unwrap() < 0.0);
+        assert!(results[0].score_breakdown.unwrap().personal_affinity > 0.0);
+        assert!(results[11].score_breakdown.unwrap().personal_affinity < 0.0);
+    }
+
+    #[test]
+    fn planted_style_marks_learned_and_beats_the_baseline() {
+        let (_directory, mut store) = style_store();
+        append_default_picks_and_rejects(&mut store);
+        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert!(profile.learned, "planted style must pass the eval gate");
+        let held_out = profile.held_out_metric.expect("held-out metric recorded");
+        let baseline = profile.baseline_metric.expect("baseline recorded");
+        assert!(
+            held_out > baseline,
+            "held-out {held_out} vs baseline {baseline}"
+        );
+        assert!(held_out >= 0.6);
+        let metrics: serde_json::Value = serde_json::from_str(&profile.metrics_json).unwrap();
+        assert_eq!(metrics["learned"], true);
+        assert_eq!(metrics["split"], "loo-every-3rd");
+        assert_eq!(metrics["trainer"], "personal-residual-v1");
+        assert!(metrics["held_out_pairs"].as_u64().unwrap() >= 4);
+    }
+
+    #[test]
+    fn style_profile_training_is_deterministic() {
+        let (_directory, mut store) = style_store();
+        append_default_picks_and_rejects(&mut store);
+        let first = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        let second = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.version, first.version + 1);
+        assert_eq!(first.embedding_weights, second.embedding_weights);
+        assert_eq!(first.feature_weights_json, second.feature_weights_json);
+        assert_eq!(first.metrics_json, second.metrics_json);
+        assert_eq!(first.held_out_metric, second.held_out_metric);
+        assert_eq!(first.baseline_metric, second.baseline_metric);
+    }
+
+    #[test]
+    fn sparse_feedback_returns_none_and_keeps_the_previous_profile() {
+        let (_directory, mut store) = style_store();
+        let retained = StyleProfile {
+            id: "style-keep".to_owned(),
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            name: "default".to_owned(),
+            version: 1,
+            algorithm_version: "personal-residual-v1".to_owned(),
+            embedding_weights: vec![0.0; EMBEDDING_DIM],
+            feature_weights_json: "{}".to_owned(),
+            sample_count: 12,
+            held_out_metric: Some(0.75),
+            baseline_metric: Some(0.5),
+            context_key: "default".to_owned(),
+            metrics_json: "{}".to_owned(),
+            learned: true,
+            active: true,
+            trained_at: chrono::Utc::now(),
+        };
+        store
+            .put_style_profile(DEFAULT_OWNER_ID, &retained)
+            .unwrap();
+        append_event(
+            &mut store,
+            "sparse-pick",
+            "shot-good-0",
+            FeedbackSignal::Pick,
+        );
+        append_event(
+            &mut store,
+            "sparse-reject",
+            "shot-bad-0",
+            FeedbackSignal::Reject,
+        );
+        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+        let active = store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.id, "style-keep");
+        assert!(active.active);
+    }
+
+    #[test]
+    fn context_partitioning_keeps_named_context_out_of_default() {
+        let (_directory, mut store) = style_store();
+        for index in 0..6 {
+            append_context_event(
+                &mut store,
+                &format!("context-pick-{index}"),
+                &format!("shot-good-{index}"),
+                FeedbackSignal::Pick,
+                "homepage-hero",
+            );
+            append_context_event(
+                &mut store,
+                &format!("context-reject-{index}"),
+                &format!("shot-bad-{index}"),
+                FeedbackSignal::Reject,
+                "homepage-hero",
+            );
+        }
+        // A preference in one context must never become a universal rule: the default context
+        // sees no evidence at all and the previous (absent) profile is left untouched.
+        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+        let profile =
+            retrain_style_profile_for_context(&mut store, DEFAULT_OWNER_ID, "homepage-hero")
+                .unwrap()
+                .unwrap();
+        assert_eq!(profile.name, "homepage-hero");
+        assert_eq!(profile.context_key, "homepage-hero");
+        assert!(store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .active_style_profile_for_context(DEFAULT_OWNER_ID, "homepage-hero")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn noise_feedback_refuses_to_mark_learned_and_the_gate_ignores_it() {
+        let (_directory, mut store) = style_store();
+        // Identical vectors for every asset: feedback carries no learnable direction, so the
+        // held-out pairs are all ties and the gate must refuse.
+        let shared = [0.7_f32, 0.7];
+        let mut vector = [0.0_f32; EMBEDDING_DIM];
+        vector[0] = shared[0];
+        vector[1] = shared[1];
+        for index in 0..6 {
+            store
+                .put_vector(DEFAULT_OWNER_ID, &format!("shot-good-{index}"), &vector)
+                .unwrap();
+            store
+                .put_vector(DEFAULT_OWNER_ID, &format!("shot-bad-{index}"), &vector)
+                .unwrap();
+        }
+        append_default_picks_and_rejects(&mut store);
+        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert!(!profile.learned, "noise must never be marked learned");
+        assert_eq!(profile.held_out_metric, Some(0.0));
+        assert_eq!(profile.baseline_metric, Some(0.5));
+
+        // The profile is active but unlearned: ranking must ignore it entirely.
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
+        let results = engine
+            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .unwrap();
+        for result in &results {
+            let breakdown = result.score_breakdown.expect("breakdown exported");
+            assert_eq!(breakdown.personal_affinity, 0.0);
+            assert_eq!(breakdown.context_fit, 0.0);
+            assert!(result.personal_style_score.is_none());
+        }
+    }
+
+    #[test]
+    fn confirmed_reference_sets_train_but_unconfirmed_sets_stay_inert() {
+        let (_directory, mut store) = style_store();
+        let now = chrono::Utc::now();
+        store
+            .reference_set_create(
+                DEFAULT_OWNER_ID,
+                &crush_store::ReferenceSet {
+                    id: "set-previous-work".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    name: "previous work".to_owned(),
+                    context_key: "default".to_owned(),
+                    description: "finished selects".to_owned(),
+                    scope: crush_store::ReferenceSetScope::WholeSet,
+                    status: crush_store::ReferenceSetStatus::Unconfirmed,
+                    source_collection_id: None,
+                    created_at: now,
+                    confirmed_at: None,
+                },
+            )
+            .unwrap();
+        for index in 0..6 {
+            store
+                .reference_set_add_item(
+                    DEFAULT_OWNER_ID,
+                    &crush_store::ReferenceSetItem {
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        set_id: "set-previous-work".to_owned(),
+                        media_kind: MediaKind::Shot,
+                        media_id: format!("shot-good-{index}"),
+                        role: crush_store::ReferenceItemRole::Positive,
+                        added_at: now,
+                    },
+                )
+                .unwrap();
+        }
+        // Negatives exist, but an unconfirmed set is inert: no curated evidence, no training.
+        for index in 0..6 {
+            append_event(
+                &mut store,
+                &format!("reject-{index}"),
+                &format!("shot-bad-{index}"),
+                FeedbackSignal::Reject,
+            );
+        }
+        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+
+        assert!(
+            store
+                .reference_set_confirm(DEFAULT_OWNER_ID, "set-previous-work")
+                .unwrap(),
+            "confirming an existing set must succeed"
+        );
+        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert!(profile.learned);
+        assert_eq!(profile.sample_count, 12);
+        // Disabling mutes the evidence without deleting it; the next retrain has no positives.
+        store
+            .reference_set_disable(DEFAULT_OWNER_ID, "set-previous-work")
+            .unwrap();
+        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn reset_falls_back_to_the_identical_no_profile_ranking() {
+        let (_directory, mut store) = style_store();
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
+        let general = engine
+            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .unwrap();
+
+        append_default_picks_and_rejects(&mut store);
+        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_some());
+        let personalized = engine
+            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .unwrap();
+        assert_ne!(general, personalized, "a learned profile must move ranking");
+
+        assert_eq!(store.reset_style_profiles(DEFAULT_OWNER_ID).unwrap(), 1);
+        let after_reset = engine
+            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .unwrap();
+        assert_eq!(
+            general, after_reset,
+            "reset must fall back to the general ranking bit-for-bit"
+        );
+        assert!(store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn eval_gate_counts_ties_as_failures_and_needs_enough_held_out_pairs() {
+        let pair = style::eval::RankedPair {
+            margin_features: vec![1.0],
+            weight: 1.0,
+            baseline_vote: 0.5,
+        };
+        let four = vec![&pair, &pair, &pair, &pair];
+        let tied = style::eval::evaluate(&four, &[0.0]);
+        assert_eq!(tied.personal_accuracy, 0.0);
+        assert_eq!(tied.baseline_accuracy, 0.5);
+        assert!(!tied.learned, "ties must count as failures");
+        let winning = style::eval::evaluate(&four, &[1.0]);
+        assert!(winning.learned);
+        let too_few = vec![&pair, &pair, &pair];
+        assert!(!style::eval::evaluate(&too_few, &[1.0]).learned);
+    }
+
+    fn append_default_picks_and_rejects(store: &mut Store) {
+        for index in 0..6 {
+            append_event(
+                store,
+                &format!("pick-{index}"),
+                &format!("shot-good-{index}"),
+                FeedbackSignal::Pick,
+            );
+            append_event(
+                store,
+                &format!("reject-{index}"),
+                &format!("shot-bad-{index}"),
+                FeedbackSignal::Reject,
+            );
+        }
+    }
+
+    fn append_event(store: &mut Store, id: &str, media_id: &str, signal: FeedbackSignal) {
+        append_context_event(store, id, media_id, signal, "default");
+    }
+
+    fn append_context_event(
+        store: &mut Store,
+        id: &str,
+        media_id: &str,
+        signal: FeedbackSignal,
+        context_key: &str,
+    ) {
+        let context_json = if context_key == "default" {
+            "{}".to_owned()
+        } else {
+            format!(r#"{{"context":"{context_key}"}}"#)
+        };
+        store
+            .append_feedback(
+                DEFAULT_OWNER_ID,
+                &FeedbackEvent {
+                    id: id.to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    media_kind: MediaKind::Shot,
+                    media_id: media_id.to_owned(),
+                    signal,
+                    value: None,
+                    compared_media_kind: None,
+                    compared_media_id: None,
+                    context_json,
+                    created_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
+    }
+
+    fn style_store() -> (TempDir, Store) {
+        let directory = TempDir::new().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        store
+            .upsert_video(
+                DEFAULT_OWNER_ID,
+                &Video {
+                    id: "video-1".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: "/footage/video.mov".to_owned(),
+                    sha256: "video-sha".to_owned(),
+                    duration_s: Some(2.0),
+                    fps: Some(24.0),
+                    width: Some(1920),
+                    height: Some(1080),
+                    has_audio: true,
+                    status: VideoStatus::Embedded,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        let mut shots = Vec::new();
+        for index in 0..6 {
+            shots.push(Shot {
+                id: format!("shot-good-{index}"),
+                video_id: "video-1".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                idx: index,
+                start_s: index as f64,
+                end_s: index as f64 + 1.0,
+                rep_frame_s: index as f64 + 0.4,
+                thumb_rel: None,
+                scene_score: None,
+            });
+            shots.push(Shot {
+                id: format!("shot-bad-{index}"),
+                video_id: "video-1".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                idx: index + 6,
+                start_s: index as f64 + 6.0,
+                end_s: index as f64 + 7.0,
+                rep_frame_s: index as f64 + 6.4,
+                thumb_rel: None,
+                scene_score: None,
+            });
+        }
+        store.insert_shots(DEFAULT_OWNER_ID, &shots).unwrap();
+        let mut good = [0.0_f32; EMBEDDING_DIM];
+        good[0] = 1.0;
+        let mut bad = [0.0_f32; EMBEDDING_DIM];
+        bad[1] = 1.0;
+        for shot in &shots {
+            let vector = if shot.id.starts_with("shot-good") {
+                good
+            } else {
+                bad
+            };
+            store
+                .put_vector(DEFAULT_OWNER_ID, &shot.id, &vector)
+                .unwrap();
+        }
+        let manifest = crush_core::models::bundled_manifest().unwrap();
+        store
+            .embedding_meta_set(
+                DEFAULT_OWNER_ID,
+                &EmbeddingMeta {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    model_name: manifest.model_name,
+                    model_sha256: manifest.embedding_sha256,
+                    dim: manifest.dim,
+                    preprocess_version: manifest.preprocess_version,
+                },
+            )
+            .unwrap();
+        (directory, store)
     }
 
     #[test]
@@ -917,18 +1513,27 @@ mod tests {
         assert_eq!(results[0].asset_id, "shot-a");
         assert_eq!(results[1].asset_id, "shot-b");
         assert_eq!(results[0].cosine, results[1].cosine);
-        assert!((results[0].breakdown.general_aesthetic - 0.08).abs() < 1e-6);
-        assert!((results[1].breakdown.general_aesthetic + 0.08).abs() < 1e-6);
+        let breakdown_a = results[0].score_breakdown.expect("breakdown exported");
+        let breakdown_b = results[1].score_breakdown.expect("breakdown exported");
+        assert!((breakdown_a.general_aesthetic - 0.08).abs() < 1e-6);
+        assert!((breakdown_b.general_aesthetic + 0.08).abs() < 1e-6);
         for result in &results {
-            let breakdown = result.breakdown;
+            let breakdown = result.score_breakdown.expect("breakdown exported");
             let sum = breakdown.semantic
                 + breakdown.transcript_boost
                 + breakdown.editorial
                 + breakdown.general_aesthetic
-                + breakdown.personal_style;
+                + breakdown.penalties
+                + breakdown.personal_affinity
+                + breakdown.context_fit;
             assert!(
-                (sum - result.score).abs() < 1e-4,
-                "breakdown {breakdown:?} does not sum to {}",
+                (sum - breakdown.total).abs() < 1e-4,
+                "breakdown {breakdown:?} does not sum to its total"
+            );
+            assert!(
+                (result.score - breakdown.total).abs() < 1e-4,
+                "breakdown total {} does not match score {}",
+                breakdown.total,
                 result.score
             );
         }

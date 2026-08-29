@@ -190,12 +190,14 @@
   }
 
   function resultBreakdownRows(result) {
-    const breakdown = result.breakdown || {};
+    const breakdown = result.score_breakdown || {};
     return [
       ["semantic match", breakdown.semantic],
       ["transcript match", breakdown.transcript_boost],
       ["general quality", breakdown.general_aesthetic],
-      ["your style", breakdown.personal_style],
+      ["your style", breakdown.personal_affinity],
+      ["context fit", breakdown.context_fit],
+      ["safety penalty", breakdown.penalties],
       [breakdown.editorial < 0 ? "editorial penalty" : "editorial context", breakdown.editorial],
     ].filter(([, value]) => Number.isFinite(value) && Math.abs(value) >= 0.0001);
   }

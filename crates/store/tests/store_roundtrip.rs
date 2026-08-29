@@ -11,7 +11,8 @@ use crush_core::{
 use crush_store::{
     AestheticAssessment, EditorialAnnotation, EmbeddingMeta, FeedbackEvent, FeedbackSignal,
     JobFilter, MediaKind, NewJob, Photo, PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus,
-    ProblemKind, Shot, Store, StyleProfile, TranscriptSegment, Video, VideoSourceMetadata,
+    ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
+    ReferenceSetStatus, Shot, Store, StyleProfile, TranscriptSegment, Video, VideoSourceMetadata,
     VideoStatus,
 };
 use rusqlite::Connection;
@@ -123,6 +124,10 @@ fn style_profile(id: &str) -> StyleProfile {
         feature_weights_json: "{}".to_owned(),
         sample_count: 10,
         held_out_metric: None,
+        baseline_metric: None,
+        context_key: "default".to_owned(),
+        metrics_json: "{}".to_owned(),
+        learned: false,
         active: true,
         trained_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
     }
@@ -132,7 +137,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -143,7 +148,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 6);
+    assert_eq!(reopened.schema_version().unwrap(), 7);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -200,7 +205,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -263,7 +268,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -539,6 +544,10 @@ fn photos_editorial_feedback_and_style_round_trip() {
         feature_weights_json: r#"{"negative_space":0.8,"color_harmony":0.6}"#.to_owned(),
         sample_count: 42,
         held_out_metric: Some(0.73),
+        baseline_metric: Some(0.61),
+        context_key: "default".to_owned(),
+        metrics_json: r#"{"learned":true}"#.to_owned(),
+        learned: true,
         active: true,
         trained_at: now,
     };
@@ -1689,7 +1698,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -1906,4 +1915,311 @@ fn second_owner_rows_are_isolated_from_the_default_owner() {
         store.active_style_profile(DEFAULT_OWNER_ID).unwrap(),
         Some(updated_a)
     );
+}
+
+fn reference_set(id: &str, name: &str, status: ReferenceSetStatus) -> ReferenceSet {
+    ReferenceSet {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        name: name.to_owned(),
+        context_key: "default".to_owned(),
+        description: "finished selects".to_owned(),
+        scope: ReferenceSetScope::WholeSet,
+        status,
+        source_collection_id: None,
+        created_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+        confirmed_at: None,
+    }
+}
+
+fn reference_photo(id: &str, sha256: &str) -> Photo {
+    Photo {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        path: format!("/photos/{id}.jpg"),
+        sha256: sha256.to_owned(),
+        width: 100,
+        height: 100,
+        format: "jpeg".to_owned(),
+        orientation: Some(1),
+        captured_at: None,
+        camera_make: None,
+        camera_model: None,
+        lens: None,
+        thumb_rel: None,
+        status: PhotoStatus::Done,
+        indexed_at: None,
+    }
+}
+
+#[test]
+fn reference_sets_round_trip_with_owner_isolation_and_cascade() {
+    const OWNER_B: &str = "editor-b";
+    let directory = TestDir::new("reference-sets");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at)
+             VALUES ('editor-b', 'Editor B', '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-ref-a", "ref-sha-a"),
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-ref-b", "ref-sha-b"),
+        )
+        .unwrap();
+
+    let set = reference_set("set-a", "previous work", ReferenceSetStatus::Unconfirmed);
+    store.reference_set_create(DEFAULT_OWNER_ID, &set).unwrap();
+    assert_eq!(
+        store.reference_set_get(DEFAULT_OWNER_ID, "set-a").unwrap(),
+        Some(set.clone())
+    );
+    // Owner isolation: the same name is allowed for another owner, and neither sees the other.
+    let mut other_owner = reference_set("set-b", "previous work", ReferenceSetStatus::Unconfirmed);
+    other_owner.owner_id = OWNER_B.to_owned();
+    store.reference_set_create(OWNER_B, &other_owner).unwrap();
+    assert_eq!(store.reference_set_list(OWNER_B).unwrap().len(), 1);
+    assert!(store.reference_set_get(OWNER_B, "set-a").unwrap().is_none());
+    let crossed = ReferenceSetItem {
+        owner_id: OWNER_B.to_owned(),
+        set_id: "set-a".to_owned(),
+        media_kind: MediaKind::Photo,
+        media_id: "photo-ref-a".to_owned(),
+        role: ReferenceItemRole::Positive,
+        added_at: now,
+    };
+    assert!(store.reference_set_add_item(OWNER_B, &crossed).is_err());
+
+    let item = |media_id: &str| ReferenceSetItem {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        set_id: "set-a".to_owned(),
+        media_kind: MediaKind::Photo,
+        media_id: media_id.to_owned(),
+        role: ReferenceItemRole::Positive,
+        added_at: now,
+    };
+    store
+        .reference_set_add_item(DEFAULT_OWNER_ID, &item("photo-ref-a"))
+        .unwrap();
+    store
+        .reference_set_add_item(DEFAULT_OWNER_ID, &item("photo-ref-b"))
+        .unwrap();
+    // The target-existence trigger refuses items for missing media.
+    let mut missing = item("photo-missing");
+    missing.role = ReferenceItemRole::Excluded;
+    assert!(store
+        .reference_set_add_item(DEFAULT_OWNER_ID, &missing)
+        .is_err());
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-a")
+            .unwrap(),
+        vec![item("photo-ref-a"), item("photo-ref-b")]
+    );
+    assert!(store
+        .reference_set_remove_item(DEFAULT_OWNER_ID, "set-a", MediaKind::Photo, "photo-ref-b")
+        .unwrap());
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-a")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    assert!(store
+        .reference_set_confirm(DEFAULT_OWNER_ID, "set-a")
+        .unwrap());
+    let confirmed = store
+        .reference_set_get(DEFAULT_OWNER_ID, "set-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirmed.status, ReferenceSetStatus::Confirmed);
+    assert!(confirmed.confirmed_at.is_some());
+    assert!(store
+        .reference_set_disable(DEFAULT_OWNER_ID, "set-a")
+        .unwrap());
+    assert_eq!(
+        store
+            .reference_set_get(DEFAULT_OWNER_ID, "set-a")
+            .unwrap()
+            .unwrap()
+            .status,
+        ReferenceSetStatus::Disabled
+    );
+
+    // Deleting the media cleans up dangling items through the 0007 triggers.
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute("DELETE FROM photos WHERE id = 'photo-ref-a'", [])
+        .unwrap();
+    drop(audit);
+    assert!(store
+        .reference_set_items(DEFAULT_OWNER_ID, "set-a")
+        .unwrap()
+        .is_empty());
+
+    // Deleting the set cascades its remaining items; a retrain reproduces from the rest.
+    store
+        .reference_set_add_item(DEFAULT_OWNER_ID, &item("photo-ref-b"))
+        .unwrap();
+    assert!(store
+        .reference_set_delete(DEFAULT_OWNER_ID, "set-a")
+        .unwrap());
+    assert!(store
+        .reference_set_get(DEFAULT_OWNER_ID, "set-a")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .reference_set_items(DEFAULT_OWNER_ID, "set-a")
+        .unwrap()
+        .is_empty());
+    // Owner scoping: deleting another owner's set by id touches nothing.
+    assert!(!store
+        .reference_set_delete(DEFAULT_OWNER_ID, "set-b")
+        .unwrap());
+    assert!(store.reference_set_get(OWNER_B, "set-b").unwrap().is_some());
+}
+
+#[test]
+fn confirmed_items_read_only_confirmed_sets_in_one_context() {
+    let directory = TestDir::new("reference-confirmed-items");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-curated", "curated-sha"),
+        )
+        .unwrap();
+    store
+        .reference_set_create(
+            DEFAULT_OWNER_ID,
+            &reference_set(
+                "set-context",
+                "hero selects",
+                ReferenceSetStatus::Unconfirmed,
+            ),
+        )
+        .unwrap();
+    store
+        .reference_set_add_item(
+            DEFAULT_OWNER_ID,
+            &ReferenceSetItem {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                set_id: "set-context".to_owned(),
+                media_kind: MediaKind::Photo,
+                media_id: "photo-curated".to_owned(),
+                role: ReferenceItemRole::Positive,
+                added_at: now,
+            },
+        )
+        .unwrap();
+    // Uncurated sets contribute nothing until confirmed.
+    assert!(store
+        .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+        .unwrap()
+        .is_empty());
+    store
+        .reference_set_confirm(DEFAULT_OWNER_ID, "set-context")
+        .unwrap();
+    assert_eq!(
+        store
+            .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+            .unwrap(),
+        vec![(MediaKind::Photo, "photo-curated".to_owned())]
+    );
+    // Context scoping: another context sees nothing.
+    assert!(store
+        .reference_set_confirmed_items(DEFAULT_OWNER_ID, "homepage-hero")
+        .unwrap()
+        .is_empty());
+    // Disabling mutes without deleting.
+    store
+        .reference_set_disable(DEFAULT_OWNER_ID, "set-context")
+        .unwrap();
+    assert!(store
+        .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn style_profile_versions_list_activate_and_reset_round_trip() {
+    let directory = TestDir::new("profile-versions");
+    let mut store = Store::open(directory.path()).unwrap();
+    let first = style_profile("style-v1");
+    store.put_style_profile(DEFAULT_OWNER_ID, &first).unwrap();
+    let mut second = style_profile("style-v2");
+    second.version = 2;
+    store.put_style_profile(DEFAULT_OWNER_ID, &second).unwrap();
+    // The prior active version is deactivated, never deleted.
+    let versions = store.style_profiles(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(versions.len(), 2);
+    assert!(!versions[0].active);
+    assert!(versions[1].active);
+    assert_eq!(
+        store
+            .style_profiles_for_context(DEFAULT_OWNER_ID, "default")
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Reversible activation flips between retained versions.
+    assert!(store
+        .activate_style_profile(DEFAULT_OWNER_ID, "style-v1")
+        .unwrap());
+    assert_eq!(
+        store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .map(|p| p.id),
+        Some("style-v1".to_owned())
+    );
+    assert!(!store
+        .activate_style_profile(DEFAULT_OWNER_ID, "style-missing")
+        .unwrap());
+
+    // Named contexts activate independently of the default context.
+    let mut hero = style_profile("style-hero");
+    hero.name = "homepage-hero".to_owned();
+    hero.context_key = "homepage-hero".to_owned();
+    store.put_style_profile(DEFAULT_OWNER_ID, &hero).unwrap();
+    assert!(hero.active);
+    assert_eq!(
+        store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .map(|p| p.id),
+        Some("style-v1".to_owned())
+    );
+    assert!(store
+        .active_style_profile_for_context(DEFAULT_OWNER_ID, "homepage-hero")
+        .unwrap()
+        .is_some());
+
+    // Reset deactivates everything and is reversible through activation or a retrain.
+    assert_eq!(store.reset_style_profiles(DEFAULT_OWNER_ID).unwrap(), 2);
+    assert!(store
+        .active_style_profile(DEFAULT_OWNER_ID)
+        .unwrap()
+        .is_none());
+    assert!(store
+        .active_style_profile_for_context(DEFAULT_OWNER_ID, "homepage-hero")
+        .unwrap()
+        .is_none());
+    assert_eq!(store.style_profiles(DEFAULT_OWNER_ID).unwrap().len(), 3);
+    assert_eq!(store.reset_style_profiles(DEFAULT_OWNER_ID).unwrap(), 0);
 }

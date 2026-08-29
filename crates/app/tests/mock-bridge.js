@@ -208,12 +208,15 @@
         editorial_quality: null,
         aesthetic_score: 0.81,
         personal_style_score: 0.42,
-        breakdown: {
+        score_breakdown: {
           semantic: 0.29,
           transcript_boost: 0.06,
           editorial: 0,
           general_aesthetic: 0,
-          personal_style: 0.05,
+          penalties: 0,
+          personal_affinity: 0.05,
+          context_fit: 0,
+          total: 0,
         },
       },
       {
@@ -229,12 +232,15 @@
         editorial_quality: 5,
         aesthetic_score: 0.89,
         personal_style_score: 0.42,
-        breakdown: {
+        score_breakdown: {
           semantic: 0.24,
           transcript_boost: 0,
           editorial: 0,
           general_aesthetic: 0.06,
-          personal_style: 0.05,
+          penalties: 0,
+          personal_affinity: 0.05,
+          context_fit: 0,
+          total: 0,
         },
       },
     ];

@@ -85,6 +85,11 @@ enum Cmd {
         #[command(subcommand)]
         command: DebugCommand,
     },
+    /// Manage the personal style model (Task 18a).
+    Style {
+        #[command(subcommand)]
+        command: StyleCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -110,6 +115,20 @@ enum DebugCommand {
     Vector { shot_id: String },
     /// Print transcript segments overlapping every shot in a stored video.
     Align { video: String },
+}
+
+#[derive(Subcommand)]
+enum StyleCommand {
+    /// Rebuild the active style profile from retained feedback and confirmed reference sets.
+    Retrain {
+        /// Context key to train (defaults to the default context).
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// Show the active style profile, its metrics, and the reference sets feeding it.
+    Status,
+    /// Deactivate every style profile; ranking falls back to the general model.
+    Reset,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -161,6 +180,15 @@ fn main() -> anyhow::Result<()> {
         Cmd::Debug {
             command: DebugCommand::Align { video },
         } => debug_align(&paths, &video),
+        Cmd::Style {
+            command: StyleCommand::Retrain { context },
+        } => style_retrain(&paths, context.as_deref()),
+        Cmd::Style {
+            command: StyleCommand::Status,
+        } => style_status(&paths),
+        Cmd::Style {
+            command: StyleCommand::Reset,
+        } => style_reset(&paths),
     }
 }
 
@@ -280,22 +308,27 @@ fn search(
                 .map_or_else(|| "—".to_owned(), |value| format!("{value:.3}")),
             result.path
         );
-        println!(
-            "     asset={} thumb={} editorial_quality={} aesthetic={} breakdown=semantic{:+.3} transcript{:+.3} general{:+.3} style{:+.3} editorial{:+.3}",
-            result.asset_id,
-            result.thumb_path.as_deref().unwrap_or("—"),
-            result
-                .editorial_quality
-                .map_or_else(|| "—".to_owned(), |value| value.to_string()),
-            result
-                .aesthetic_score
-                .map_or_else(|| "—".to_owned(), |value| format!("{value:.3}")),
-            result.breakdown.semantic,
-            result.breakdown.transcript_boost,
-            result.breakdown.general_aesthetic,
-            result.breakdown.personal_style,
-            result.breakdown.editorial,
-        );
+        if let Some(breakdown) = &result.score_breakdown {
+            println!(
+                "     asset={} thumb={} editorial_quality={} aesthetic={} breakdown=semantic{:+.3} transcript{:+.3} general{:+.3} style{:+.3} context{:+.3} penalty{:+.3} editorial{:+.3} total{:+.3}",
+                result.asset_id,
+                result.thumb_path.as_deref().unwrap_or("-"),
+                result
+                    .editorial_quality
+                    .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+                result
+                    .aesthetic_score
+                    .map_or_else(|| "-".to_owned(), |value| format!("{value:.3}")),
+                breakdown.semantic,
+                breakdown.transcript_boost,
+                breakdown.general_aesthetic,
+                breakdown.personal_affinity,
+                breakdown.context_fit,
+                breakdown.penalties,
+                breakdown.editorial,
+                breakdown.total,
+            );
+        }
         if let Some(snippet) = &result.transcript_snippet {
             println!("     transcript: {snippet}");
         }
@@ -420,6 +453,98 @@ fn debug_align(paths: &AppPaths, video: &str) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn style_retrain(paths: &AppPaths, context: Option<&str>) -> anyhow::Result<()> {
+    let mut store = Store::open(&paths.root)?;
+    let trained = match context {
+        Some(key) => {
+            crush_search::retrain_style_profile_for_context(&mut store, DEFAULT_OWNER_ID, key)?
+        }
+        None => crush_search::retrain_style_profile(&mut store, DEFAULT_OWNER_ID)?,
+    };
+    match trained {
+        Some(profile) => println!(
+            "Trained {} v{} for context {:?}: samples={} learned={} held-out={} baseline={}",
+            profile.algorithm_version,
+            profile.version,
+            profile.name,
+            profile.sample_count,
+            profile.learned,
+            metric_text(profile.held_out_metric),
+            metric_text(profile.baseline_metric),
+        ),
+        None => println!(
+            "Not enough evidence to train context {:?}; the previous profile is unchanged and \
+             ranking keeps the general model.",
+            context.unwrap_or("default")
+        ),
+    }
+    Ok(())
+}
+
+fn style_status(paths: &AppPaths) -> anyhow::Result<()> {
+    let store = Store::open(&paths.root)?;
+    match store.active_style_profile(DEFAULT_OWNER_ID)? {
+        Some(profile) => {
+            println!(
+                "Active default profile {} v{} ({}): samples={} learned={}",
+                profile.id,
+                profile.version,
+                profile.algorithm_version,
+                profile.sample_count,
+                profile.learned
+            );
+            println!(
+                "held-out={} baseline={}",
+                metric_text(profile.held_out_metric),
+                metric_text(profile.baseline_metric)
+            );
+            println!("metrics {}", profile.metrics_json);
+        }
+        None => println!("No active default profile; ranking uses the general model."),
+    }
+    let profiles = store.style_profiles(DEFAULT_OWNER_ID)?;
+    println!("{} retained profile version(s)", profiles.len());
+    for profile in profiles {
+        println!(
+            "  {:<20} v{:<3} context={:<16} active={} learned={} samples={} held-out={}",
+            profile.id,
+            profile.version,
+            profile.context_key,
+            profile.active,
+            profile.learned,
+            profile.sample_count,
+            metric_text(profile.held_out_metric),
+        );
+    }
+    let sets = store.reference_set_list(DEFAULT_OWNER_ID)?;
+    if sets.is_empty() {
+        println!("No reference sets.");
+        return Ok(());
+    }
+    for set in sets {
+        println!(
+            "  {:<24} context={:<16} scope={:<10} status={:<12} items={}",
+            set.name,
+            set.context_key,
+            crush_store::reference_scope_to_str(set.scope),
+            crush_store::reference_status_to_str(set.status),
+            store.reference_set_items(DEFAULT_OWNER_ID, &set.id)?.len(),
+        );
+    }
+    Ok(())
+}
+
+fn style_reset(paths: &AppPaths) -> anyhow::Result<()> {
+    let mut store = Store::open(&paths.root)?;
+    let count = store.reset_style_profiles(DEFAULT_OWNER_ID)?;
+    println!("Deactivated {count} style profile(s); ranking uses the general model.");
+    Ok(())
+}
+
+fn metric_text(metric: Option<f64>) -> String {
+    metric.map_or_else(|| "—".to_owned(), |value| format!("{value:.3}"))
 }
 
 fn ensure_models(paths: &AppPaths, manifest_url: &str) -> anyhow::Result<()> {
@@ -682,6 +807,40 @@ mod tests {
             Cmd::Debug {
                 command: DebugCommand::Align { video }
             } if video == "video-123"
+        ));
+    }
+
+    #[test]
+    fn style_cli_shapes_are_stable() {
+        let retrain = Cli::try_parse_from(["crushctl", "style", "retrain"]).unwrap();
+        assert!(matches!(
+            retrain.cmd,
+            Cmd::Style {
+                command: StyleCommand::Retrain { context: None }
+            }
+        ));
+        let retrain_context =
+            Cli::try_parse_from(["crushctl", "style", "retrain", "--context", "homepage-hero"])
+                .unwrap();
+        assert!(matches!(
+            retrain_context.cmd,
+            Cmd::Style {
+                command: StyleCommand::Retrain { context: Some(context) }
+            } if context == "homepage-hero"
+        ));
+        let status = Cli::try_parse_from(["crushctl", "style", "status"]).unwrap();
+        assert!(matches!(
+            status.cmd,
+            Cmd::Style {
+                command: StyleCommand::Status
+            }
+        ));
+        let reset = Cli::try_parse_from(["crushctl", "style", "reset"]).unwrap();
+        assert!(matches!(
+            reset.cmd,
+            Cmd::Style {
+                command: StyleCommand::Reset
+            }
         ));
     }
 
