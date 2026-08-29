@@ -1385,12 +1385,7 @@ impl Store {
                 owner_id = excluded.owner_id,
                 dim = excluded.dim,
                 vec = excluded.vec",
-            params![
-                shot_id,
-                owner_id,
-                values.len() as i64,
-                vector_bytes(values),
-            ],
+            params![shot_id, owner_id, values.len() as i64, vector_bytes(values),],
         )?;
         Ok(())
     }
@@ -1973,9 +1968,7 @@ impl Store {
                 problems.push(Problem {
                     kind: ProblemKind::UnsafeThumbnailPath,
                     entity_id: photo_id,
-                    detail: format!(
-                        "photo thumbnail path is not a safe relative path: {relative}"
-                    ),
+                    detail: format!("photo thumbnail path is not a safe relative path: {relative}"),
                 });
             } else {
                 let path = self.data_dir.join("thumbs").join(relative_path);

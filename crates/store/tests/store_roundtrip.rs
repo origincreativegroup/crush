@@ -645,9 +645,7 @@ fn vectors_are_exact_and_load_as_a_contiguous_matrix_under_budget() {
                 // Masked to subnormal bits so every generated value is finite; the store
                 // rejects non-finite vectors and the round trip must stay bit-exact.
                 f32::from_bits(
-                    ((index * DIM + column) as u32)
-                        .wrapping_mul(2_654_435_761)
-                        & 0x007F_FFFF,
+                    ((index * DIM + column) as u32).wrapping_mul(2_654_435_761) & 0x007F_FFFF,
                 )
             })
             .collect::<Vec<_>>();
@@ -1179,7 +1177,9 @@ fn feedback_is_append_only_and_enforces_signal_rules_at_the_api() {
         "photo-b",
         FeedbackSignal::Pick,
     );
-    store.append_feedback(DEFAULT_OWNER_ID, &on_photo_b).unwrap();
+    store
+        .append_feedback(DEFAULT_OWNER_ID, &on_photo_b)
+        .unwrap();
     let pair = FeedbackEvent {
         value: Some(1.0),
         compared_media_kind: Some(MediaKind::Photo),
@@ -1283,10 +1283,7 @@ fn feedback_is_append_only_and_enforces_signal_rules_at_the_api() {
         )
         .is_err());
     assert!(audit
-        .execute(
-            "DELETE FROM feedback_events WHERE id = 'feedback-base'",
-            [],
-        )
+        .execute("DELETE FROM feedback_events WHERE id = 'feedback-base'", [],)
         .is_err());
     assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 4);
 
