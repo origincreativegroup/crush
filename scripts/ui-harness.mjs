@@ -167,6 +167,84 @@ const tests = {
       return message.includes("Rated 4 of 5.");
     });
   },
+
+  async "style-panel"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-style").click();
+    // Profile status comes from real profile data: learned=1 with eval-gate metrics.
+    await poll(async () =>
+      /Learned · held-out 0\.78 vs baseline 0\.61/.test(
+        await visibleText(frame.locator("#style-status-line")),
+      ));
+    const rows = frame.locator("#style-sets .style-set-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 2);
+    assert.equal(await visibleText(rows.nth(0).locator(".status-pill")), "Confirmed");
+    assert.equal(await visibleText(rows.nth(0).locator(".style-set-name")), "Launch selects");
+    assert.equal(await visibleText(rows.nth(1).locator(".status-pill")), "Unconfirmed");
+    assert.equal(await visibleText(rows.nth(1).locator(".style-set-name")), "Quiet travel film");
+    assert.equal(await frame.locator("#style-empty").isHidden(), true);
+
+    // Create: a new set starts unconfirmed — inert until confirmed.
+    await frame.locator("#style-set-name").fill("Winter reel selects");
+    await frame.locator("#style-set-context").fill("homepage-hero");
+    await frame.locator("#style-create").click();
+    await poll(async () => (await rows.count()) === 3);
+    const created = rows.nth(2);
+    assert.equal(await visibleText(created.locator(".style-set-name")), "Winter reel selects");
+    assert.equal(await visibleText(created.locator(".status-pill")), "Unconfirmed");
+
+    // Confirm: the status pill shows the state transition.
+    await created.locator("button.secondary").click();
+    await poll(async () => (await visibleText(created.locator(".status-pill"))) === "Confirmed");
+
+    // Delete is two-step: arm, then really delete.
+    const remove = created.locator("button.danger");
+    await remove.click();
+    assert.equal(await visibleText(remove), "Really delete?");
+    await remove.click();
+    await poll(async () => (await rows.count()) === 2);
+
+    // Reset is two-step too and flips the profile to the general model.
+    const reset = frame.locator("#style-reset");
+    await reset.click();
+    assert.equal(await visibleText(reset), "Really reset?");
+    await reset.click();
+    await poll(
+      async () => (await visibleText(frame.locator("#style-status-line"))) === "General model only",
+    );
+  },
+
+  async "style-add-item"(page) {
+    const frame = page.frameLocator("#app-frame");
+    const input = frame.locator("#search-input");
+    await input.waitFor({ state: "visible" });
+    await input.fill("rocket");
+    await input.press("Enter");
+    const card = frame.locator(".result-card").first();
+    await card.waitFor({ state: "visible" });
+    await card.click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    // The drawer loads the reference sets when the detail opens.
+    const select = frame.locator("#detail-style-set");
+    await select.waitFor({ state: "visible" });
+    await poll(async () => (await select.locator("option").count()) === 3);
+    await select.selectOption({ label: "Launch selects (Confirmed)" });
+    await frame.locator("#detail-add-style").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "reference_set_add_item" &&
+          call.args.setId === "set-confirmed" &&
+          call.args.mediaKind === "video" &&
+          call.args.mediaId === "shot-1",
+      );
+    });
+    await poll(
+      async () => (await visibleText(frame.locator("#detail-add-style"))) === "Added",
+    );
+  },
 };
 
 const requested = process.argv.slice(2);

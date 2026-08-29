@@ -21,10 +21,12 @@ mod macos {
     use crush_stage_embed::embedder::{Embedder, ProviderPreference};
     use crush_stage_split::ffmpeg;
     use crush_store::{
-        reference_scope_from_str, reference_scope_to_str, reference_status_to_str, AssetFilter,
-        Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta, FeedbackEvent,
-        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, PhotoStatus, ReviewOp, SafetyFlags,
-        SavedSearch, StackItem, StackItemRole, StackMediaKind, Store, VersionStack, VideoStatus,
+        reference_scope_from_str, reference_scope_to_str, reference_status_from_str,
+        reference_status_to_str, AssetFilter, Collection, CollectionItem, EditorialAnnotation,
+        EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, LibraryAsset, MediaKind,
+        PhotoStatus, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
+        ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch, StackItem, StackItemRole,
+        StackMediaKind, Store, VersionStack, VideoStatus,
     };
     use serde::{Deserialize, Serialize};
     use tauri::{AppHandle, Emitter, Manager, State};
@@ -1234,6 +1236,158 @@ mod macos {
                 source_collection_id: set.source_collection_id,
                 created_at: set.created_at.to_rfc3339(),
             })
+    // ---- Style + reference sets (Task 018b) ----
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReferenceSetView {
+        id: String,
+        name: String,
+        context_key: String,
+        description: String,
+        scope: String,
+        status: String,
+        item_count: usize,
+        created_at: String,
+        confirmed_at: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StyleProfileStatusView {
+        /// True only when the active profile carries `learned = 1`, which the held-out
+        /// evaluation gate (Task 018a) sets at train time; the UI never says "Learned"
+        /// without it.
+        learned: bool,
+        has_active_profile: bool,
+        profile_id: Option<String>,
+        context_key: Option<String>,
+        version: Option<i64>,
+        algorithm_version: Option<String>,
+        sample_count: Option<i64>,
+        held_out_metric: Option<f64>,
+        baseline_metric: Option<f64>,
+        metrics: Option<serde_json::Value>,
+        reference_sets_total: usize,
+        reference_sets_confirmed: usize,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RetrainOutcome {
+        /// False when the evidence is below the trainer's minimum-samples floor and the
+        /// previous profile was left untouched (sparse evidence never invents certainty).
+        trained: bool,
+        status: StyleProfileStatusView,
+    }
+
+    /// Reference-set items use the store's `photo`/`shot` kinds; the UI talks about
+    /// "photo"/"video" assets (mirroring `record_feedback`'s asset type vocabulary).
+    fn parse_media_kind(value: &str) -> anyhow::Result<MediaKind> {
+        match value.trim() {
+            "photo" => Ok(MediaKind::Photo),
+            "shot" | "video" => Ok(MediaKind::Shot),
+            other => anyhow::bail!("unsupported media kind {other:?}"),
+        }
+    }
+
+    fn reference_set_view(store: &Store, set: ReferenceSet) -> anyhow::Result<ReferenceSetView> {
+        let item_count = store.reference_set_items(DEFAULT_OWNER_ID, &set.id)?.len();
+        Ok(ReferenceSetView {
+            id: set.id,
+            name: set.name,
+            context_key: set.context_key,
+            description: set.description,
+            scope: crush_store::reference_scope_to_str(set.scope).to_owned(),
+            status: crush_store::reference_status_to_str(set.status).to_owned(),
+            item_count,
+            created_at: set.created_at.to_rfc3339(),
+            confirmed_at: set.confirmed_at.map(|value| value.to_rfc3339()),
+        })
+    }
+
+    /// Status surface for the "learned vs. baseline" badge. A profile that exists but never
+    /// passed the eval gate reports `learned: false`, so the UI shows the general-model copy
+    /// (the ranking path ignores unlearned profiles too).
+    fn style_profile_status_view(store: &Store) -> anyhow::Result<StyleProfileStatusView> {
+        let profile = store.active_style_profile(DEFAULT_OWNER_ID)?;
+        let sets = store.reference_set_list(DEFAULT_OWNER_ID)?;
+        let confirmed = sets
+            .iter()
+            .filter(|set| set.status == ReferenceSetStatus::Confirmed)
+            .count();
+        Ok(match profile {
+            Some(profile) => StyleProfileStatusView {
+                learned: profile.learned,
+                has_active_profile: true,
+                profile_id: Some(profile.id),
+                context_key: Some(profile.context_key),
+                version: Some(profile.version),
+                algorithm_version: Some(profile.algorithm_version),
+                sample_count: Some(profile.sample_count),
+                held_out_metric: profile.held_out_metric,
+                baseline_metric: profile.baseline_metric,
+                metrics: serde_json::from_str(&profile.metrics_json).ok(),
+                reference_sets_total: sets.len(),
+                reference_sets_confirmed: confirmed,
+            },
+            None => StyleProfileStatusView {
+                learned: false,
+                has_active_profile: false,
+                profile_id: None,
+                context_key: None,
+                version: None,
+                algorithm_version: None,
+                sample_count: None,
+                held_out_metric: None,
+                baseline_metric: None,
+                metrics: None,
+                reference_sets_total: sets.len(),
+                reference_sets_confirmed: confirmed,
+            },
+        })
+    }
+
+    #[tauri::command]
+    fn reference_set_create(
+        name: String,
+        context_key: String,
+        description: String,
+        scope: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<()> {
+        command_result((|| {
+            let name = name.trim();
+            ensure!(!name.is_empty(), "reference set name must not be empty");
+            let context_key = context_key.trim();
+            let context_key = if context_key.is_empty() {
+                "default"
+            } else {
+                context_key
+            };
+            let scope = match scope.trim() {
+                "whole_set" => ReferenceSetScope::WholeSet,
+                "selected" => ReferenceSetScope::Selected,
+                other => anyhow::bail!("unsupported reference set scope {other:?}"),
+            };
+            let store = Store::open(&state.paths.root)?;
+            store.reference_set_create(
+                DEFAULT_OWNER_ID,
+                &ReferenceSet {
+                    id: Uuid::new_v4().to_string(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    name: name.to_owned(),
+                    context_key: context_key.to_owned(),
+                    description: description.trim().to_owned(),
+                    scope,
+                    // Sets are inert until the user explicitly confirms them.
+                    status: ReferenceSetStatus::Unconfirmed,
+                    source_collection_id: None,
+                    created_at: chrono::Utc::now(),
+                    confirmed_at: None,
+                },
+            )?;
+            Ok(())
         })())
     }
 
@@ -1249,6 +1403,13 @@ mod macos {
             };
             store.stack_create(DEFAULT_OWNER_ID, &stack)?;
             Ok(stack_view(stack))
+    fn reference_set_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<ReferenceSetView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let sets = store.reference_set_list(DEFAULT_OWNER_ID)?;
+            sets.into_iter()
+                .map(|set| reference_set_view(&store, set))
+                .collect()
         })())
     }
 
@@ -1273,6 +1434,37 @@ mod macos {
                     added_at: chrono::Utc::now(),
                 },
             )
+    fn reference_set_add_item(
+        set_id: String,
+        media_kind: String,
+        media_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<()> {
+        command_result((|| {
+            let media_kind = parse_media_kind(&media_kind)?;
+            let store = Store::open(&state.paths.root)?;
+            // Mirror record_feedback: validate the asset before writing anything.
+            let exists = match media_kind {
+                MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
+                MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
+            };
+            let kind = match media_kind {
+                MediaKind::Photo => "photo",
+                MediaKind::Shot => "shot",
+            };
+            ensure!(exists, "no {kind} exists with id {media_id}");
+            store.reference_set_add_item(
+                DEFAULT_OWNER_ID,
+                &ReferenceSetItem {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    set_id,
+                    media_kind,
+                    media_id,
+                    role: ReferenceItemRole::Positive,
+                    added_at: chrono::Utc::now(),
+                },
+            )?;
+            Ok(())
         })())
     }
 
@@ -1280,6 +1472,9 @@ mod macos {
     fn stack_remove_item(
         stack_id: String,
         asset_type: String,
+    fn reference_set_remove_item(
+        set_id: String,
+        media_kind: String,
         media_id: String,
         state: State<'_, RuntimeState>,
     ) -> CommandResult<bool> {
@@ -1291,6 +1486,9 @@ mod macos {
                 parse_stack_asset_type(&asset_type)?,
                 &media_id,
             )
+            let media_kind = parse_media_kind(&media_kind)?;
+            let store = Store::open(&state.paths.root)?;
+            store.reference_set_remove_item(DEFAULT_OWNER_ID, &set_id, media_kind, &media_id)
         })())
     }
 
@@ -1311,6 +1509,13 @@ mod macos {
                 .into_iter()
                 .map(stack_view)
                 .collect())
+    fn reference_set_confirm(
+        set_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reference_set_confirm(DEFAULT_OWNER_ID, &set_id)
         })())
     }
 
@@ -1361,6 +1566,13 @@ mod macos {
                     created_at: saved.created_at.to_rfc3339(),
                 })
                 .collect())
+    fn reference_set_disable(
+        set_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reference_set_disable(DEFAULT_OWNER_ID, &set_id)
         })())
     }
 
@@ -1583,6 +1795,46 @@ mod macos {
             let mut store = Store::open(&state.paths.root)?;
             store.bulk_review(DEFAULT_OWNER_ID, &review_ops)
         })())
+    fn reference_set_delete(set_id: String, state: State<'_, RuntimeState>) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reference_set_delete(DEFAULT_OWNER_ID, &set_id)
+        })())
+    }
+
+    #[tauri::command]
+    fn style_profile_status(
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<StyleProfileStatusView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            style_profile_status_view(&store)
+        })())
+    }
+
+    #[tauri::command]
+    fn style_profile_reset(state: State<'_, RuntimeState>) -> CommandResult<usize> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reset_style_profiles(DEFAULT_OWNER_ID)
+        })())
+    }
+
+    #[tauri::command]
+    async fn style_profile_retrain(
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<RetrainOutcome> {
+        let paths = state.paths.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result((|| {
+                let mut store = Store::open(&paths.root)?;
+                let trained = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)?.is_some();
+                let status = style_profile_status_view(&store)?;
+                Ok(RetrainOutcome { trained, status })
+            })())
+        })
+        .await
+        .map_err(|error| format!("style retrain worker failed: {error}"))?
     }
 
     #[tauri::command]
@@ -1873,6 +2125,16 @@ mod macos {
                 photo_detail,
                 record_feedback,
                 shot_at_index,
+                reference_set_create,
+                reference_set_list,
+                reference_set_add_item,
+                reference_set_remove_item,
+                reference_set_confirm,
+                reference_set_disable,
+                reference_set_delete,
+                style_profile_status,
+                style_profile_reset,
+                style_profile_retrain,
                 export_clip,
                 open_in_finder,
                 library_browse,
