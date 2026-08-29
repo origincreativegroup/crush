@@ -139,7 +139,9 @@ pub struct VideoSourceMetadata {
     pub probed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize,
+)]
 pub enum MediaKind {
     Photo,
     Shot,
@@ -374,7 +376,9 @@ pub struct SavedSearch {
 
 /// Where a plan item's rank came from. `General` is the cold-start strong-shot model;
 /// `Personal` carries the exact style-profile version that produced the rank.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize,
+)]
 pub enum PlanOrigin {
     General,
     Personal,
