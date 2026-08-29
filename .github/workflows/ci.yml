@@ -60,3 +60,4 @@ jobs:
       - run: cargo test -p crush-cli --test search_fixtures -- --nocapture
       - run: cargo test -p crush-stage-asr --test transcription_goldens -- --nocapture
       - run: cargo test -p crush-pipeline --test ingest_fixtures -- --nocapture
+      - run: cargo test -p crush-pipeline --test source_fidelity -- --nocapture

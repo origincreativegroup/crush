@@ -12,7 +12,9 @@ mod macos {
     use crush_core::paths::AppPaths;
     use crush_core::{Config, DEFAULT_OWNER_ID};
     use crush_pipeline::{IngestSummary, Pipeline};
-    use crush_search::{retrain_style_profile, AssetSearchResult, SearchEngine};
+    use crush_search::{
+        personal_style_score, retrain_style_profile, AssetSearchResult, SearchEngine,
+    };
     use crush_stage_embed::embedder::{Embedder, ProviderPreference};
     use crush_stage_split::ffmpeg;
     use crush_store::{
@@ -144,6 +146,7 @@ mod macos {
         thumb_path: Option<String>,
         transcripts: Vec<TranscriptView>,
         aesthetic_score: Option<f64>,
+        personal_style_score: Option<f32>,
         technical_score: Option<f64>,
         composition_score: Option<f64>,
         moment_score: Option<f64>,
@@ -160,6 +163,7 @@ mod macos {
         format: String,
         quality: Option<i64>,
         aesthetic_score: Option<f64>,
+        personal_style_score: Option<f32>,
         technical_score: Option<f64>,
         composition_score: Option<f64>,
         moment_score: Option<f64>,
@@ -579,6 +583,12 @@ mod macos {
                 crush_store::MediaKind::Shot,
                 &shot.id,
             )?;
+            let style = personal_style_score(
+                &store,
+                DEFAULT_OWNER_ID,
+                crush_store::MediaKind::Shot,
+                &shot.id,
+            )?;
             Ok(ShotDetailView {
                 id: shot.id,
                 video_id: shot.video_id,
@@ -592,6 +602,7 @@ mod macos {
                 thumb_path,
                 transcripts,
                 aesthetic_score: assessment.as_ref().map(|value| value.overall),
+                personal_style_score: style,
                 technical_score: assessment.as_ref().map(|value| value.technical_quality),
                 composition_score: assessment.as_ref().map(|value| value.composition_quality),
                 moment_score: assessment.as_ref().map(|value| value.moment_story),
@@ -629,6 +640,12 @@ mod macos {
                 crush_store::MediaKind::Photo,
                 &photo.id,
             )?;
+            let style = personal_style_score(
+                &store,
+                DEFAULT_OWNER_ID,
+                crush_store::MediaKind::Photo,
+                &photo.id,
+            )?;
             Ok(PhotoDetailView {
                 id: photo.id,
                 photo_path: display_path.display().to_string(),
@@ -637,6 +654,7 @@ mod macos {
                 format: photo.format,
                 quality: annotation.as_ref().and_then(|value| value.quality),
                 aesthetic_score: assessment.as_ref().map(|value| value.overall),
+                personal_style_score: style,
                 technical_score: assessment.as_ref().map(|value| value.technical_quality),
                 composition_score: assessment.as_ref().map(|value| value.composition_quality),
                 moment_score: assessment.as_ref().map(|value| value.moment_story),
