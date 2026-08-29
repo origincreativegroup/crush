@@ -11,8 +11,8 @@ use crush_core::{
 use crush_store::{
     AestheticAssessment, AssetFilter, Collection, CollectionItem, EditorialAnnotation,
     EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, Photo,
-    PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, Plan, PlanItem, PlanOrigin,
-    ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
+    PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, Plan, PlanItem, PlanItemPatch,
+    PlanOrigin, ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
     ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch, Shot, StackItem, StackItemRole,
     StackMediaKind, Store, StyleProfile, TranscriptSegment, VersionStack, Video,
     VideoSourceMetadata, VideoStatus,
