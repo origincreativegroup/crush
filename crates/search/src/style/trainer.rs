@@ -166,9 +166,9 @@ fn gather_evidence(store: &Store, owner_id: &str, context_key: &str) -> anyhow::
             continue;
         }
         if event.signal == FeedbackSignal::Prefer {
-            if let (Some(kind), Some(id)) = (event.compared_media_kind, event.compared_media_id) {
+            if let (Some(kind), Some(id)) = (&event.compared_media_kind, &event.compared_media_id) {
                 if let Some((plus, minus)) =
-                    prefer_pair(store, owner_id, &event, kind, id.as_str())?
+                    prefer_pair(store, owner_id, &event, *kind, id.as_str())?
                 {
                     media_keys.insert(plus.pool_key());
                     media_keys.insert(minus.pool_key());
