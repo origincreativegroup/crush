@@ -3047,11 +3047,10 @@ fn browse_assets_filters_and_counts() {
     store
         .upsert_photo(DEFAULT_OWNER_ID, &photo_flagged)
         .unwrap();
+    let mut photo_pending = reference_photo("photo-browse-b", "browse-sha-b");
+    photo_pending.status = PhotoStatus::Pending;
     store
-        .upsert_photo(
-            DEFAULT_OWNER_ID,
-            &reference_photo("photo-browse-b", "browse-sha-b"),
-        )
+        .upsert_photo(DEFAULT_OWNER_ID, &photo_pending)
         .unwrap();
     store
         .upsert_video(DEFAULT_OWNER_ID, &video("video-browse", "browse-video-sha"))
