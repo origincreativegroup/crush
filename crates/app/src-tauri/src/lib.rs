@@ -225,18 +225,20 @@ mod macos {
             let found = models::inspect(&state.paths.models(), &manifest)?;
             Ok(found
                 .into_iter()
-                .map(|check| ModelFileStatus {
-                    bytes: manifest
-                        .files
-                        .get(&check.name)
-                        .with_context(|| {
-                            format!("model manifest is missing entry for {}", check.name)
-                        })?
-                        .bytes,
-                    name: check.name,
-                    status: model_status_name(check.status).to_owned(),
+                .map(|check| {
+                    Ok(ModelFileStatus {
+                        bytes: manifest
+                            .files
+                            .get(&check.name)
+                            .with_context(|| {
+                                format!("model manifest is missing entry for {}", check.name)
+                            })?
+                            .bytes,
+                        name: check.name,
+                        status: model_status_name(check.status).to_owned(),
+                    })
                 })
-                .collect())
+                .collect::<anyhow::Result<Vec<_>>>()?)
         })())
     }
 
@@ -541,7 +543,9 @@ mod macos {
                     runtime.engine.reload(&store)?;
                     runtime.generation = Some(generation);
                 }
-                let SearchRuntime { engine, embedder } = runtime;
+                let SearchRuntime {
+                    engine, embedder, ..
+                } = runtime;
                 engine.search_assets(&store, &mut |text: &str| embedder.embed_text(text), &q, top)
             })())
         })
