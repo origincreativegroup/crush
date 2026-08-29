@@ -144,3 +144,17 @@ keep verbatim ffmpeg command logging (ffmpeg.rs:812-829); one task per PR on
 - [ ] EmbeddedPreview is rejected by store validation, proven by a test.
 - [ ] Golden files untouched; source re-hash checks preserved; ffmpeg command lines still logged
       verbatim.
+
+## Record (merged as PR #23, migration renumbered to 0006 during integration)
+
+Implemented by the agent team 2026-08-29. Photo analyze staleness gate (photos_for_analysis, model-version
+aware, zero re-analysis when nothing changed) with bounded 64-photo decode windows; all sips invocations
+run through run_sips_with_control (process-group cancellation + 120 s timeout); photo ingest has a full
+job lifecycle (0006_photo_jobs.sql: nullable video_id + composite photo FK + photo_ingest stage) with
+job_id/stage on every span; fidelity_complete requires proxy AND thumbnail hashes (video also requires
+shot thumbs); decoder policy re-checked against probed codec tags so BRAW/R3D in .mov fails with the
+named licensing reason; unsupported extensions recorded in IngestSummary::errors against a curated
+registry synced with the format matrix; proxy recipes recorded in metadata_json; edit proxies carry
+explicit output color tags and are re-probed; fps==0/unknown-bit-depth forces the proxy path;
+EmbeddedPreview provenance rejected structurally. Integration notes: migration moved 0005->0006 after
+colliding with TASK-025; decode_photo call sites updated for the cancellation token.

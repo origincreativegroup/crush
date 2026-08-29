@@ -134,3 +134,15 @@ additive.
 - [ ] fail_running_jobs_as_interrupted runs in one Immediate transaction; put_vector uses
       vector_bytes; put_vector/put_photo_vector reject non-finite values; affected tests updated.
 - [ ] `cargo test -p crush-store` passes with all existing and new tests green.
+
+## Record (merged as PR #21)
+
+Implemented by the agent team 2026-08-29. 0005_feedback_hardening.sql: feedback_events no-update and
+no-delete triggers (cleanup paths permitted, direct history rewriting rejected at the SQL level);
+context_json validated as a JSON object by append_feedback; put_style_profile conflicts on (id, owner_id)
+with post-commit owner read-back (cross-owner id collision fails closed, regression-tested);
+integrity() extended to photo_vectors orphans/byte-length, photo thumb paths/existence, embedded/done
+photos missing vectors, and style-profile weight blobs; multi-owner isolation test suite added;
+fail_running_jobs_as_interrupted is one Immediate transaction; vectors reject non-finite values (NaN
+test inverted, matrix generator masked to finite bits). Rating 1..5 documented as API-only (no table
+rebuild). cargo test -p crush-store green on Linux CI.
