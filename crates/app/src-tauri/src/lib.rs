@@ -1017,10 +1017,7 @@ mod macos {
     }
 
     #[tauri::command]
-    fn reference_set_delete(
-        set_id: String,
-        state: State<'_, RuntimeState>,
-    ) -> CommandResult<bool> {
+    fn reference_set_delete(set_id: String, state: State<'_, RuntimeState>) -> CommandResult<bool> {
         command_result((|| {
             let mut store = Store::open(&state.paths.root)?;
             store.reference_set_delete(DEFAULT_OWNER_ID, &set_id)
