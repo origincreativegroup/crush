@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
@@ -22,6 +22,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (4, include_str!("../migrations/0004_strong_shot.sql")),
     (5, include_str!("../migrations/0005_feedback_hardening.sql")),
     (6, include_str!("../migrations/0006_photo_jobs.sql")),
+    (7, include_str!("../migrations/0007_reference_sets.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,8 +244,59 @@ pub struct StyleProfile {
     pub feature_weights_json: String,
     pub sample_count: i64,
     pub held_out_metric: Option<f64>,
+    /// Non-personalized baseline accuracy measured on the same held-out split.
+    pub baseline_metric: Option<f64>,
+    pub context_key: String,
+    pub metrics_json: String,
+    pub learned: bool,
     pub active: bool,
     pub trained_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceSetScope {
+    WholeSet,
+    Selected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceSetStatus {
+    Unconfirmed,
+    Confirmed,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceItemRole {
+    Positive,
+    Excluded,
+}
+
+/// A named, context-scoped collection of previous-work examples the owner designated as style
+/// evidence. Uncurated sets are inert: the trainer reads items only through confirmed sets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceSet {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub context_key: String,
+    pub description: String,
+    pub scope: ReferenceSetScope,
+    pub status: ReferenceSetStatus,
+    /// Reserved for TASK-019 collection designation.
+    pub source_collection_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferenceSetItem {
+    pub owner_id: String,
+    pub set_id: String,
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    pub role: ReferenceItemRole,
+    pub added_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -940,21 +992,26 @@ impl Store {
                 .all(|value| value.is_finite()),
             "style profile contains non-finite embedding weights"
         );
+        ensure!(
+            !profile.context_key.trim().is_empty(),
+            "style profile context key must not be empty"
+        );
+        validate_json_object(&profile.metrics_json, "metrics_json")?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if profile.active {
             transaction.execute(
-                "UPDATE style_profiles SET active = 0 WHERE owner_id = ?1",
-                params![owner_id],
+                "UPDATE style_profiles SET active = 0 WHERE owner_id = ?1 AND context_key = ?2",
+                params![owner_id, profile.context_key],
             )?;
         }
         transaction.execute(
             "INSERT INTO style_profiles (
                 id, owner_id, name, version, algorithm_version, embedding_dim,
                 embedding_weights, feature_weights_json, sample_count, held_out_metric, active,
-                trained_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                trained_at, context_key, baseline_metric, metrics_json, learned
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(id, owner_id) DO UPDATE SET
                 name = excluded.name,
                 version = excluded.version,
@@ -965,7 +1022,11 @@ impl Store {
                 sample_count = excluded.sample_count,
                 held_out_metric = excluded.held_out_metric,
                 active = excluded.active,
-                trained_at = excluded.trained_at",
+                trained_at = excluded.trained_at,
+                context_key = excluded.context_key,
+                baseline_metric = excluded.baseline_metric,
+                metrics_json = excluded.metrics_json,
+                learned = excluded.learned",
             params![
                 profile.id,
                 owner_id,
@@ -979,6 +1040,10 @@ impl Store {
                 profile.held_out_metric,
                 profile.active,
                 profile.trained_at.to_rfc3339(),
+                profile.context_key,
+                profile.baseline_metric,
+                profile.metrics_json,
+                i64::from(profile.learned),
             ],
         )?;
         transaction.commit()?;
@@ -993,18 +1058,301 @@ impl Store {
         ensure_owner_matches(owner_id, &stored_owner, "style profile")
     }
 
+    /// The active profile for the default context. Named contexts are read through
+    /// [`Store::active_style_profile_for_context`].
     pub fn active_style_profile(&self, owner_id: &str) -> anyhow::Result<Option<StyleProfile>> {
+        self.active_style_profile_for_context(owner_id, "default")
+    }
+
+    pub fn active_style_profile_for_context(
+        &self,
+        owner_id: &str,
+        context_key: &str,
+    ) -> anyhow::Result<Option<StyleProfile>> {
         self.connection
             .query_row(
                 "SELECT id, owner_id, name, version, algorithm_version, embedding_dim,
                         embedding_weights, feature_weights_json, sample_count, held_out_metric,
-                        active, trained_at
-                 FROM style_profiles WHERE owner_id = ?1 AND active = 1",
-                params![owner_id],
+                        active, trained_at, context_key, baseline_metric, metrics_json, learned
+                 FROM style_profiles
+                 WHERE owner_id = ?1 AND active = 1 AND context_key = ?2",
+                params![owner_id, context_key],
                 style_profile_from_row,
             )
             .optional()
             .context("failed to read active style profile")
+    }
+
+    /// Every retained profile version, ordered for auditability; rows are never deleted.
+    pub fn style_profiles(&self, owner_id: &str) -> anyhow::Result<Vec<StyleProfile>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, name, version, algorithm_version, embedding_dim,
+                    embedding_weights, feature_weights_json, sample_count, held_out_metric,
+                    active, trained_at, context_key, baseline_metric, metrics_json, learned
+             FROM style_profiles WHERE owner_id = ?1
+             ORDER BY context_key, version",
+        )?;
+        let rows = statement.query_map(params![owner_id], style_profile_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list style profiles")
+    }
+
+    pub fn style_profiles_for_context(
+        &self,
+        owner_id: &str,
+        context_key: &str,
+    ) -> anyhow::Result<Vec<StyleProfile>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, name, version, algorithm_version, embedding_dim,
+                    embedding_weights, feature_weights_json, sample_count, held_out_metric,
+                    active, trained_at, context_key, baseline_metric, metrics_json, learned
+             FROM style_profiles WHERE owner_id = ?1 AND context_key = ?2
+             ORDER BY version",
+        )?;
+        let rows = statement.query_map(params![owner_id, context_key], style_profile_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list style profiles for context")
+    }
+
+    /// Reversibly activate one retained version: the prior active row for the same
+    /// (owner, context) is deactivated inside one transaction and nothing is deleted.
+    pub fn activate_style_profile(
+        &mut self,
+        owner_id: &str,
+        profile_id: &str,
+    ) -> anyhow::Result<bool> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let context_key: Option<String> = transaction
+            .query_row(
+                "SELECT context_key FROM style_profiles WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, profile_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read style profile for activation")?;
+        let Some(context_key) = context_key else {
+            return Ok(false);
+        };
+        transaction.execute(
+            "UPDATE style_profiles SET active = 0
+             WHERE owner_id = ?1 AND context_key = ?2 AND active = 1",
+            params![owner_id, context_key],
+        )?;
+        transaction.execute(
+            "UPDATE style_profiles SET active = 1 WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, profile_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Deactivate every profile for the owner. Reversible through
+    /// [`Store::activate_style_profile`] or a retrain; returns the deactivated count.
+    pub fn reset_style_profiles(&mut self, owner_id: &str) -> anyhow::Result<usize> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE style_profiles SET active = 0 WHERE owner_id = ?1 AND active = 1",
+                params![owner_id],
+            )
+            .context("failed to reset style profiles")?;
+        Ok(changed)
+    }
+
+    pub fn reference_set_create(&self, owner_id: &str, set: &ReferenceSet) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &set.owner_id, "reference set")?;
+        ensure!(
+            !set.name.trim().is_empty(),
+            "reference set name must not be empty"
+        );
+        ensure!(
+            !set.context_key.trim().is_empty(),
+            "reference set context key must not be empty"
+        );
+        self.connection
+            .execute(
+                "INSERT INTO reference_sets (
+                    id, owner_id, name, context_key, description, scope, status,
+                    source_collection_id, created_at, confirmed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    set.id,
+                    owner_id,
+                    set.name,
+                    set.context_key,
+                    set.description,
+                    reference_scope_to_str(set.scope),
+                    reference_status_to_str(set.status),
+                    set.source_collection_id,
+                    set.created_at.to_rfc3339(),
+                    set.confirmed_at.map(|value| value.to_rfc3339()),
+                ],
+            )
+            .context("failed to create reference set")?;
+        Ok(())
+    }
+
+    pub fn reference_set_list(&self, owner_id: &str) -> anyhow::Result<Vec<ReferenceSet>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, name, context_key, description, scope, status,
+                    source_collection_id, created_at, confirmed_at
+             FROM reference_sets WHERE owner_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], reference_set_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list reference sets")
+    }
+
+    pub fn reference_set_get(
+        &self,
+        owner_id: &str,
+        set_id: &str,
+    ) -> anyhow::Result<Option<ReferenceSet>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, name, context_key, description, scope, status,
+                        source_collection_id, created_at, confirmed_at
+                 FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+                reference_set_from_row,
+            )
+            .optional()
+            .context("failed to read reference set")
+    }
+
+    /// Flip a set to `confirmed`; confirmed sets are the only ones the trainer reads.
+    pub fn reference_set_confirm(&mut self, owner_id: &str, set_id: &str) -> anyhow::Result<bool> {
+        self.reference_set_set_status(owner_id, set_id, ReferenceSetStatus::Confirmed)
+    }
+
+    /// Mute a set without deleting it; the trainer stops reading its items.
+    pub fn reference_set_disable(&mut self, owner_id: &str, set_id: &str) -> anyhow::Result<bool> {
+        self.reference_set_set_status(owner_id, set_id, ReferenceSetStatus::Disabled)
+    }
+
+    fn reference_set_set_status(
+        &mut self,
+        owner_id: &str,
+        set_id: &str,
+        status: ReferenceSetStatus,
+    ) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE reference_sets SET status = ?3, confirmed_at = ?4
+                 WHERE owner_id = ?1 AND id = ?2",
+                params![
+                    owner_id,
+                    set_id,
+                    reference_status_to_str(status),
+                    (status == ReferenceSetStatus::Confirmed).then(|| Utc::now().to_rfc3339())
+                ],
+            )
+            .context("failed to update reference set status")?;
+        Ok(changed == 1)
+    }
+
+    /// Delete a set; its items cascade and the next retrain reproduces the profile from the
+    /// remaining evidence.
+    pub fn reference_set_delete(&mut self, owner_id: &str, set_id: &str) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+            )
+            .context("failed to delete reference set")?;
+        Ok(changed == 1)
+    }
+
+    pub fn reference_set_add_item(
+        &self,
+        owner_id: &str,
+        item: &ReferenceSetItem,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &item.owner_id, "reference set item")?;
+        ensure!(
+            self.reference_set_get(owner_id, &item.set_id)?.is_some(),
+            "reference set {} does not exist for this owner",
+            item.set_id
+        );
+        self.connection
+            .execute(
+                "INSERT INTO reference_set_items (owner_id, set_id, media_kind, media_id, role, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    owner_id,
+                    item.set_id,
+                    media_kind_to_str(item.media_kind),
+                    item.media_id,
+                    reference_role_to_str(item.role),
+                    item.added_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to add reference set item")?;
+        Ok(())
+    }
+
+    pub fn reference_set_remove_item(
+        &self,
+        owner_id: &str,
+        set_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM reference_set_items
+                 WHERE owner_id = ?1 AND set_id = ?2 AND media_kind = ?3 AND media_id = ?4",
+                params![owner_id, set_id, media_kind_to_str(media_kind), media_id],
+            )
+            .context("failed to remove reference set item")?;
+        Ok(changed == 1)
+    }
+
+    pub fn reference_set_items(
+        &self,
+        owner_id: &str,
+        set_id: &str,
+    ) -> anyhow::Result<Vec<ReferenceSetItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, set_id, media_kind, media_id, role, added_at
+             FROM reference_set_items WHERE owner_id = ?1 AND set_id = ?2
+             ORDER BY added_at, media_kind, media_id",
+        )?;
+        let rows = statement.query_map(params![owner_id, set_id], reference_set_item_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list reference set items")
+    }
+
+    /// Positive examples from confirmed, non-disabled sets in one context. This is the only
+    /// read path the trainer uses, so uncurated sets can never contribute positive signal.
+    pub fn reference_set_confirmed_items(
+        &self,
+        owner_id: &str,
+        context_key: &str,
+    ) -> anyhow::Result<Vec<(MediaKind, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT i.media_kind, i.media_id
+             FROM reference_set_items AS i
+             JOIN reference_sets AS s ON s.id = i.set_id AND s.owner_id = i.owner_id
+             WHERE i.owner_id = ?1 AND s.context_key = ?2 AND s.status = 'confirmed'
+                   AND i.role = 'positive'
+             ORDER BY i.set_id, i.media_kind, i.media_id",
+        )?;
+        let rows = statement.query_map(params![owner_id, context_key], |row| {
+            let kind: String = row.get(0)?;
+            Ok((
+                media_kind_from_str(&kind)
+                    .map_err(|error| conversion_message(0, error.to_string()))?,
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list confirmed reference items")
     }
 
     fn photo_query(&self, sql: &str, owner_id: &str, value: &str) -> anyhow::Result<Option<Photo>> {
@@ -2518,6 +2866,49 @@ fn style_profile_from_row(row: &Row<'_>) -> rusqlite::Result<StyleProfile> {
         held_out_metric: row.get(9)?,
         active: row.get(10)?,
         trained_at: timestamp_from_str(&trained_at, 11)?,
+        context_key: row.get(12)?,
+        baseline_metric: row.get(13)?,
+        metrics_json: row.get(14)?,
+        learned: row.get::<_, i64>(15)? != 0,
+    })
+}
+
+fn reference_set_from_row(row: &Row<'_>) -> rusqlite::Result<ReferenceSet> {
+    let scope: String = row.get(5)?;
+    let status: String = row.get(6)?;
+    let created_at: String = row.get(8)?;
+    let confirmed_at: Option<String> = row.get(9)?;
+    Ok(ReferenceSet {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        name: row.get(2)?,
+        context_key: row.get(3)?,
+        description: row.get(4)?,
+        scope: reference_scope_from_str(&scope)
+            .map_err(|error| conversion_message(5, error.to_string()))?,
+        status: reference_status_from_str(&status)
+            .map_err(|error| conversion_message(6, error.to_string()))?,
+        source_collection_id: row.get(7)?,
+        created_at: timestamp_from_str(&created_at, 8)?,
+        confirmed_at: confirmed_at
+            .map(|value| timestamp_from_str(&value, 9))
+            .transpose()?,
+    })
+}
+
+fn reference_set_item_from_row(row: &Row<'_>) -> rusqlite::Result<ReferenceSetItem> {
+    let media_kind: String = row.get(2)?;
+    let role: String = row.get(4)?;
+    let added_at: String = row.get(5)?;
+    Ok(ReferenceSetItem {
+        owner_id: row.get(0)?,
+        set_id: row.get(1)?,
+        media_kind: media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(2, error.to_string()))?,
+        media_id: row.get(3)?,
+        role: reference_role_from_str(&role)
+            .map_err(|error| conversion_message(4, error.to_string()))?,
+        added_at: timestamp_from_str(&added_at, 5)?,
     })
 }
 
@@ -2641,6 +3032,53 @@ fn media_kind_from_str(value: &str) -> anyhow::Result<MediaKind> {
         "photo" => Ok(MediaKind::Photo),
         "shot" => Ok(MediaKind::Shot),
         _ => bail!("unknown media kind {value:?}"),
+    }
+}
+
+pub fn reference_scope_to_str(scope: ReferenceSetScope) -> &'static str {
+    match scope {
+        ReferenceSetScope::WholeSet => "whole_set",
+        ReferenceSetScope::Selected => "selected",
+    }
+}
+
+pub fn reference_scope_from_str(value: &str) -> anyhow::Result<ReferenceSetScope> {
+    match value {
+        "whole_set" => Ok(ReferenceSetScope::WholeSet),
+        "selected" => Ok(ReferenceSetScope::Selected),
+        _ => bail!("unknown reference set scope {value:?}"),
+    }
+}
+
+pub fn reference_status_to_str(status: ReferenceSetStatus) -> &'static str {
+    match status {
+        ReferenceSetStatus::Unconfirmed => "unconfirmed",
+        ReferenceSetStatus::Confirmed => "confirmed",
+        ReferenceSetStatus::Disabled => "disabled",
+    }
+}
+
+pub fn reference_status_from_str(value: &str) -> anyhow::Result<ReferenceSetStatus> {
+    match value {
+        "unconfirmed" => Ok(ReferenceSetStatus::Unconfirmed),
+        "confirmed" => Ok(ReferenceSetStatus::Confirmed),
+        "disabled" => Ok(ReferenceSetStatus::Disabled),
+        _ => bail!("unknown reference set status {value:?}"),
+    }
+}
+
+pub fn reference_role_to_str(role: ReferenceItemRole) -> &'static str {
+    match role {
+        ReferenceItemRole::Positive => "positive",
+        ReferenceItemRole::Excluded => "excluded",
+    }
+}
+
+pub fn reference_role_from_str(value: &str) -> anyhow::Result<ReferenceItemRole> {
+    match value {
+        "positive" => Ok(ReferenceItemRole::Positive),
+        "excluded" => Ok(ReferenceItemRole::Excluded),
+        _ => bail!("unknown reference set item role {value:?}"),
     }
 }
 

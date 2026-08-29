@@ -766,6 +766,7 @@ dependencies = [
  "crush-core",
  "crush-store",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "uuid",

@@ -9,6 +9,7 @@ crush-core = { path = "../core" }
 crush-store = { path = "../store" }
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 uuid.workspace = true
