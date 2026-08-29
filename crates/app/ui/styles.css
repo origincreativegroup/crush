@@ -673,3 +673,148 @@ nav {
   font: 11px/1.55 "SFMono-Regular", Consolas, monospace;
   white-space: pre-wrap;
 }
+
+/* ---- Style panel (Task 018b) ---- */
+
+.style-content {
+  padding: 20px 26px 40px;
+}
+
+.style-status-card {
+  max-width: 780px;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid #303037;
+  border-radius: 10px;
+  background: #18181b;
+}
+
+.style-status-line {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.style-status-line.learned {
+  color: #85d4a2;
+}
+
+.style-status-line.general {
+  color: #b9b9c0;
+}
+
+.style-status-meta {
+  margin: 4px 0 0;
+  color: #8a8a93;
+  font-size: 11px;
+}
+
+.style-create-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 780px;
+  margin-bottom: 18px;
+}
+
+.style-create-form input,
+.style-create-form select {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid #34343b;
+  border-radius: 7px;
+  color: #ececf0;
+  background: #141416;
+}
+
+.style-create-form input#style-set-name {
+  flex: 1 1 190px;
+}
+
+.style-create-form input#style-set-description {
+  flex: 2 1 240px;
+}
+
+.style-empty {
+  max-width: 780px;
+  padding: 26px 16px;
+  border: 1px dashed #3a3a42;
+  border-radius: 10px;
+  color: #8a8a93;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.style-empty p {
+  margin: 0;
+}
+
+.style-sets {
+  max-width: 780px;
+}
+
+.style-set-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border: 1px solid #29292f;
+  border-radius: 10px;
+  background: #18181b;
+}
+
+.style-set-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.style-set-name {
+  color: #dedee2;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.style-set-meta {
+  overflow: hidden;
+  margin-top: 3px;
+  color: #8a8a93;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.style-set-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.button.armed {
+  border-color: rgb(255 92 92 / 60%);
+  color: #fff;
+  background: rgb(255 92 92 / 30%);
+}
+
+.detail-style {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #303039;
+  border-radius: 8px;
+  background: #19191d;
+}
+
+.detail-style .eyebrow {
+  margin: 0 auto 0 0;
+}
+
+#detail-style-set {
+  min-height: 32px;
+  max-width: 190px;
+  border: 1px solid #3a3a43;
+  border-radius: 6px;
+  color: #e8e8ea;
+  background: #24242a;
+}

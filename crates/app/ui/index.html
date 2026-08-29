@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="search.css" />
     <script src="app.js" defer></script>
     <script src="search.js" defer></script>
+    <script src="style.js" defer></script>
   </head>
   <body>
     <div id="boot" class="boot-screen">
@@ -48,6 +49,10 @@
           <button class="nav-item active" id="nav-library" type="button">
             <span class="nav-icon" aria-hidden="true">▦</span>
             Library
+          </button>
+          <button class="nav-item" id="nav-style" type="button">
+            <span class="nav-icon" aria-hidden="true">✦</span>
+            Style
           </button>
         </nav>
         <footer class="sidebar-footer">
@@ -144,6 +149,52 @@
         </section>
       </main>
 
+      <main id="style-view" class="workspace style-workspace" aria-labelledby="style-title" hidden>
+        <header class="toolbar">
+          <div>
+            <p class="eyebrow">Previous work as evidence</p>
+            <h1 id="style-title">Style</h1>
+          </div>
+          <div class="toolbar-actions">
+            <button id="style-retrain" class="button secondary" type="button">Retrain profile</button>
+            <button id="style-reset" class="button danger" type="button">Reset profile</button>
+          </div>
+        </header>
+
+        <div id="style-message" class="library-message" role="status" hidden></div>
+
+        <section id="style-content" class="library-content style-content" aria-live="polite">
+          <div class="style-status-card">
+            <p class="eyebrow">Ranking profile</p>
+            <p id="style-status-line" class="style-status-line general">General model only</p>
+            <p id="style-status-meta" class="style-status-meta"></p>
+          </div>
+
+          <form id="style-create-form" class="style-create-form">
+            <input id="style-set-name" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Set name — e.g. Launch selects" aria-label="Reference set name" />
+            <input id="style-set-context" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Context (default)" aria-label="Context key" />
+            <input id="style-set-description" type="text" autocomplete="off"
+              placeholder="What this set says about your style" aria-label="Description" />
+            <label class="style-scope-control"><span class="sr-only">Set scope</span>
+              <select id="style-set-scope" aria-label="Set scope">
+                <option value="whole_set">Whole set counts</option>
+                <option value="selected">Selected examples only</option>
+              </select>
+            </label>
+            <button id="style-create" class="button primary" type="submit">Create set</button>
+          </form>
+
+          <div id="style-empty" class="style-empty" hidden>
+            <p>No reference sets yet. Create a set from finished selects or a reel, add examples
+            from the asset drawer, then confirm it — unconfirmed sets never shape ranking.</p>
+          </div>
+
+          <div id="style-sets" class="style-sets"></div>
+        </section>
+      </main>
+
       <aside id="detail" class="detail-panel" role="dialog" aria-label="Asset detail" tabindex="-1" hidden>
         <div class="detail-head">
           <div>
@@ -176,6 +227,13 @@
               <option value="3">★ 3</option><option value="4">★ 4</option><option value="5">★ 5</option>
             </select>
           </label>
+        </div>
+        <div class="detail-style" aria-label="Style evidence">
+          <span class="eyebrow">Style evidence</span>
+          <select id="detail-style-set" aria-label="Reference set">
+            <option value="">No reference sets yet</option>
+          </select>
+          <button id="detail-add-style" class="button secondary" type="button" disabled>Add to set</button>
         </div>
         <div class="detail-nav">
           <button id="prev-shot" class="button secondary" type="button">← Prev shot</button>
