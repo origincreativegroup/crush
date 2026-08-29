@@ -217,6 +217,98 @@ fn incompatible_stream_copy_uses_lgpl_videotoolbox_fallback() {
 }
 
 #[test]
+fn clip_export_never_overwrites_existing_files_or_source_aliases() {
+    use std::os::unix::fs::symlink;
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let source = temporary.path().join("source.mp4");
+    std::fs::copy(fixture("synthetic-speech.mp4"), &source).unwrap();
+    let source_bytes = std::fs::read(&source).unwrap();
+    let hardlink = temporary.path().join("hardlink.mp4");
+    std::fs::hard_link(&source, &hardlink).unwrap();
+    let symlink_path = temporary.path().join("symlink.mp4");
+    symlink(&source, &symlink_path).unwrap();
+    let existing = temporary.path().join("existing.mp4");
+    std::fs::write(&existing, b"keep this existing export").unwrap();
+    let dangling = temporary.path().join("dangling.mp4");
+    symlink(temporary.path().join("missing.mp4"), &dangling).unwrap();
+    for target in [&source, &hardlink, &symlink_path, &existing, &dangling] {
+        let error = runner.export_clip(&source, 1.0, 2.0, target).unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+    }
+    assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    assert_eq!(
+        std::fs::read(&existing).unwrap(),
+        b"keep this existing export"
+    );
+    assert!(std::fs::symlink_metadata(&dangling)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn clip_export_collision_during_render_keeps_the_other_file_and_cleans_staging() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let source = fixture("synthetic-speech.mp4");
+    let output = temporary.path().join("raced.mp4");
+    let mut raced = false;
+    let result = runner.export_clip_with_control(
+        &source,
+        1.0,
+        2.0,
+        &output,
+        &CancellationToken::default(),
+        |_| {
+            if !raced {
+                std::fs::write(&output, b"another writer owns this path").unwrap();
+                raced = true;
+            }
+        },
+    );
+    assert!(raced, "fixture must exercise the publication race");
+    assert!(
+        matches!(result, Err(Error::Io(ref error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+    );
+    assert_eq!(
+        std::fs::read(&output).unwrap(),
+        b"another writer owns this path"
+    );
+    assert!(!std::fs::read_dir(temporary.path())
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crush-export-")));
+}
+
+#[test]
+fn clip_export_cancellation_and_failure_publish_no_partial_output() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let source = fixture("synthetic-speech.mp4");
+    let output = temporary.path().join("cancelled.mp4");
+    let cancellation = CancellationToken::default();
+    let result = runner.export_clip_with_control(&source, 1.0, 2.0, &output, &cancellation, |_| {
+        cancellation.cancel()
+    });
+    assert!(matches!(result, Err(Error::Cancelled { .. })));
+    assert!(!output.exists());
+    let missing = temporary.path().join("missing.mp4");
+    assert!(runner.export_clip(&missing, 1.0, 2.0, &output).is_err());
+    assert!(!output.exists());
+    assert!(!std::fs::read_dir(temporary.path())
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crush-export-")));
+}
+
+#[test]
 fn progress_callback_fires_for_thirty_second_export() {
     let temporary = tempfile::tempdir().unwrap();
     let runner = runner(&temporary.path().join("debug"));

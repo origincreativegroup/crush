@@ -354,7 +354,17 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
         .unwrap();
     drop(store);
     let exported = temp.path().join("exported-shot.mp4");
+    let source_hash = sha256_file(Path::new(&target.path)).unwrap();
+    assert!(pipeline
+        .export_clip(&shot.id, Path::new(&target.path))
+        .unwrap_err()
+        .to_string()
+        .contains("already exists"));
     pipeline.export_clip(&shot.id, &exported).unwrap();
+    let export_hash = sha256_file(&exported).unwrap();
+    assert!(pipeline.export_clip(&shot.id, &exported).is_err());
+    assert_eq!(sha256_file(&exported).unwrap(), export_hash);
+    assert_eq!(sha256_file(Path::new(&target.path)).unwrap(), source_hash);
     let probe = ffmpeg::Runner::new(ffmpeg::resolve().unwrap(), 0, "verify-clip")
         .probe(&exported)
         .unwrap()

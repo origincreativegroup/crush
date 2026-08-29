@@ -560,6 +560,69 @@ impl Runner {
         end_s: f64,
         output: &Path,
         cancellation: &CancellationToken,
+        progress: F,
+    ) -> Result<ExportResult>
+    where
+        F: FnMut(Progress),
+    {
+        // Never hand a caller-selected destination to FFmpeg's overwrite flag. Existing
+        // files (including source aliases and dangling symlinks) are rejected up front;
+        // exclusive publication below also closes the destination-creation race.
+        match fs::symlink_metadata(output) {
+            Ok(_) => {
+                return Err(Error::InvalidArgument(format!(
+                    "export destination already exists; choose a new filename: {}",
+                    output.display()
+                )))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled {
+                command: "clip export before staging".to_owned(),
+            });
+        }
+        let filename = output.file_name().ok_or_else(|| {
+            Error::InvalidArgument("export destination needs a filename".to_owned())
+        })?;
+        let parent = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let staging = tempfile::Builder::new()
+            .prefix(".crush-export-")
+            .tempdir_in(parent)?;
+        let staged_output = staging.path().join(filename);
+        let result = self.export_clip_staged(
+            input,
+            start_s,
+            end_s,
+            &staged_output,
+            cancellation,
+            progress,
+        )?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled {
+                command: result.command,
+            });
+        }
+        fs::File::open(&staged_output)?.sync_all()?;
+        // Staging is on the same filesystem. hard_link creates the destination atomically
+        // and fails if anything already occupies it; never fall back to an overwriting copy.
+        fs::hard_link(&staged_output, output)?;
+        tracing::info!(job_id = %self.job_id, stage = "render", output = %output.display(), "verified clip published without overwrite");
+        Ok(result)
+    }
+
+    fn export_clip_staged<F>(
+        &self,
+        input: &Path,
+        start_s: f64,
+        end_s: f64,
+        output: &Path,
+        cancellation: &CancellationToken,
         mut progress: F,
     ) -> Result<ExportResult>
     where

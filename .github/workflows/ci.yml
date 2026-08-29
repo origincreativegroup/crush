@@ -58,6 +58,7 @@ jobs:
       - run: cargo clippy -p crush-app --all-targets -- -D warnings
       - run: cargo test -p crush-app
       - run: cargo test -p crush-pipeline --lib
+      - run: cargo test -p crush-stage-split --test ffmpeg_fixtures
       - uses: actions/setup-node@v4
         with:
           node-version: 22
