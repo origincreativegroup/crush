@@ -1922,6 +1922,7 @@ mod macos {
             };
             let plan_id = plan_item.plan_id.clone();
             let media_id = plan_item.media_id.clone();
+            let mut store = store;
             store.plan_add_item(DEFAULT_OWNER_ID, &plan_item)?;
             let stored = store
                 .plan_items(DEFAULT_OWNER_ID, &plan_id)?
@@ -1941,7 +1942,7 @@ mod macos {
         state: State<'_, RuntimeState>,
     ) -> CommandResult<PlanItemView> {
         command_result((|| {
-            let store = Store::open(&state.paths.root)?;
+            let mut store = Store::open(&state.paths.root)?;
             store.plan_update_item(
                 DEFAULT_OWNER_ID,
                 &id,
