@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum Stage {
     Split,
     Embed,
+    Analyze,
     Transcribe,
 }
 

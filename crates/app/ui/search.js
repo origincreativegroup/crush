@@ -232,7 +232,7 @@
       const snippet = document.createElement("div");
       snippet.className = "result-snippet";
       const aesthetic = Number.isFinite(result.aesthetic_score)
-        ? `Design ${Math.round(result.aesthetic_score * 100)}`
+        ? `Strong ${Math.round(result.aesthetic_score * 100)}`
         : "";
       const personal = Number.isFinite(result.personal_style_score)
         ? `Style ${result.personal_style_score >= 0 ? "+" : ""}${Math.round(result.personal_style_score * 100)}`
@@ -318,7 +318,10 @@
       el.timecodes.textContent = `${d.width} × ${d.height} · ${d.format.toUpperCase()}`;
       const scores = [];
       if (d.quality) scores.push(`editorial ★ ${d.quality}`);
-      if (Number.isFinite(d.aestheticScore)) scores.push(`design ${Math.round(d.aestheticScore * 100)}`);
+      if (Number.isFinite(d.aestheticScore)) scores.push(`strong shot ${Math.round(d.aestheticScore * 100)}`);
+      if (Number.isFinite(d.technicalScore)) scores.push(`technical ${Math.round(d.technicalScore * 100)}`);
+      if (Number.isFinite(d.compositionScore)) scores.push(`design ${Math.round(d.compositionScore * 100)}`);
+      if (Number.isFinite(d.momentScore)) scores.push(`moment ${Math.round(d.momentScore * 100)}`);
       el.shotIndex.textContent = scores.join(" · ") || "Unreviewed";
       el.photo.src = fileSrc(d.photoPath);
       renderPhotoContext(d);
@@ -328,10 +331,21 @@
     el.detailFile.title = d.videoPath;
     const length = Math.max(0, d.endS - d.startS);
     el.timecodes.textContent = `${timecode(d.startS, d.fps)} → ${timecode(d.endS, d.fps)}  (${length.toFixed(1)} s)`;
-    el.shotIndex.textContent = `shot ${d.idx + 1} of ${d.shotCount}`;
+    const analysis = [];
+    if (Number.isFinite(d.aestheticScore)) analysis.push(`strong shot ${Math.round(d.aestheticScore * 100)}`);
+    if (Number.isFinite(d.technicalScore)) analysis.push(`technical ${Math.round(d.technicalScore * 100)}`);
+    if (Number.isFinite(d.compositionScore)) analysis.push(`design ${Math.round(d.compositionScore * 100)}`);
+    if (Number.isFinite(d.momentScore)) analysis.push(`moment ${Math.round(d.momentScore * 100)}`);
+    el.shotIndex.textContent = [`shot ${d.idx + 1} of ${d.shotCount}`, ...analysis].join(" · ");
     el.prev.disabled = d.idx <= 0;
     el.next.disabled = d.idx + 1 >= d.shotCount;
     renderTranscript(d.transcripts);
+    if (d.analysisSummary) {
+      const summary = document.createElement("p");
+      summary.className = "transcript-text";
+      summary.textContent = d.analysisSummary;
+      el.transcript.prepend(summary);
+    }
 
     const src = fileSrc(d.videoPath);
     if (el.video.dataset.src !== src) {
@@ -344,10 +358,10 @@
 
   function renderPhotoContext(detail) {
     el.transcript.replaceChildren();
-    const values = [detail.description, detail.tags && `Tags: ${detail.tags}`, detail.notes].filter(Boolean);
+    const values = [detail.analysisSummary, detail.description, detail.tags && `Tags: ${detail.tags}`, detail.notes].filter(Boolean);
     const text = document.createElement("p");
     text.className = values.length ? "transcript-text" : "transcript-empty";
-    text.textContent = values.length ? values.join("\n") : "No editorial feedback yet.";
+    text.textContent = values.length ? values.join("\n") : "No analysis or editorial feedback yet.";
     el.transcript.append(text);
   }
 

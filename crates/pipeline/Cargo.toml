@@ -10,6 +10,7 @@ crush-store = { path = "../store" }
 crush-stage-split = { path = "../stage-split" }
 crush-stage-embed = { path = "../stage-embed" }
 crush-stage-asr = { path = "../stage-asr" }
+crush-stage-aesthetic = { path = "../stage-aesthetic" }
 crush-search = { path = "../search" }
 anyhow.workspace = true
 chrono.workspace = true

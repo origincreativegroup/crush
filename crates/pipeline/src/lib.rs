@@ -6,6 +6,7 @@ pub mod video_source;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{ensure, Context};
 use chrono::Utc;
@@ -15,6 +16,10 @@ use crush_core::models;
 use crush_core::paths::AppPaths;
 use crush_core::{Config, DEFAULT_OWNER_ID};
 use crush_search::SearchEngine;
+use crush_stage_aesthetic::{
+    analyze, bipolar_similarity, cosine, AnalysisContext, SemanticSignals, StrongShotScores,
+    MODEL_VERSION as AESTHETIC_MODEL_VERSION,
+};
 use crush_stage_asr::{
     choose_model, model_path, total_memory_bytes, transcribe_video_with_control, TranscribeOptions,
 };
@@ -23,10 +28,10 @@ use crush_stage_embed::embedder::{Embedder, ProviderPreference};
 use crush_stage_embed::preprocess::preprocess;
 use crush_stage_split::{ffmpeg, scene};
 use crush_store::{
-    EmbeddingMeta, NewJob, Photo, PhotoSourceMetadata, PhotoStatus, Store, Video,
-    VideoSourceMetadata, VideoStatus,
+    AestheticAssessment, EmbeddingMeta, MediaKind, NewJob, Photo, PhotoSourceMetadata, PhotoStatus,
+    Store, Video, VideoSourceMetadata, VideoStatus,
 };
-use image::GenericImageView;
+use image::{DynamicImage, GenericImageView};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -49,6 +54,7 @@ pub struct Pipeline {
     config: Config,
     paths: AppPaths,
     cancellation: CancellationToken,
+    semantic_model: OnceLock<MomentSemanticModel>,
 }
 
 impl Pipeline {
@@ -57,6 +63,7 @@ impl Pipeline {
             config,
             paths,
             cancellation,
+            semantic_model: OnceLock::new(),
         }
     }
 
@@ -125,6 +132,7 @@ impl Pipeline {
                     }
                 }
             }
+            self.analyze_photos(&store)?;
         }
 
         let index = SearchEngine::load(
@@ -257,6 +265,58 @@ impl Pipeline {
         result
     }
 
+    fn analyze_photos(&self, store: &Store) -> anyhow::Result<usize> {
+        let semantic_model = self.semantic_model()?;
+        let photos = store.photos(DEFAULT_OWNER_ID)?;
+        let mut decoded = Vec::with_capacity(photos.len());
+        for photo in &photos {
+            if photo.status != PhotoStatus::Done {
+                decoded.push(None);
+                continue;
+            }
+            let path = photo
+                .thumb_rel
+                .as_deref()
+                .map(|relative| store.thumbnail_path(relative))
+                .transpose()?;
+            decoded.push(
+                path.filter(|path| path.is_file())
+                    .map(image::open)
+                    .transpose()?,
+            );
+        }
+        let mut assessed = 0;
+        for (index, photo) in photos.iter().enumerate() {
+            let Some(image) = &decoded[index] else {
+                continue;
+            };
+            let vector = store
+                .vector_for_photo(DEFAULT_OWNER_ID, &photo.id)?
+                .with_context(|| format!("photo {} has no visual vector", photo.id))?;
+            let semantic = semantic_model.signals(&vector);
+            let neighbors = adjacent_images(&decoded, index);
+            let scores = analyze(
+                image,
+                AnalysisContext {
+                    source_width: u32::try_from(photo.width).unwrap_or(u32::MAX),
+                    source_height: u32::try_from(photo.height).unwrap_or(u32::MAX),
+                    duration_s: None,
+                    index: Some(index),
+                    sequence_len: Some(photos.len()),
+                },
+                semantic,
+                &[],
+                &neighbors,
+            );
+            store.upsert_aesthetic_assessment(
+                DEFAULT_OWNER_ID,
+                &persisted_assessment(MediaKind::Photo, &photo.id, scores),
+            )?;
+            assessed += 1;
+        }
+        Ok(assessed)
+    }
+
     pub fn resplit(&self, target: &str, debug: bool) -> anyhow::Result<()> {
         lower_priority();
         let mut store = Store::open(&self.paths.root)?;
@@ -300,6 +360,7 @@ impl Pipeline {
             store.delete_vectors_for_video(DEFAULT_OWNER_ID, &video.id)?;
             store.set_video_status(DEFAULT_OWNER_ID, &video.id, VideoStatus::Split)?;
             self.run_embed(&store, &video, debug)?;
+            self.run_analyze(&store, &video, debug)?;
             if had_transcript || !video.has_audio {
                 store.set_video_status(DEFAULT_OWNER_ID, &video.id, VideoStatus::Done)?;
             } else {
@@ -364,6 +425,10 @@ impl Pipeline {
                 store.upsert_video(DEFAULT_OWNER_ID, &existing)?;
             }
             if existing.status == VideoStatus::Done && fidelity_complete {
+                if !video_assessments_current(store, &existing.id)? {
+                    self.run_analyze(store, &existing, debug)?;
+                    return Ok(IngestOne::Indexed);
+                }
                 tracing::info!(path = %path.display(), "skip: already indexed");
                 return Ok(IngestOne::Skipped);
             }
@@ -422,6 +487,9 @@ impl Pipeline {
             let video = store
                 .video_by_id(DEFAULT_OWNER_ID, video_id)?
                 .with_context(|| format!("video {video_id} disappeared before transcription"))?;
+            if !video_assessments_current(store, video_id)? {
+                self.run_analyze(store, &video, debug)?;
+            }
             self.run_transcribe(store, &video, debug)?;
             status = VideoStatus::Transcribed;
         }
@@ -586,6 +654,117 @@ impl Pipeline {
         self.finish_job(store, video, &job.id, result)
     }
 
+    fn run_analyze(&self, store: &Store, video: &Video, debug: bool) -> anyhow::Result<()> {
+        let job = self.start_job(store, video, Stage::Analyze, debug)?;
+        let result = (|| {
+            ensure!(!self.cancellation.is_cancelled(), "analysis cancelled");
+            let semantic_model = self.semantic_model()?;
+            self.analyze_video_shots(store, video, semantic_model, &job)?;
+            Ok(())
+        })();
+        self.finish_job(store, video, &job.id, result)
+    }
+
+    fn semantic_model(&self) -> anyhow::Result<&MomentSemanticModel> {
+        if let Some(model) = self.semantic_model.get() {
+            return Ok(model);
+        }
+        let preference = ProviderPreference::parse(&self.config.embed.provider)?;
+        let mut embedder =
+            Embedder::new(self.paths.models(), preference, self.config.limits.threads)?;
+        let built = MomentSemanticModel::new(&mut embedder)?;
+        let _ = self.semantic_model.set(built);
+        Ok(self
+            .semantic_model
+            .get()
+            .expect("semantic model was set by this call or another thread"))
+    }
+
+    fn analyze_video_shots(
+        &self,
+        store: &Store,
+        video: &Video,
+        semantic_model: &MomentSemanticModel,
+        job: &ActiveJob,
+    ) -> anyhow::Result<usize> {
+        let shots = store.shots_for_video(DEFAULT_OWNER_ID, &video.id)?;
+        let mut keyframes = Vec::with_capacity(shots.len());
+        for shot in &shots {
+            let path = shot
+                .thumb_rel
+                .as_deref()
+                .with_context(|| format!("shot {} has no representative frame", shot.id))?;
+            keyframes.push(Some(image::open(store.thumbnail_path(path)?)?));
+        }
+        let temporary;
+        let motion_dir = if let Some(directory) = &job.directory {
+            directory.join("aesthetic-frames")
+        } else {
+            temporary = tempfile::tempdir_in(&self.paths.root)?;
+            temporary.path().join("aesthetic-frames")
+        };
+        std::fs::create_dir_all(&motion_dir)?;
+        let processing_path = store
+            .video_source_metadata(DEFAULT_OWNER_ID, &video.id)?
+            .and_then(|metadata| metadata.proxy_rel)
+            .map(|relative| store.proxy_path(&relative))
+            .transpose()?
+            .unwrap_or_else(|| PathBuf::from(&video.path));
+        let runner = self.runner(job)?;
+        let mut assessed = 0;
+        for (index, shot) in shots.iter().enumerate() {
+            ensure!(!self.cancellation.is_cancelled(), "analysis cancelled");
+            let image = keyframes[index].as_ref().expect("loaded above");
+            let duration = shot.end_s - shot.start_s;
+            let mut motion_frames = Vec::new();
+            for (sample_index, fraction) in [0.25, 0.75].into_iter().enumerate() {
+                let path = motion_dir.join(format!("{}-{sample_index}.jpg", shot.id));
+                let frame_margin = 2.0 / video.fps.unwrap_or(24.0).max(1.0);
+                let safe_source_end =
+                    (video.duration_s.unwrap_or(shot.end_s) - frame_margin).max(0.0);
+                let sample_time = (shot.start_s + duration * fraction)
+                    .min(safe_source_end)
+                    .max(shot.start_s);
+                runner.frame_at_with_control(
+                    &processing_path,
+                    sample_time,
+                    &path,
+                    &self.cancellation,
+                )?;
+                motion_frames.push(image::open(path)?);
+            }
+            let neighbors = adjacent_images(&keyframes, index);
+            let vector = store
+                .vector_for_shot(DEFAULT_OWNER_ID, &shot.id)?
+                .with_context(|| format!("shot {} has no visual vector", shot.id))?;
+            let scores = analyze(
+                image,
+                AnalysisContext {
+                    source_width: video
+                        .width
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(image.width()),
+                    source_height: video
+                        .height
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(image.height()),
+                    duration_s: Some(duration),
+                    index: Some(index),
+                    sequence_len: Some(shots.len()),
+                },
+                semantic_model.signals(&vector),
+                &motion_frames,
+                &neighbors,
+            );
+            store.upsert_aesthetic_assessment(
+                DEFAULT_OWNER_ID,
+                &persisted_assessment(MediaKind::Shot, &shot.id, scores),
+            )?;
+            assessed += 1;
+        }
+        Ok(assessed)
+    }
+
     fn run_transcribe(&self, store: &mut Store, video: &Video, debug: bool) -> anyhow::Result<()> {
         let job = self.start_job(store, video, Stage::Transcribe, debug)?;
         let result = (|| {
@@ -680,6 +859,134 @@ impl Pipeline {
     }
 }
 
+struct MomentSemanticModel {
+    expression: ConceptPair,
+    gesture: ConceptPair,
+    action: ConceptPair,
+    story: ConceptPair,
+}
+
+struct ConceptPair {
+    positive: [f32; crush_stage_embed::embedder::EMBEDDING_DIM],
+    negative: [f32; crush_stage_embed::embedder::EMBEDDING_DIM],
+}
+
+impl MomentSemanticModel {
+    fn new(embedder: &mut Embedder) -> anyhow::Result<Self> {
+        Ok(Self {
+            expression: ConceptPair::new(
+                embedder,
+                "a photograph with a clear expressive emotional moment",
+                "a photograph with no visible expression or emotional moment",
+            )?,
+            gesture: ConceptPair::new(
+                embedder,
+                "a photograph with a clear meaningful gesture or interaction",
+                "a photograph with no visible gesture or interaction",
+            )?,
+            action: ConceptPair::new(
+                embedder,
+                "a photograph capturing a decisive action moment",
+                "a static photograph with no action",
+            )?,
+            story: ConceptPair::new(
+                embedder,
+                "a compelling storytelling photograph with emotional clarity",
+                "an ordinary photograph with no clear story",
+            )?,
+        })
+    }
+
+    fn signals(&self, image: &[f32]) -> SemanticSignals {
+        let (expression, expression_confidence) = self.expression.score(image);
+        let (gesture, gesture_confidence) = self.gesture.score(image);
+        let (action, action_confidence) = self.action.score(image);
+        let (story, story_confidence) = self.story.score(image);
+        SemanticSignals {
+            expression,
+            gesture,
+            action,
+            story,
+            confidence: (expression_confidence
+                + gesture_confidence
+                + action_confidence
+                + story_confidence)
+                / 4.0,
+        }
+    }
+}
+
+impl ConceptPair {
+    fn new(embedder: &mut Embedder, positive: &str, negative: &str) -> anyhow::Result<Self> {
+        Ok(Self {
+            positive: embedder.embed_text(positive)?,
+            negative: embedder.embed_text(negative)?,
+        })
+    }
+
+    fn score(&self, image: &[f32]) -> (f64, f64) {
+        bipolar_similarity(cosine(image, &self.positive), cosine(image, &self.negative))
+    }
+}
+
+fn adjacent_images(images: &[Option<DynamicImage>], index: usize) -> Vec<DynamicImage> {
+    let mut neighbors = Vec::with_capacity(2);
+    if index > 0 {
+        if let Some(image) = &images[index - 1] {
+            neighbors.push(image.clone());
+        }
+    }
+    if let Some(Some(image)) = images.get(index + 1) {
+        neighbors.push(image.clone());
+    }
+    neighbors
+}
+
+fn persisted_assessment(
+    media_kind: MediaKind,
+    media_id: &str,
+    scores: StrongShotScores,
+) -> AestheticAssessment {
+    AestheticAssessment {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind,
+        media_id: media_id.to_owned(),
+        sharpness: scores.sharpness,
+        exposure: scores.exposure,
+        contrast: scores.contrast,
+        color_harmony: scores.color_harmony,
+        balance: scores.balance,
+        subject_placement: scores.subject_placement,
+        negative_space: scores.negative_space,
+        visual_clarity: scores.visual_clarity,
+        technical_quality: scores.technical_quality,
+        blur_control: scores.blur_control,
+        clipping_control: scores.clipping_control,
+        noise_control: scores.noise_control,
+        compression_quality: scores.compression_quality,
+        resolution_quality: scores.resolution_quality,
+        motion_stability: scores.motion_stability,
+        duplicate_confidence: scores.duplicate_confidence,
+        composition_quality: scores.composition_quality,
+        hierarchy: scores.hierarchy,
+        leading_lines: scores.leading_lines,
+        symmetry: scores.symmetry,
+        crop_potential: scores.crop_potential,
+        moment_story: scores.moment_story,
+        expression: scores.expression,
+        gesture: scores.gesture,
+        action: scores.action,
+        novelty: scores.novelty,
+        pacing: scores.pacing,
+        repetition_risk: scores.repetition_risk,
+        overall: scores.overall,
+        confidence: scores.confidence,
+        explanation_json: scores.explanation_json,
+        model_version: AESTHETIC_MODEL_VERSION.to_owned(),
+        assessed_at: Utc::now(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IngestOne {
     Indexed,
@@ -703,6 +1010,22 @@ fn ensure_embedding_metadata(store: &Store) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+fn video_assessments_current(store: &Store, video_id: &str) -> anyhow::Result<bool> {
+    let shots = store.shots_for_video(DEFAULT_OWNER_ID, video_id)?;
+    if shots.is_empty() {
+        return Ok(false);
+    }
+    for shot in shots {
+        let current = store
+            .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, &shot.id)?
+            .is_some_and(|assessment| assessment.model_version == AESTHETIC_MODEL_VERSION);
+        if !current {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn expected_embedding_metadata() -> anyhow::Result<EmbeddingMeta> {

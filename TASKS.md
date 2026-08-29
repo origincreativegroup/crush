@@ -21,8 +21,8 @@
 | TASK-014 | Photo/video DAM schema + Reel Studio editorial feedback foundation | Codex (Mac) | done — merged through DAM foundation |
 | TASK-015 | JPEG/PNG ingest, thumbnails, vectors, and mixed-media search | Codex (Mac) | done — real-model photo vertical slice |
 | TASK-016 | RAW/HEIF/TIFF photo ingest + production-video source support | Codex (Mac) | done — full-decode capability gates, source metadata, color-aware proxies |
-| TASK-017 | General strong-shot and explainable aesthetic analysis | Codex (Mac) | next — independent cold-start judgment; depends TASK-016 |
-| TASK-018 | Previous-work examples + personal-style learner/evaluation | Codex (Mac) | backlog — examples and feedback refine, never replace, the general model |
+| TASK-017 | General strong-shot and explainable aesthetic analysis | Codex (Mac) | done — cold-start technical/design/moment evidence, calibrated and backfillable |
+| TASK-018 | Previous-work examples + personal-style learner/evaluation | Codex (Mac) | next — examples and feedback refine, never replace, the general model |
 | TASK-019 | Mixed-media review and DAM organization | Codex (Mac) | backlog — comparisons, collections, versions, metadata, safety |
 | TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | Codex (Mac) | backlog — baseline and personalized results remain distinguishable |
 | TASK-021 | Non-destructive recipes + photo/video render and export | Codex (Mac) | backlog — rendered derivatives only; originals stay immutable |

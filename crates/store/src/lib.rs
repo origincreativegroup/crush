@@ -14,11 +14,12 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
     (3, include_str!("../migrations/0003_source_fidelity.sql")),
+    (4, include_str!("../migrations/0004_strong_shot.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +173,28 @@ pub struct AestheticAssessment {
     pub subject_placement: f64,
     pub negative_space: f64,
     pub visual_clarity: f64,
+    pub technical_quality: f64,
+    pub blur_control: f64,
+    pub clipping_control: f64,
+    pub noise_control: f64,
+    pub compression_quality: f64,
+    pub resolution_quality: f64,
+    pub motion_stability: f64,
+    /// Probability that a sequence neighbor is a duplicate; high is risky.
+    pub duplicate_confidence: f64,
+    pub composition_quality: f64,
+    pub hierarchy: f64,
+    pub leading_lines: f64,
+    pub symmetry: f64,
+    pub crop_potential: f64,
+    pub moment_story: f64,
+    pub expression: f64,
+    pub gesture: f64,
+    pub action: f64,
+    pub novelty: f64,
+    pub pacing: f64,
+    /// Sequence repetition risk; high is risky.
+    pub repetition_risk: f64,
     pub overall: f64,
     pub confidence: f64,
     pub explanation_json: String,
@@ -688,6 +711,26 @@ impl Store {
             ("subject_placement", assessment.subject_placement),
             ("negative_space", assessment.negative_space),
             ("visual_clarity", assessment.visual_clarity),
+            ("technical_quality", assessment.technical_quality),
+            ("blur_control", assessment.blur_control),
+            ("clipping_control", assessment.clipping_control),
+            ("noise_control", assessment.noise_control),
+            ("compression_quality", assessment.compression_quality),
+            ("resolution_quality", assessment.resolution_quality),
+            ("motion_stability", assessment.motion_stability),
+            ("duplicate_confidence", assessment.duplicate_confidence),
+            ("composition_quality", assessment.composition_quality),
+            ("hierarchy", assessment.hierarchy),
+            ("leading_lines", assessment.leading_lines),
+            ("symmetry", assessment.symmetry),
+            ("crop_potential", assessment.crop_potential),
+            ("moment_story", assessment.moment_story),
+            ("expression", assessment.expression),
+            ("gesture", assessment.gesture),
+            ("action", assessment.action),
+            ("novelty", assessment.novelty),
+            ("pacing", assessment.pacing),
+            ("repetition_risk", assessment.repetition_risk),
             ("overall", assessment.overall),
             ("confidence", assessment.confidence),
         ] {
@@ -697,8 +740,14 @@ impl Store {
             "INSERT INTO aesthetic_assessments (
                 owner_id, media_kind, media_id, sharpness, exposure, contrast, color_harmony,
                 balance, subject_placement, negative_space, visual_clarity, overall, confidence,
-                explanation_json, model_version, assessed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                explanation_json, model_version, assessed_at, technical_quality, blur_control,
+                clipping_control, noise_control, compression_quality, resolution_quality,
+                motion_stability, duplicate_confidence, composition_quality, hierarchy,
+                leading_lines, symmetry, crop_potential, moment_story, expression, gesture,
+                action, novelty, pacing, repetition_risk
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                       ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                       ?31, ?32, ?33, ?34, ?35, ?36)
              ON CONFLICT(owner_id, media_kind, media_id) DO UPDATE SET
                 sharpness = excluded.sharpness,
                 exposure = excluded.exposure,
@@ -712,7 +761,27 @@ impl Store {
                 confidence = excluded.confidence,
                 explanation_json = excluded.explanation_json,
                 model_version = excluded.model_version,
-                assessed_at = excluded.assessed_at",
+                assessed_at = excluded.assessed_at,
+                technical_quality = excluded.technical_quality,
+                blur_control = excluded.blur_control,
+                clipping_control = excluded.clipping_control,
+                noise_control = excluded.noise_control,
+                compression_quality = excluded.compression_quality,
+                resolution_quality = excluded.resolution_quality,
+                motion_stability = excluded.motion_stability,
+                duplicate_confidence = excluded.duplicate_confidence,
+                composition_quality = excluded.composition_quality,
+                hierarchy = excluded.hierarchy,
+                leading_lines = excluded.leading_lines,
+                symmetry = excluded.symmetry,
+                crop_potential = excluded.crop_potential,
+                moment_story = excluded.moment_story,
+                expression = excluded.expression,
+                gesture = excluded.gesture,
+                action = excluded.action,
+                novelty = excluded.novelty,
+                pacing = excluded.pacing,
+                repetition_risk = excluded.repetition_risk",
             params![
                 owner_id,
                 media_kind_to_str(assessment.media_kind),
@@ -730,6 +799,26 @@ impl Store {
                 assessment.explanation_json,
                 assessment.model_version,
                 assessment.assessed_at.to_rfc3339(),
+                assessment.technical_quality,
+                assessment.blur_control,
+                assessment.clipping_control,
+                assessment.noise_control,
+                assessment.compression_quality,
+                assessment.resolution_quality,
+                assessment.motion_stability,
+                assessment.duplicate_confidence,
+                assessment.composition_quality,
+                assessment.hierarchy,
+                assessment.leading_lines,
+                assessment.symmetry,
+                assessment.crop_potential,
+                assessment.moment_story,
+                assessment.expression,
+                assessment.gesture,
+                assessment.action,
+                assessment.novelty,
+                assessment.pacing,
+                assessment.repetition_risk,
             ],
         )?;
         Ok(())
@@ -745,7 +834,12 @@ impl Store {
             .query_row(
                 "SELECT owner_id, media_kind, media_id, sharpness, exposure, contrast,
                         color_harmony, balance, subject_placement, negative_space, visual_clarity,
-                        overall, confidence, explanation_json, model_version, assessed_at
+                        overall, confidence, explanation_json, model_version, assessed_at,
+                        technical_quality, blur_control, clipping_control, noise_control,
+                        compression_quality, resolution_quality, motion_stability,
+                        duplicate_confidence, composition_quality, hierarchy, leading_lines,
+                        symmetry, crop_potential, moment_story, expression, gesture, action,
+                        novelty, pacing, repetition_risk
                  FROM aesthetic_assessments
                  WHERE owner_id = ?1 AND media_kind = ?2 AND media_id = ?3",
                 params![owner_id, media_kind_to_str(media_kind), media_id],
@@ -1688,7 +1782,7 @@ impl Store {
         let status = match failed.first().map(|job| job.stage) {
             Some(Stage::Split) | None => VideoStatus::Pending,
             Some(Stage::Embed) => VideoStatus::Split,
-            Some(Stage::Transcribe) => VideoStatus::Embedded,
+            Some(Stage::Analyze) | Some(Stage::Transcribe) => VideoStatus::Embedded,
         };
         self.set_video_status(owner_id, video_id, status)?;
         Ok(status)
@@ -2156,6 +2250,26 @@ fn aesthetic_assessment_from_row(row: &Row<'_>) -> rusqlite::Result<AestheticAss
         subject_placement: row.get(8)?,
         negative_space: row.get(9)?,
         visual_clarity: row.get(10)?,
+        technical_quality: row.get(16)?,
+        blur_control: row.get(17)?,
+        clipping_control: row.get(18)?,
+        noise_control: row.get(19)?,
+        compression_quality: row.get(20)?,
+        resolution_quality: row.get(21)?,
+        motion_stability: row.get(22)?,
+        duplicate_confidence: row.get(23)?,
+        composition_quality: row.get(24)?,
+        hierarchy: row.get(25)?,
+        leading_lines: row.get(26)?,
+        symmetry: row.get(27)?,
+        crop_potential: row.get(28)?,
+        moment_story: row.get(29)?,
+        expression: row.get(30)?,
+        gesture: row.get(31)?,
+        action: row.get(32)?,
+        novelty: row.get(33)?,
+        pacing: row.get(34)?,
+        repetition_risk: row.get(35)?,
         overall: row.get(11)?,
         confidence: row.get(12)?,
         explanation_json: row.get(13)?,
@@ -2369,6 +2483,7 @@ fn stage_to_str(stage: Stage) -> &'static str {
     match stage {
         Stage::Split => "split",
         Stage::Embed => "embed",
+        Stage::Analyze => "analyze",
         Stage::Transcribe => "transcribe",
     }
 }
@@ -2377,6 +2492,7 @@ fn stage_from_str(value: &str) -> anyhow::Result<Stage> {
     match value {
         "split" => Ok(Stage::Split),
         "embed" => Ok(Stage::Embed),
+        "analyze" => Ok(Stage::Analyze),
         "transcribe" => Ok(Stage::Transcribe),
         _ => bail!("unknown job stage {value:?}"),
     }

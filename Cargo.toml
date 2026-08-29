@@ -6,6 +6,7 @@ members = [
   "crates/stage-split",
   "crates/stage-embed",
   "crates/stage-asr",
+  "crates/stage-aesthetic",
   "crates/pipeline",
   "crates/search",
   "crates/cli",

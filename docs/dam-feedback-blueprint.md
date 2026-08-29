@@ -140,7 +140,8 @@ Nothing in the real Reel Studio database or media library enters version control
    decision rather than silent fallback.
 3. **General strong-shot judgment:** compute technical, composition/design, moment/story, and
    sequence features for stills and representative video frames. Preserve each component and
-   confidence. This cold-start path cannot depend on personal examples.
+   confidence. This cold-start path cannot depend on personal examples. Implemented in Task 017;
+   see `docs/strong-shot-analysis.md` for the evidence contract and calibration boundary.
 4. **Review, examples, and learning:** pairwise compare, picks/rejects, ratings, crops, grades,
    tags, notes, privacy flags, collections, version stacks, saved searches, and user-designated
    previous-work reference sets. Train a context-aware personal adaptor and require held-out
