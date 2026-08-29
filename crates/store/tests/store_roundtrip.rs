@@ -1456,7 +1456,9 @@ fn second_owner_rows_are_isolated_from_the_default_owner() {
     store.upsert_video(DEFAULT_OWNER_ID, &video_a).unwrap();
     let mut shot_b = shot("shot-owner-b", "video-owner-b", 0);
     shot_b.owner_id = OWNER_B.to_owned();
-    store.insert_shots(OWNER_B, std::slice::from_ref(&shot_b)).unwrap();
+    store
+        .insert_shots(OWNER_B, std::slice::from_ref(&shot_b))
+        .unwrap();
     let shot_a = shot("shot-owner-a", "video-owner-a", 0);
     store
         .insert_shots(DEFAULT_OWNER_ID, std::slice::from_ref(&shot_a))
