@@ -1192,6 +1192,7 @@ fn decode_photo_thumbnails(
             path.filter(|path| path.is_file())
                 .map(image::open)
                 .transpose()
+                .map_err(anyhow::Error::from)
         })
         .collect()
 }
@@ -1227,11 +1228,12 @@ fn photo_fidelity_complete(store: &Store, photo: &Photo, metadata: &PhotoSourceM
         && sha256_file(&thumbnail_path).is_ok_and(|hash| hash == thumbnail_sha256)
 }
 
-fn recorded_thumbnail_sha256(metadata: &PhotoSourceMetadata) -> Option<&str> {
+fn recorded_thumbnail_sha256(metadata: &PhotoSourceMetadata) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(&metadata.metadata_json)
         .ok()?
         .get("thumbnail_sha256")?
         .as_str()
+        .map(str::to_string)
 }
 
 /// A Done video may only be skipped when its working proxy (if one is required) and every
