@@ -21,13 +21,12 @@ mod macos {
     use crush_stage_embed::embedder::{Embedder, ProviderPreference};
     use crush_stage_split::ffmpeg;
     use crush_store::{
-        EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, PhotoStatus,
-        ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus,
-        Store, VideoStatus,
         reference_scope_from_str, reference_scope_to_str, reference_status_to_str, AssetFilter,
         Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta, FeedbackEvent,
-        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, PhotoStatus, ReviewOp, SafetyFlags,
-        SavedSearch, StackItem, StackItemRole, StackMediaKind, Store, VersionStack, VideoStatus,
+        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, PhotoStatus, ReferenceItemRole,
+        ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, ReviewOp,
+        SafetyFlags, SavedSearch, StackItem, StackItemRole, StackMediaKind, Store, VersionStack,
+        VideoStatus,
     };
     use serde::{Deserialize, Serialize};
     use tauri::{AppHandle, Emitter, Manager, State};
@@ -269,18 +268,6 @@ mod macos {
         context_key: Option<String>,
         marked: bool,
         added_at: String,
-    }
-
-    #[derive(Debug, Clone, Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct ReferenceSetView {
-        id: String,
-        name: String,
-        context_key: String,
-        scope: String,
-        status: String,
-        source_collection_id: Option<String>,
-        created_at: String,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -1012,8 +999,8 @@ mod macos {
             name: set.name,
             context_key: set.context_key,
             description: set.description,
-            scope: crush_store::reference_scope_to_str(set.scope).to_owned(),
-            status: crush_store::reference_status_to_str(set.status).to_owned(),
+            scope: reference_scope_to_str(set.scope).to_owned(),
+            status: reference_status_to_str(set.status).to_owned(),
             item_count,
             created_at: set.created_at.to_rfc3339(),
             confirmed_at: set.confirmed_at.map(|value| value.to_rfc3339()),
@@ -1102,6 +1089,138 @@ mod macos {
                 },
             )?;
             Ok(())
+        })())
+    }
+
+    #[tauri::command]
+    fn reference_set_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<ReferenceSetView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let sets = store.reference_set_list(DEFAULT_OWNER_ID)?;
+            sets.into_iter()
+                .map(|set| reference_set_view(&store, set))
+                .collect()
+        })())
+    }
+
+    #[tauri::command]
+    fn reference_set_add_item(
+        set_id: String,
+        media_kind: String,
+        media_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<()> {
+        command_result((|| {
+            let media_kind = parse_media_kind(&media_kind)?;
+            let store = Store::open(&state.paths.root)?;
+            // Mirror record_feedback: validate the asset before writing anything.
+            let exists = match media_kind {
+                MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
+                MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
+            };
+            let kind = match media_kind {
+                MediaKind::Photo => "photo",
+                MediaKind::Shot => "shot",
+            };
+            ensure!(exists, "no {kind} exists with id {media_id}");
+            store.reference_set_add_item(
+                DEFAULT_OWNER_ID,
+                &ReferenceSetItem {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    set_id,
+                    media_kind,
+                    media_id,
+                    role: ReferenceItemRole::Positive,
+                    added_at: chrono::Utc::now(),
+                },
+            )?;
+            Ok(())
+        })())
+    }
+
+    #[tauri::command]
+    fn reference_set_remove_item(
+        set_id: String,
+        media_kind: String,
+        media_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let media_kind = parse_media_kind(&media_kind)?;
+            let store = Store::open(&state.paths.root)?;
+            store.reference_set_remove_item(DEFAULT_OWNER_ID, &set_id, media_kind, &media_id)
+        })())
+    }
+
+    #[tauri::command]
+    fn reference_set_confirm(
+        set_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reference_set_confirm(DEFAULT_OWNER_ID, &set_id)
+        })())
+    }
+
+    #[tauri::command]
+    fn reference_set_disable(
+        set_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reference_set_disable(DEFAULT_OWNER_ID, &set_id)
+        })())
+    }
+
+    #[tauri::command]
+    fn reference_set_delete(set_id: String, state: State<'_, RuntimeState>) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reference_set_delete(DEFAULT_OWNER_ID, &set_id)
+        })())
+    }
+
+    #[tauri::command]
+    fn style_profile_status(
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<StyleProfileStatusView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            style_profile_status_view(&store)
+        })())
+    }
+
+    #[tauri::command]
+    fn style_profile_reset(state: State<'_, RuntimeState>) -> CommandResult<usize> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.reset_style_profiles(DEFAULT_OWNER_ID)
+        })())
+    }
+
+    #[tauri::command]
+    async fn style_profile_retrain(
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<RetrainOutcome> {
+        let paths = state.paths.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result((|| {
+                let mut store = Store::open(&paths.root)?;
+                let trained = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)?.is_some();
+                let status = style_profile_status_view(&store)?;
+                Ok(RetrainOutcome { trained, status })
+            })())
+        })
+        .await
+        .map_err(|error| format!("style retrain worker failed: {error}"))?
+    }
+
+    // ---- Library organization (Task 019a) ----
+
+    /// Mirrors `parse_media_kind` for the library commands; the UI talks about
+    /// "photo"/"video" assets.
     fn parse_library_kind(value: &str) -> anyhow::Result<MediaKind> {
         match value {
             "photo" => Ok(MediaKind::Photo),
@@ -1380,26 +1499,11 @@ mod macos {
                 &context_key,
                 scope,
             )?;
-            Ok(ReferenceSetView {
-                id: set.id,
-                name: set.name,
-                context_key: set.context_key,
-                scope: reference_scope_to_str(set.scope).to_owned(),
-                status: reference_status_to_str(set.status).to_owned(),
-                source_collection_id: set.source_collection_id,
-                created_at: set.created_at.to_rfc3339(),
-            })
+            reference_set_view(&store, set)
         })())
     }
 
     #[tauri::command]
-    fn reference_set_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<ReferenceSetView>> {
-        command_result((|| {
-            let store = Store::open(&state.paths.root)?;
-            let sets = store.reference_set_list(DEFAULT_OWNER_ID)?;
-            sets.into_iter()
-                .map(|set| reference_set_view(&store, set))
-                .collect()
     fn stack_create(name: String, state: State<'_, RuntimeState>) -> CommandResult<StackView> {
         command_result((|| {
             let store = Store::open(&state.paths.root)?;
@@ -1415,37 +1519,6 @@ mod macos {
     }
 
     #[tauri::command]
-    fn reference_set_add_item(
-        set_id: String,
-        media_kind: String,
-        media_id: String,
-        state: State<'_, RuntimeState>,
-    ) -> CommandResult<()> {
-        command_result((|| {
-            let media_kind = parse_media_kind(&media_kind)?;
-            let store = Store::open(&state.paths.root)?;
-            // Mirror record_feedback: validate the asset before writing anything.
-            let exists = match media_kind {
-                MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
-                MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
-            };
-            let kind = match media_kind {
-                MediaKind::Photo => "photo",
-                MediaKind::Shot => "shot",
-            };
-            ensure!(exists, "no {kind} exists with id {media_id}");
-            store.reference_set_add_item(
-                DEFAULT_OWNER_ID,
-                &ReferenceSetItem {
-                    owner_id: DEFAULT_OWNER_ID.to_owned(),
-                    set_id,
-                    media_kind,
-                    media_id,
-                    role: ReferenceItemRole::Positive,
-                    added_at: chrono::Utc::now(),
-                },
-            )?;
-            Ok(())
     fn stack_add_item(
         stack_id: String,
         asset_type: String,
@@ -1470,9 +1543,6 @@ mod macos {
     }
 
     #[tauri::command]
-    fn reference_set_remove_item(
-        set_id: String,
-        media_kind: String,
     fn stack_remove_item(
         stack_id: String,
         asset_type: String,
@@ -1480,9 +1550,6 @@ mod macos {
         state: State<'_, RuntimeState>,
     ) -> CommandResult<bool> {
         command_result((|| {
-            let media_kind = parse_media_kind(&media_kind)?;
-            let store = Store::open(&state.paths.root)?;
-            store.reference_set_remove_item(DEFAULT_OWNER_ID, &set_id, media_kind, &media_id)
             let store = Store::open(&state.paths.root)?;
             store.stack_remove_item(
                 DEFAULT_OWNER_ID,
@@ -1494,13 +1561,6 @@ mod macos {
     }
 
     #[tauri::command]
-    fn reference_set_confirm(
-        set_id: String,
-        state: State<'_, RuntimeState>,
-    ) -> CommandResult<bool> {
-        command_result((|| {
-            let mut store = Store::open(&state.paths.root)?;
-            store.reference_set_confirm(DEFAULT_OWNER_ID, &set_id)
     fn stacks_for_asset(
         asset_type: String,
         media_id: String,
@@ -1521,13 +1581,6 @@ mod macos {
     }
 
     #[tauri::command]
-    fn reference_set_disable(
-        set_id: String,
-        state: State<'_, RuntimeState>,
-    ) -> CommandResult<bool> {
-        command_result((|| {
-            let mut store = Store::open(&state.paths.root)?;
-            store.reference_set_disable(DEFAULT_OWNER_ID, &set_id)
     fn saved_search_create(
         name: String,
         query: String,
@@ -1559,46 +1612,6 @@ mod macos {
     }
 
     #[tauri::command]
-    fn reference_set_delete(set_id: String, state: State<'_, RuntimeState>) -> CommandResult<bool> {
-        command_result((|| {
-            let mut store = Store::open(&state.paths.root)?;
-            store.reference_set_delete(DEFAULT_OWNER_ID, &set_id)
-        })())
-    }
-
-    #[tauri::command]
-    fn style_profile_status(
-        state: State<'_, RuntimeState>,
-    ) -> CommandResult<StyleProfileStatusView> {
-        command_result((|| {
-            let store = Store::open(&state.paths.root)?;
-            style_profile_status_view(&store)
-        })())
-    }
-
-    #[tauri::command]
-    fn style_profile_reset(state: State<'_, RuntimeState>) -> CommandResult<usize> {
-        command_result((|| {
-            let mut store = Store::open(&state.paths.root)?;
-            store.reset_style_profiles(DEFAULT_OWNER_ID)
-        })())
-    }
-
-    #[tauri::command]
-    async fn style_profile_retrain(
-        state: State<'_, RuntimeState>,
-    ) -> CommandResult<RetrainOutcome> {
-        let paths = state.paths.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            command_result((|| {
-                let mut store = Store::open(&paths.root)?;
-                let trained = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)?.is_some();
-                let status = style_profile_status_view(&store)?;
-                Ok(RetrainOutcome { trained, status })
-            })())
-        })
-        .await
-        .map_err(|error| format!("style retrain worker failed: {error}"))?
     fn saved_search_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<SavedSearchView>> {
         command_result((|| {
             let store = Store::open(&state.paths.root)?;
@@ -1695,11 +1708,7 @@ mod macos {
                         }
                     }
                 };
-            let tags_edited = patch.tags.is_some();
-            let copy_edited = patch.description.is_some()
-                || patch.subjects.is_some()
-                || patch.action.is_some()
-                || patch.notes.is_some();
+            // Capture the edit flags before the patch fields are moved into the annotation.
             let tags_edited = patch.tags.is_some();
             let copy_edited = patch.description.is_some()
                 || patch.subjects.is_some()
@@ -2136,8 +2145,6 @@ mod macos {
                 style_profile_status,
                 style_profile_reset,
                 style_profile_retrain,
-                export_clip,
-                open_in_finder,
                 library_browse,
                 library_counts,
                 collection_create,
@@ -2158,7 +2165,9 @@ mod macos {
                 saved_search_delete,
                 set_safety_flags,
                 set_annotation,
-                review_batch
+                review_batch,
+                export_clip,
+                open_in_finder
             ])
             .run(tauri::generate_context!())
             .expect("error while running Crush");
