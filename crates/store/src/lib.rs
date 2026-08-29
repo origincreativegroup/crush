@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
@@ -24,6 +24,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, include_str!("../migrations/0005_feedback_hardening.sql")),
     (6, include_str!("../migrations/0006_photo_jobs.sql")),
     (7, include_str!("../migrations/0007_reference_sets.sql")),
+    (8, include_str!("../migrations/0008_collections.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +299,186 @@ pub struct ReferenceSetItem {
     pub media_id: String,
     pub role: ReferenceItemRole,
     pub added_at: DateTime<Utc>,
+}
+
+/// An owner-scoped named grouping of photos and shots. Purely organizational: a collection
+/// carries no training meaning until it is explicitly designated as a reference set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Collection {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionItem {
+    pub owner_id: String,
+    pub collection_id: String,
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    /// Optional per-item context key; `None` inherits the collection/set level.
+    pub context_key: Option<String>,
+    /// User-marked example for `selected`-scope designation.
+    pub marked: bool,
+    pub added_at: DateTime<Utc>,
+}
+
+/// The media a version stack groups: photos and whole videos (shots stay scene units).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackMediaKind {
+    Photo,
+    Video,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackItemRole {
+    Original,
+    Derived,
+}
+
+/// One original plus its derived/alternate versions. Metadata only; underlying media rows are
+/// never mutated by stack APIs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionStack {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackItem {
+    pub owner_id: String,
+    pub stack_id: String,
+    pub media_kind: StackMediaKind,
+    pub media_id: String,
+    pub role: StackItemRole,
+    pub added_at: DateTime<Utc>,
+}
+
+/// A persisted `(query, context_key, filters)` triple the UI can replay through search and
+/// [`Store::browse_assets`] without changing ranking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedSearch {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub query: String,
+    pub context_key: String,
+    pub filters_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The safety columns of an editorial annotation. Writable only through
+/// [`Store::set_safety_flags`] (or a review op) after an explicit user action; machine paths
+/// have no API that writes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafetyFlags {
+    pub usable: bool,
+    pub faces_visible: bool,
+    pub nametags_visible: bool,
+    pub blur_required: bool,
+}
+
+impl Default for SafetyFlags {
+    fn default() -> Self {
+        Self {
+            usable: true,
+            faces_visible: false,
+            nametags_visible: false,
+            blur_required: false,
+        }
+    }
+}
+
+/// Filters for the unified mixed-media grid. `None` fields are wide open; annotation-derived
+/// booleans match the annotation defaults for assets without an annotation row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetFilter {
+    pub kind: Option<MediaKind>,
+    pub status: Option<String>,
+    pub usable: Option<bool>,
+    pub faces_visible: Option<bool>,
+    pub blur_required: Option<bool>,
+    pub quality_min: Option<i64>,
+    pub collection_id: Option<String>,
+    pub stack_id: Option<String>,
+    pub context_key: Option<String>,
+    /// Case-insensitive file-name substring over the photo path or the parent video path.
+    pub search: Option<String>,
+}
+
+/// One row of the unified library grid: a photo or a shot with its parent video, annotation
+/// summary, and organizational memberships.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LibraryAsset {
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    pub owner_id: String,
+    /// The photo path, or the parent video's path for shots.
+    pub path: String,
+    pub thumb_rel: Option<String>,
+    /// The photo status, or the parent video's status for shots.
+    pub status: String,
+    pub indexed_at: Option<DateTime<Utc>>,
+    /// Shot parent; `None` for photos.
+    pub video_id: Option<String>,
+    pub start_s: Option<f64>,
+    pub end_s: Option<f64>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub quality: Option<i64>,
+    pub usable: bool,
+    pub standout: bool,
+    pub faces_visible: bool,
+    pub nametags_visible: bool,
+    pub blur_required: bool,
+    pub tags: String,
+    pub collection_ids: Vec<String>,
+    pub stack_ids: Vec<String>,
+}
+
+/// Dashboard counters for the library view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LibraryCounts {
+    pub photos: i64,
+    pub shots: i64,
+    pub picks: i64,
+    pub rejects: i64,
+    /// Annotations flagged unsafe: `usable = 0` or `blur_required = 1`.
+    pub flagged: i64,
+}
+
+/// One explicit user review action for [`Store::bulk_review`]. Every op runs inside one
+/// transaction: a bad op aborts the whole batch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReviewOp {
+    Pick {
+        media_kind: MediaKind,
+        media_id: String,
+    },
+    Reject {
+        media_kind: MediaKind,
+        media_id: String,
+    },
+    Rate {
+        media_kind: MediaKind,
+        media_id: String,
+        rating: i64,
+    },
+    SetFlags {
+        media_kind: MediaKind,
+        media_id: String,
+        flags: SafetyFlags,
+    },
+    AddToCollection {
+        collection_id: String,
+        media_kind: MediaKind,
+        media_id: String,
+        context_key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -699,58 +880,7 @@ impl Store {
         owner_id: &str,
         annotation: &EditorialAnnotation,
     ) -> anyhow::Result<()> {
-        ensure_owner_matches(owner_id, &annotation.owner_id, "editorial annotation")?;
-        if let Some(quality) = annotation.quality {
-            ensure!(
-                (1..=5).contains(&quality),
-                "quality must be between 1 and 5"
-            );
-        }
-        if let Some(crop_x) = annotation.crop_x {
-            ensure_unit_score(crop_x, "crop_x")?;
-        }
-        self.connection.execute(
-            "INSERT INTO editorial_annotations (
-                owner_id, media_kind, media_id, description, subjects, action, tags, quality,
-                standout, usable, faces_visible, nametags_visible, blur_required, crop_x,
-                grade_json, notes, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-             ON CONFLICT(owner_id, media_kind, media_id) DO UPDATE SET
-                description = excluded.description,
-                subjects = excluded.subjects,
-                action = excluded.action,
-                tags = excluded.tags,
-                quality = excluded.quality,
-                standout = excluded.standout,
-                usable = excluded.usable,
-                faces_visible = excluded.faces_visible,
-                nametags_visible = excluded.nametags_visible,
-                blur_required = excluded.blur_required,
-                crop_x = excluded.crop_x,
-                grade_json = excluded.grade_json,
-                notes = excluded.notes,
-                updated_at = excluded.updated_at",
-            params![
-                owner_id,
-                media_kind_to_str(annotation.media_kind),
-                annotation.media_id,
-                annotation.description,
-                annotation.subjects,
-                annotation.action,
-                annotation.tags,
-                annotation.quality,
-                annotation.standout,
-                annotation.usable,
-                annotation.faces_visible,
-                annotation.nametags_visible,
-                annotation.blur_required,
-                annotation.crop_x,
-                annotation.grade_json,
-                annotation.notes,
-                annotation.updated_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
+        upsert_editorial_annotation_on(&self.connection, owner_id, annotation)
     }
 
     pub fn editorial_annotation(
@@ -759,18 +889,7 @@ impl Store {
         media_kind: MediaKind,
         media_id: &str,
     ) -> anyhow::Result<Option<EditorialAnnotation>> {
-        self.connection
-            .query_row(
-                "SELECT owner_id, media_kind, media_id, description, subjects, action, tags,
-                        quality, standout, usable, faces_visible, nametags_visible, blur_required,
-                        crop_x, grade_json, notes, updated_at
-                 FROM editorial_annotations
-                 WHERE owner_id = ?1 AND media_kind = ?2 AND media_id = ?3",
-                params![owner_id, media_kind_to_str(media_kind), media_id],
-                editorial_annotation_from_row,
-            )
-            .optional()
-            .context("failed to read editorial annotation")
+        editorial_annotation_on(&self.connection, owner_id, media_kind, media_id)
     }
 
     pub fn upsert_aesthetic_assessment(
@@ -927,49 +1046,7 @@ impl Store {
     }
 
     pub fn append_feedback(&self, owner_id: &str, event: &FeedbackEvent) -> anyhow::Result<()> {
-        ensure_owner_matches(owner_id, &event.owner_id, "feedback event")?;
-        let has_comparison =
-            event.compared_media_kind.is_some() && event.compared_media_id.is_some();
-        ensure!(
-            event.compared_media_kind.is_some() == event.compared_media_id.is_some(),
-            "compared media kind and id must be supplied together"
-        );
-        ensure!(
-            event.signal == FeedbackSignal::Prefer || !has_comparison,
-            "only prefer feedback may compare two assets"
-        );
-        ensure!(
-            event.signal != FeedbackSignal::Prefer || has_comparison,
-            "prefer feedback requires a compared asset"
-        );
-        if event.signal == FeedbackSignal::Rating {
-            ensure!(
-                event
-                    .value
-                    .is_some_and(|value| (1.0..=5.0).contains(&value)),
-                "rating feedback requires a value from 1 to 5"
-            );
-        }
-        validate_json_object(&event.context_json, "context_json")?;
-        self.connection.execute(
-            "INSERT INTO feedback_events (
-                id, owner_id, media_kind, media_id, signal, value, compared_media_kind,
-                compared_media_id, context_json, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                event.id,
-                owner_id,
-                media_kind_to_str(event.media_kind),
-                event.media_id,
-                feedback_signal_to_str(event.signal),
-                event.value,
-                event.compared_media_kind.map(media_kind_to_str),
-                event.compared_media_id,
-                event.context_json,
-                event.created_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
+        append_feedback_on(&self.connection, owner_id, event)
     }
 
     pub fn feedback_events(&self, owner_id: &str) -> anyhow::Result<Vec<FeedbackEvent>> {
@@ -1369,6 +1446,787 @@ impl Store {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to list confirmed reference items")
+    }
+
+    pub fn collection_create(&self, owner_id: &str, collection: &Collection) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &collection.owner_id, "collection")?;
+        ensure!(
+            !collection.name.trim().is_empty(),
+            "collection name must not be empty"
+        );
+        self.connection
+            .execute(
+                "INSERT INTO collections (id, owner_id, name, description, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    collection.id,
+                    owner_id,
+                    collection.name,
+                    collection.description,
+                    collection.created_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to create collection")?;
+        Ok(())
+    }
+
+    pub fn collection_list(&self, owner_id: &str) -> anyhow::Result<Vec<Collection>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, name, description, created_at
+             FROM collections WHERE owner_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], collection_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list collections")
+    }
+
+    pub fn collection_get(
+        &self,
+        owner_id: &str,
+        collection_id: &str,
+    ) -> anyhow::Result<Option<Collection>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, name, description, created_at
+                 FROM collections WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, collection_id],
+                collection_from_row,
+            )
+            .optional()
+            .context("failed to read collection")
+    }
+
+    /// Rename a collection; `UNIQUE(owner_id, name)` still applies.
+    pub fn collection_rename(
+        &mut self,
+        owner_id: &str,
+        collection_id: &str,
+        name: &str,
+    ) -> anyhow::Result<bool> {
+        ensure!(!name.trim().is_empty(), "collection name must not be empty");
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE collections SET name = ?3 WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, collection_id, name],
+            )
+            .context("failed to rename collection")?;
+        Ok(changed == 1)
+    }
+
+    /// Delete a collection; items cascade and designation triggers unset the
+    /// `source_collection_id` of derived reference sets while those sets keep their items.
+    pub fn collection_delete(
+        &mut self,
+        owner_id: &str,
+        collection_id: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM collections WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, collection_id],
+            )
+            .context("failed to delete collection")?;
+        Ok(changed == 1)
+    }
+
+    pub fn collection_add_item(&self, owner_id: &str, item: &CollectionItem) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &item.owner_id, "collection item")?;
+        ensure!(
+            self.collection_get(owner_id, &item.collection_id)?
+                .is_some(),
+            "collection {} does not exist for this owner",
+            item.collection_id
+        );
+        if let Some(context_key) = &item.context_key {
+            ensure!(
+                !context_key.trim().is_empty(),
+                "collection item context key must not be blank"
+            );
+        }
+        self.connection
+            .execute(
+                "INSERT INTO collection_items (
+                    owner_id, collection_id, media_kind, media_id, context_key, marked, added_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    owner_id,
+                    item.collection_id,
+                    media_kind_to_str(item.media_kind),
+                    item.media_id,
+                    item.context_key,
+                    i64::from(item.marked),
+                    item.added_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to add collection item")?;
+        Ok(())
+    }
+
+    pub fn collection_remove_item(
+        &self,
+        owner_id: &str,
+        collection_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM collection_items
+                 WHERE owner_id = ?1 AND collection_id = ?2 AND media_kind = ?3 AND media_id = ?4",
+                params![
+                    owner_id,
+                    collection_id,
+                    media_kind_to_str(media_kind),
+                    media_id
+                ],
+            )
+            .context("failed to remove collection item")?;
+        Ok(changed == 1)
+    }
+
+    /// Mark (or unmark) an item as a user-selected example for `selected`-scope designation.
+    pub fn collection_set_item_marked(
+        &self,
+        owner_id: &str,
+        collection_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+        marked: bool,
+    ) -> anyhow::Result<()> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE collection_items SET marked = ?5
+                 WHERE owner_id = ?1 AND collection_id = ?2 AND media_kind = ?3 AND media_id = ?4",
+                params![
+                    owner_id,
+                    collection_id,
+                    media_kind_to_str(media_kind),
+                    media_id,
+                    i64::from(marked),
+                ],
+            )
+            .context("failed to mark collection item")?;
+        ensure_changed(changed, "collection item", media_id)
+    }
+
+    pub fn collection_items(
+        &self,
+        owner_id: &str,
+        collection_id: &str,
+    ) -> anyhow::Result<Vec<CollectionItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, collection_id, media_kind, media_id, context_key, marked, added_at
+             FROM collection_items WHERE owner_id = ?1 AND collection_id = ?2
+             ORDER BY added_at, media_kind, media_id",
+        )?;
+        let rows =
+            statement.query_map(params![owner_id, collection_id], collection_item_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list collection items")
+    }
+
+    /// Designate a collection as style evidence by creating a *new* `unconfirmed` reference set
+    /// with `source_collection_id` filled in. For `WholeSet` every current collection item is
+    /// materialized into `reference_set_items` as positive examples; for `Selected` only the
+    /// rows the user marked copy. The snapshot happens here, so later collection edits never
+    /// rewrite confirmed training evidence, and the trainer's confirmed-only read path is
+    /// untouched: the set contributes nothing until `reference_set_confirm`.
+    pub fn collection_designate_as_reference_set(
+        &mut self,
+        owner_id: &str,
+        collection_id: &str,
+        name: &str,
+        context_key: &str,
+        scope: ReferenceSetScope,
+    ) -> anyhow::Result<ReferenceSet> {
+        ensure!(
+            !name.trim().is_empty(),
+            "reference set name must not be empty"
+        );
+        ensure!(
+            !context_key.trim().is_empty(),
+            "reference set context key must not be empty"
+        );
+        let collection = self
+            .collection_get(owner_id, collection_id)?
+            .with_context(|| format!("collection {collection_id} was not found for this owner"))?;
+        let now = Utc::now();
+        let set = ReferenceSet {
+            id: generated_id("refset", 0),
+            owner_id: owner_id.to_owned(),
+            name: name.to_owned(),
+            context_key: context_key.to_owned(),
+            description: String::new(),
+            scope,
+            status: ReferenceSetStatus::Unconfirmed,
+            source_collection_id: Some(collection.id.clone()),
+            created_at: now,
+            confirmed_at: None,
+        };
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction
+            .execute(
+                "INSERT INTO reference_sets (
+                    id, owner_id, name, context_key, description, scope, status,
+                    source_collection_id, created_at, confirmed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    set.id,
+                    owner_id,
+                    set.name,
+                    set.context_key,
+                    set.description,
+                    reference_scope_to_str(set.scope),
+                    reference_status_to_str(set.status),
+                    set.source_collection_id,
+                    set.created_at.to_rfc3339(),
+                    set.confirmed_at.map(|value| value.to_rfc3339()),
+                ],
+            )
+            .context("failed to create reference set from collection")?;
+        transaction
+            .execute(
+                "INSERT INTO reference_set_items (owner_id, set_id, media_kind, media_id, role, added_at)
+                 SELECT owner_id, ?2, media_kind, media_id, 'positive', ?3
+                 FROM collection_items
+                 WHERE owner_id = ?1 AND collection_id = ?4 AND (?5 = 0 OR marked = 1)",
+                params![
+                    owner_id,
+                    set.id,
+                    now.to_rfc3339(),
+                    collection.id,
+                    i64::from(scope == ReferenceSetScope::Selected),
+                ],
+            )
+            .context("failed to materialize collection items into reference set items")?;
+        transaction.commit()?;
+        Ok(set)
+    }
+
+    pub fn stack_create(&self, owner_id: &str, stack: &VersionStack) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &stack.owner_id, "version stack")?;
+        ensure!(
+            !stack.name.trim().is_empty(),
+            "version stack name must not be empty"
+        );
+        self.connection
+            .execute(
+                "INSERT INTO version_stacks (id, owner_id, name, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    stack.id,
+                    owner_id,
+                    stack.name,
+                    stack.created_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to create version stack")?;
+        Ok(())
+    }
+
+    pub fn stack_list(&self, owner_id: &str) -> anyhow::Result<Vec<VersionStack>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, name, created_at
+             FROM version_stacks WHERE owner_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], version_stack_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list version stacks")
+    }
+
+    pub fn stack_get(
+        &self,
+        owner_id: &str,
+        stack_id: &str,
+    ) -> anyhow::Result<Option<VersionStack>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, name, created_at
+                 FROM version_stacks WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, stack_id],
+                version_stack_from_row,
+            )
+            .optional()
+            .context("failed to read version stack")
+    }
+
+    /// Delete a stack; its items cascade. Underlying media rows are never touched.
+    pub fn stack_delete(&mut self, owner_id: &str, stack_id: &str) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM version_stacks WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, stack_id],
+            )
+            .context("failed to delete version stack")?;
+        Ok(changed == 1)
+    }
+
+    pub fn stack_add_item(&self, owner_id: &str, item: &StackItem) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &item.owner_id, "stack item")?;
+        ensure!(
+            self.stack_get(owner_id, &item.stack_id)?.is_some(),
+            "version stack {} does not exist for this owner",
+            item.stack_id
+        );
+        if item.role == StackItemRole::Original {
+            let existing: Option<i64> = self
+                .connection
+                .query_row(
+                    "SELECT 1 FROM stack_items
+                     WHERE owner_id = ?1 AND stack_id = ?2 AND role = 'original' LIMIT 1",
+                    params![owner_id, item.stack_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("failed to check stack original")?;
+            ensure!(
+                existing.is_none(),
+                "version stack {} already has an original",
+                item.stack_id
+            );
+        }
+        self.connection
+            .execute(
+                "INSERT INTO stack_items (owner_id, stack_id, media_kind, media_id, role, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    owner_id,
+                    item.stack_id,
+                    stack_media_kind_to_str(item.media_kind),
+                    item.media_id,
+                    stack_role_to_str(item.role),
+                    item.added_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to add stack item")?;
+        Ok(())
+    }
+
+    pub fn stack_remove_item(
+        &self,
+        owner_id: &str,
+        stack_id: &str,
+        media_kind: StackMediaKind,
+        media_id: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM stack_items
+                 WHERE owner_id = ?1 AND stack_id = ?2 AND media_kind = ?3 AND media_id = ?4",
+                params![
+                    owner_id,
+                    stack_id,
+                    stack_media_kind_to_str(media_kind),
+                    media_id
+                ],
+            )
+            .context("failed to remove stack item")?;
+        Ok(changed == 1)
+    }
+
+    pub fn stack_items(&self, owner_id: &str, stack_id: &str) -> anyhow::Result<Vec<StackItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, stack_id, media_kind, media_id, role, added_at
+             FROM stack_items WHERE owner_id = ?1 AND stack_id = ?2
+             ORDER BY added_at, media_kind, media_id",
+        )?;
+        let rows = statement.query_map(params![owner_id, stack_id], stack_item_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list stack items")
+    }
+
+    /// Every stack the asset belongs to, for the grid and detail drawer.
+    pub fn stacks_for_asset(
+        &self,
+        owner_id: &str,
+        media_kind: StackMediaKind,
+        media_id: &str,
+    ) -> anyhow::Result<Vec<VersionStack>> {
+        let mut statement = self.connection.prepare(
+            "SELECT s.id, s.owner_id, s.name, s.created_at
+             FROM version_stacks AS s
+             JOIN stack_items AS i ON i.stack_id = s.id AND i.owner_id = s.owner_id
+             WHERE s.owner_id = ?1 AND i.media_kind = ?2 AND i.media_id = ?3
+             ORDER BY s.created_at, s.id",
+        )?;
+        let rows = statement.query_map(
+            params![owner_id, stack_media_kind_to_str(media_kind), media_id],
+            version_stack_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list stacks for asset")
+    }
+
+    pub fn saved_search_create(&self, owner_id: &str, search: &SavedSearch) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &search.owner_id, "saved search")?;
+        ensure!(
+            !search.name.trim().is_empty(),
+            "saved search name must not be empty"
+        );
+        ensure!(
+            !search.query.trim().is_empty(),
+            "saved search query must not be empty"
+        );
+        ensure!(
+            !search.context_key.trim().is_empty(),
+            "saved search context key must not be empty"
+        );
+        validate_json_object(&search.filters_json, "filters_json")?;
+        self.connection
+            .execute(
+                "INSERT INTO saved_searches (id, owner_id, name, query, context_key, filters_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    search.id,
+                    owner_id,
+                    search.name,
+                    search.query,
+                    search.context_key,
+                    search.filters_json,
+                    search.created_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to create saved search")?;
+        Ok(())
+    }
+
+    pub fn saved_search_list(&self, owner_id: &str) -> anyhow::Result<Vec<SavedSearch>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, name, query, context_key, filters_json, created_at
+             FROM saved_searches WHERE owner_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], saved_search_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list saved searches")
+    }
+
+    pub fn saved_search_delete(
+        &mut self,
+        owner_id: &str,
+        saved_search_id: &str,
+    ) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM saved_searches WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, saved_search_id],
+            )
+            .context("failed to delete saved search")?;
+        Ok(changed == 1)
+    }
+
+    /// Overwrites only the safety columns of the editorial annotation. This is the single
+    /// write path for the privacy/safety flags: it is called only after an explicit user
+    /// action, never appends a feedback event, and no machine path has an API that writes
+    /// these columns from scores.
+    pub fn set_safety_flags(
+        &self,
+        owner_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+        flags: SafetyFlags,
+    ) -> anyhow::Result<EditorialAnnotation> {
+        let now = Utc::now();
+        let mut annotation =
+            load_annotation_or_default(&self.connection, owner_id, media_kind, media_id, now)?;
+        annotation.usable = flags.usable;
+        annotation.faces_visible = flags.faces_visible;
+        annotation.nametags_visible = flags.nametags_visible;
+        annotation.blur_required = flags.blur_required;
+        annotation.updated_at = now;
+        upsert_editorial_annotation_on(&self.connection, owner_id, &annotation)?;
+        Ok(annotation)
+    }
+
+    /// Apply a batch of explicit review actions in one immediate transaction: a bad op aborts
+    /// the whole batch. Pick/reject/rate append append-only `feedback_events` rows through the
+    /// `append_feedback` invariants; rate also updates the annotation's editable quality.
+    /// Flag ops write state only (privacy flags never produce events); add-to-collection
+    /// writes organizational state only.
+    pub fn bulk_review(&mut self, owner_id: &str, ops: &[ReviewOp]) -> anyhow::Result<usize> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now();
+        for (index, op) in ops.iter().enumerate() {
+            match op {
+                ReviewOp::Pick {
+                    media_kind,
+                    media_id,
+                } => {
+                    append_feedback_on(
+                        &transaction,
+                        owner_id,
+                        &FeedbackEvent {
+                            id: generated_id("review", index),
+                            owner_id: owner_id.to_owned(),
+                            media_kind: *media_kind,
+                            media_id: media_id.clone(),
+                            signal: FeedbackSignal::Pick,
+                            value: Some(1.0),
+                            compared_media_kind: None,
+                            compared_media_id: None,
+                            context_json: "{}".to_owned(),
+                            created_at: now,
+                        },
+                    )?;
+                }
+                ReviewOp::Reject {
+                    media_kind,
+                    media_id,
+                } => {
+                    append_feedback_on(
+                        &transaction,
+                        owner_id,
+                        &FeedbackEvent {
+                            id: generated_id("review", index),
+                            owner_id: owner_id.to_owned(),
+                            media_kind: *media_kind,
+                            media_id: media_id.clone(),
+                            signal: FeedbackSignal::Reject,
+                            value: Some(-1.0),
+                            compared_media_kind: None,
+                            compared_media_id: None,
+                            context_json: "{}".to_owned(),
+                            created_at: now,
+                        },
+                    )?;
+                }
+                ReviewOp::Rate {
+                    media_kind,
+                    media_id,
+                    rating,
+                } => {
+                    ensure!((1..=5).contains(rating), "rating must be between 1 and 5");
+                    let mut annotation = load_annotation_or_default(
+                        &transaction,
+                        owner_id,
+                        *media_kind,
+                        media_id,
+                        now,
+                    )?;
+                    annotation.quality = Some(*rating);
+                    annotation.updated_at = now;
+                    upsert_editorial_annotation_on(&transaction, owner_id, &annotation)?;
+                    append_feedback_on(
+                        &transaction,
+                        owner_id,
+                        &FeedbackEvent {
+                            id: generated_id("review", index),
+                            owner_id: owner_id.to_owned(),
+                            media_kind: *media_kind,
+                            media_id: media_id.clone(),
+                            signal: FeedbackSignal::Rating,
+                            value: Some(f64::from(*rating)),
+                            compared_media_kind: None,
+                            compared_media_id: None,
+                            context_json: "{}".to_owned(),
+                            created_at: now,
+                        },
+                    )?;
+                }
+                ReviewOp::SetFlags {
+                    media_kind,
+                    media_id,
+                    flags,
+                } => {
+                    let mut annotation = load_annotation_or_default(
+                        &transaction,
+                        owner_id,
+                        *media_kind,
+                        media_id,
+                        now,
+                    )?;
+                    annotation.usable = flags.usable;
+                    annotation.faces_visible = flags.faces_visible;
+                    annotation.nametags_visible = flags.nametags_visible;
+                    annotation.blur_required = flags.blur_required;
+                    annotation.updated_at = now;
+                    upsert_editorial_annotation_on(&transaction, owner_id, &annotation)?;
+                }
+                ReviewOp::AddToCollection {
+                    collection_id,
+                    media_kind,
+                    media_id,
+                    context_key,
+                } => {
+                    let exists: Option<i64> = transaction
+                        .query_row(
+                            "SELECT 1 FROM collections WHERE owner_id = ?1 AND id = ?2",
+                            params![owner_id, collection_id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .context("failed to check collection")?;
+                    ensure!(
+                        exists.is_some(),
+                        "collection {collection_id} does not exist for this owner"
+                    );
+                    if let Some(context_key) = context_key {
+                        ensure!(
+                            !context_key.trim().is_empty(),
+                            "collection item context key must not be blank"
+                        );
+                    }
+                    transaction.execute(
+                        "INSERT INTO collection_items (
+                            owner_id, collection_id, media_kind, media_id, context_key, marked, added_at
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            owner_id,
+                            collection_id,
+                            media_kind_to_str(*media_kind),
+                            media_id,
+                            context_key,
+                            0,
+                            now.to_rfc3339(),
+                        ],
+                    )?;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(ops.len())
+    }
+
+    /// The unified mixed-media grid query: one projection over photos and shots (joined to
+    /// their parent video and annotation row), filterable by the `AssetFilter` fields. This is
+    /// the only new read path in 019a; ranked search stays in the search crate.
+    pub fn browse_assets(
+        &self,
+        owner_id: &str,
+        filter: &AssetFilter,
+    ) -> anyhow::Result<Vec<LibraryAsset>> {
+        // Both branches bind the same ten parameters in the same order, so the clause set is
+        // rendered once per branch with branch-specific columns. The stack clause in the shot
+        // branch can never match because stack_items CHECK-constrains media_kind to
+        // photo/video, which keeps the parameter list aligned across branches.
+        let clause = |owner_col: &str,
+                      status_col: &str,
+                      path_col: &str,
+                      media: &str,
+                      id_col: &str|
+         -> String {
+            format!(
+                "
+     AND (?2 IS NULL OR {status_col} = ?2)
+     AND (?3 IS NULL OR COALESCE(a.usable, 1) = ?3)
+     AND (?4 IS NULL OR COALESCE(a.faces_visible, 0) = ?4)
+     AND (?5 IS NULL OR COALESCE(a.blur_required, 0) = ?5)
+     AND (?6 IS NULL OR (a.quality IS NOT NULL AND a.quality >= ?6))
+     AND (?7 IS NULL OR EXISTS (
+           SELECT 1 FROM collection_items cf
+           WHERE cf.owner_id = {owner_col} AND cf.collection_id = ?7
+             AND cf.media_kind = '{media}' AND cf.media_id = {id_col}))
+     AND (?8 IS NULL OR EXISTS (
+           SELECT 1 FROM stack_items sf
+           WHERE sf.owner_id = {owner_col} AND sf.stack_id = ?8
+             AND sf.media_kind = '{media}' AND sf.media_id = {id_col}))
+     AND (?9 IS NULL OR EXISTS (
+           SELECT 1 FROM collection_items cx
+           WHERE cx.owner_id = {owner_col} AND cx.media_kind = '{media}'
+             AND cx.media_id = {id_col} AND cx.context_key = ?9))
+     AND (?10 IS NULL OR {path_col} LIKE '%' || ?10 || '%')",
+            )
+        };
+        let photo_clause = clause("p.owner_id", "p.status", "p.path", "photo", "p.id");
+        let shot_clause = clause("s.owner_id", "v.status", "v.path", "shot", "s.id");
+        let photo_select = format!(
+            "SELECT 'photo' AS media_kind, p.id AS media_id, p.owner_id, p.path, p.thumb_rel,
+                    p.status, p.indexed_at,
+                    NULL AS video_id, NULL AS start_s, NULL AS end_s, p.width, p.height,
+                    a.quality, COALESCE(a.usable, 1), a.standout,
+                    COALESCE(a.faces_visible, 0), COALESCE(a.nametags_visible, 0),
+                    COALESCE(a.blur_required, 0), COALESCE(a.tags, ''),
+                    (SELECT GROUP_CONCAT(ci.collection_id) FROM collection_items ci
+                     WHERE ci.owner_id = p.owner_id AND ci.media_kind = 'photo'
+                       AND ci.media_id = p.id) AS collection_ids,
+                    (SELECT GROUP_CONCAT(si.stack_id) FROM stack_items si
+                     WHERE si.owner_id = p.owner_id AND si.media_kind = 'photo'
+                       AND si.media_id = p.id) AS stack_ids,
+                    COALESCE(p.captured_at, p.indexed_at) AS sort_at
+             FROM photos p
+             LEFT JOIN editorial_annotations a
+               ON a.owner_id = p.owner_id AND a.media_kind = 'photo' AND a.media_id = p.id
+             WHERE p.owner_id = ?1{photo_clause}",
+        );
+        let shot_select = format!(
+            "SELECT 'shot' AS media_kind, s.id AS media_id, s.owner_id, v.path, s.thumb_rel,
+                    v.status, v.indexed_at,
+                    s.video_id, s.start_s, s.end_s, v.width, v.height,
+                    a.quality, COALESCE(a.usable, 1), a.standout,
+                    COALESCE(a.faces_visible, 0), COALESCE(a.nametags_visible, 0),
+                    COALESCE(a.blur_required, 0), COALESCE(a.tags, ''),
+                    (SELECT GROUP_CONCAT(ci.collection_id) FROM collection_items ci
+                     WHERE ci.owner_id = s.owner_id AND ci.media_kind = 'shot'
+                       AND ci.media_id = s.id) AS collection_ids,
+                    NULL AS stack_ids,
+                    v.indexed_at AS sort_at
+             FROM shots s
+             JOIN videos v ON v.id = s.video_id AND v.owner_id = s.owner_id
+             LEFT JOIN editorial_annotations a
+               ON a.owner_id = s.owner_id AND a.media_kind = 'shot' AND a.media_id = s.id
+             WHERE s.owner_id = ?1{shot_clause}",
+        );
+        let mut sql = match filter.kind {
+            Some(MediaKind::Photo) => photo_select,
+            Some(MediaKind::Shot) => shot_select,
+            None => format!("{photo_select}\nUNION ALL\n{shot_select}"),
+        };
+        sql.push_str("\nORDER BY sort_at, media_kind, media_id");
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            params![
+                owner_id,
+                filter.status,
+                filter.usable,
+                filter.faces_visible,
+                filter.blur_required,
+                filter.quality_min,
+                filter.collection_id,
+                filter.stack_id,
+                filter.context_key,
+                filter.search,
+            ],
+            library_asset_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to browse assets")
+    }
+
+    /// Counter totals for the library dashboard.
+    pub fn library_counts(&self, owner_id: &str) -> anyhow::Result<LibraryCounts> {
+        self.connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM photos WHERE owner_id = ?1),
+                    (SELECT COUNT(*) FROM shots WHERE owner_id = ?1),
+                    (SELECT COUNT(*) FROM feedback_events
+                     WHERE owner_id = ?1 AND signal = 'pick'),
+                    (SELECT COUNT(*) FROM feedback_events
+                     WHERE owner_id = ?1 AND signal = 'reject'),
+                    (SELECT COUNT(*) FROM editorial_annotations
+                     WHERE owner_id = ?1 AND (usable = 0 OR blur_required = 1))",
+                params![owner_id],
+                |row| {
+                    Ok(LibraryCounts {
+                        photos: row.get(0)?,
+                        shots: row.get(1)?,
+                        picks: row.get(2)?,
+                        rejects: row.get(3)?,
+                        flagged: row.get(4)?,
+                    })
+                },
+            )
+            .context("failed to count library assets")
     }
 
     fn photo_query(&self, sql: &str, owner_id: &str, value: &str) -> anyhow::Result<Option<Photo>> {
@@ -2968,6 +3826,110 @@ fn shot_from_row(row: &Row<'_>) -> rusqlite::Result<Shot> {
     })
 }
 
+fn collection_from_row(row: &Row<'_>) -> rusqlite::Result<Collection> {
+    let created_at: String = row.get(4)?;
+    Ok(Collection {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        created_at: timestamp_from_str(&created_at, 4)?,
+    })
+}
+
+fn collection_item_from_row(row: &Row<'_>) -> rusqlite::Result<CollectionItem> {
+    let media_kind: String = row.get(2)?;
+    let added_at: String = row.get(6)?;
+    Ok(CollectionItem {
+        owner_id: row.get(0)?,
+        collection_id: row.get(1)?,
+        media_kind: media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(2, error.to_string()))?,
+        media_id: row.get(3)?,
+        context_key: row.get(4)?,
+        marked: row.get::<_, i64>(5)? != 0,
+        added_at: timestamp_from_str(&added_at, 6)?,
+    })
+}
+
+fn version_stack_from_row(row: &Row<'_>) -> rusqlite::Result<VersionStack> {
+    let created_at: String = row.get(3)?;
+    Ok(VersionStack {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        name: row.get(2)?,
+        created_at: timestamp_from_str(&created_at, 3)?,
+    })
+}
+
+fn stack_item_from_row(row: &Row<'_>) -> rusqlite::Result<StackItem> {
+    let media_kind: String = row.get(2)?;
+    let role: String = row.get(4)?;
+    let added_at: String = row.get(5)?;
+    Ok(StackItem {
+        owner_id: row.get(0)?,
+        stack_id: row.get(1)?,
+        media_kind: stack_media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(2, error.to_string()))?,
+        media_id: row.get(3)?,
+        role: stack_role_from_str(&role)
+            .map_err(|error| conversion_message(4, error.to_string()))?,
+        added_at: timestamp_from_str(&added_at, 5)?,
+    })
+}
+
+fn saved_search_from_row(row: &Row<'_>) -> rusqlite::Result<SavedSearch> {
+    let created_at: String = row.get(6)?;
+    Ok(SavedSearch {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        name: row.get(2)?,
+        query: row.get(3)?,
+        context_key: row.get(4)?,
+        filters_json: row.get(5)?,
+        created_at: timestamp_from_str(&created_at, 6)?,
+    })
+}
+
+fn library_asset_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryAsset> {
+    let media_kind: String = row.get(0)?;
+    let indexed_at: Option<String> = row.get(6)?;
+    let collection_ids: Option<String> = row.get(19)?;
+    let stack_ids: Option<String> = row.get(20)?;
+    Ok(LibraryAsset {
+        media_kind: media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(0, error.to_string()))?,
+        media_id: row.get(1)?,
+        owner_id: row.get(2)?,
+        path: row.get(3)?,
+        thumb_rel: row.get(4)?,
+        status: row.get(5)?,
+        indexed_at: indexed_at
+            .map(|value| timestamp_from_str(&value, 6))
+            .transpose()?,
+        video_id: row.get(7)?,
+        start_s: row.get(8)?,
+        end_s: row.get(9)?,
+        width: row.get(10)?,
+        height: row.get(11)?,
+        quality: row.get(12)?,
+        usable: row.get::<_, i64>(13)? != 0,
+        standout: row
+            .get::<_, Option<i64>>(14)?
+            .is_some_and(|value| value != 0),
+        faces_visible: row.get::<_, i64>(15)? != 0,
+        nametags_visible: row.get::<_, i64>(16)? != 0,
+        blur_required: row.get::<_, i64>(17)? != 0,
+        tags: row.get(18)?,
+        collection_ids: collection_ids
+            .map(|value| value.split(',').map(str::to_owned).collect())
+            .unwrap_or_default(),
+        stack_ids: stack_ids
+            .map(|value| value.split(',').map(str::to_owned).collect())
+            .unwrap_or_default(),
+    })
+}
+
 fn transcript_from_row(row: &Row<'_>) -> rusqlite::Result<TranscriptSegment> {
     Ok(TranscriptSegment {
         id: row.get(0)?,
@@ -3074,6 +4036,36 @@ fn media_kind_from_str(value: &str) -> anyhow::Result<MediaKind> {
         "photo" => Ok(MediaKind::Photo),
         "shot" => Ok(MediaKind::Shot),
         _ => bail!("unknown media kind {value:?}"),
+    }
+}
+
+fn stack_media_kind_to_str(kind: StackMediaKind) -> &'static str {
+    match kind {
+        StackMediaKind::Photo => "photo",
+        StackMediaKind::Video => "video",
+    }
+}
+
+fn stack_media_kind_from_str(value: &str) -> anyhow::Result<StackMediaKind> {
+    match value {
+        "photo" => Ok(StackMediaKind::Photo),
+        "video" => Ok(StackMediaKind::Video),
+        _ => bail!("unknown stack media kind {value:?}"),
+    }
+}
+
+fn stack_role_to_str(role: StackItemRole) -> &'static str {
+    match role {
+        StackItemRole::Original => "original",
+        StackItemRole::Derived => "derived",
+    }
+}
+
+fn stack_role_from_str(value: &str) -> anyhow::Result<StackItemRole> {
+    match value {
+        "original" => Ok(StackItemRole::Original),
+        "derived" => Ok(StackItemRole::Derived),
+        _ => bail!("unknown stack item role {value:?}"),
     }
 }
 
@@ -3227,6 +4219,181 @@ fn ensure_owner_matches(owner_id: &str, record_owner: &str, kind: &str) -> anyho
 
 fn ensure_changed(changed: usize, kind: &str, id: &str) -> anyhow::Result<()> {
     ensure!(changed == 1, "{kind} {id} was not found");
+    Ok(())
+}
+
+/// Collision-resistant record id without adding a dependency: nanosecond timestamp plus a
+/// caller-supplied nonce (the operation index inside a batch). A collision would fail the
+/// primary key loudly rather than corrupt data.
+fn generated_id(prefix: &str, nonce: usize) -> String {
+    let nanos = Utc::now().timestamp_nanos_opt().unwrap_or_default().max(0);
+    format!("{prefix}-{nanos}-{nonce}")
+}
+
+/// Connection-taking core of [`Store::upsert_editorial_annotation`] so transactional review
+/// writes can reuse the exact same validation and SQL.
+fn upsert_editorial_annotation_on(
+    connection: &Connection,
+    owner_id: &str,
+    annotation: &EditorialAnnotation,
+) -> anyhow::Result<()> {
+    ensure_owner_matches(owner_id, &annotation.owner_id, "editorial annotation")?;
+    if let Some(quality) = annotation.quality {
+        ensure!(
+            (1..=5).contains(&quality),
+            "quality must be between 1 and 5"
+        );
+    }
+    if let Some(crop_x) = annotation.crop_x {
+        ensure_unit_score(crop_x, "crop_x")?;
+    }
+    connection.execute(
+        "INSERT INTO editorial_annotations (
+                owner_id, media_kind, media_id, description, subjects, action, tags, quality,
+                standout, usable, faces_visible, nametags_visible, blur_required, crop_x,
+                grade_json, notes, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             ON CONFLICT(owner_id, media_kind, media_id) DO UPDATE SET
+                description = excluded.description,
+                subjects = excluded.subjects,
+                action = excluded.action,
+                tags = excluded.tags,
+                quality = excluded.quality,
+                standout = excluded.standout,
+                usable = excluded.usable,
+                faces_visible = excluded.faces_visible,
+                nametags_visible = excluded.nametags_visible,
+                blur_required = excluded.blur_required,
+                crop_x = excluded.crop_x,
+                grade_json = excluded.grade_json,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at",
+        params![
+            owner_id,
+            media_kind_to_str(annotation.media_kind),
+            annotation.media_id,
+            annotation.description,
+            annotation.subjects,
+            annotation.action,
+            annotation.tags,
+            annotation.quality,
+            annotation.standout,
+            annotation.usable,
+            annotation.faces_visible,
+            annotation.nametags_visible,
+            annotation.blur_required,
+            annotation.crop_x,
+            annotation.grade_json,
+            annotation.notes,
+            annotation.updated_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Connection-taking core of [`Store::editorial_annotation`].
+fn editorial_annotation_on(
+    connection: &Connection,
+    owner_id: &str,
+    media_kind: MediaKind,
+    media_id: &str,
+) -> anyhow::Result<Option<EditorialAnnotation>> {
+    connection
+        .query_row(
+            "SELECT owner_id, media_kind, media_id, description, subjects, action, tags,
+                    quality, standout, usable, faces_visible, nametags_visible, blur_required,
+                    crop_x, grade_json, notes, updated_at
+             FROM editorial_annotations
+             WHERE owner_id = ?1 AND media_kind = ?2 AND media_id = ?3",
+            params![owner_id, media_kind_to_str(media_kind), media_id],
+            editorial_annotation_from_row,
+        )
+        .optional()
+        .context("failed to read editorial annotation")
+}
+
+/// The stored annotation, or the 0002 column defaults when none exists yet. Callers that
+/// upsert the result back rely on the target-existence triggers to refuse missing media.
+fn load_annotation_or_default(
+    connection: &Connection,
+    owner_id: &str,
+    media_kind: MediaKind,
+    media_id: &str,
+    now: DateTime<Utc>,
+) -> anyhow::Result<EditorialAnnotation> {
+    Ok(
+        editorial_annotation_on(connection, owner_id, media_kind, media_id)?.unwrap_or_else(|| {
+            EditorialAnnotation {
+                owner_id: owner_id.to_owned(),
+                media_kind,
+                media_id: media_id.to_owned(),
+                description: String::new(),
+                subjects: String::new(),
+                action: String::new(),
+                tags: String::new(),
+                quality: None,
+                standout: false,
+                usable: true,
+                faces_visible: false,
+                nametags_visible: false,
+                blur_required: false,
+                crop_x: None,
+                grade_json: None,
+                notes: String::new(),
+                updated_at: now,
+            }
+        }),
+    )
+}
+
+/// Connection-taking core of [`Store::append_feedback`] so `bulk_review` can append events on
+/// the same transaction as its annotation writes; invariants and SQL stay identical.
+fn append_feedback_on(
+    connection: &Connection,
+    owner_id: &str,
+    event: &FeedbackEvent,
+) -> anyhow::Result<()> {
+    ensure_owner_matches(owner_id, &event.owner_id, "feedback event")?;
+    let has_comparison = event.compared_media_kind.is_some() && event.compared_media_id.is_some();
+    ensure!(
+        event.compared_media_kind.is_some() == event.compared_media_id.is_some(),
+        "compared media kind and id must be supplied together"
+    );
+    ensure!(
+        event.signal == FeedbackSignal::Prefer || !has_comparison,
+        "only prefer feedback may compare two assets"
+    );
+    ensure!(
+        event.signal != FeedbackSignal::Prefer || has_comparison,
+        "prefer feedback requires a compared asset"
+    );
+    if event.signal == FeedbackSignal::Rating {
+        ensure!(
+            event
+                .value
+                .is_some_and(|value| (1.0..=5.0).contains(&value)),
+            "rating feedback requires a value from 1 to 5"
+        );
+    }
+    validate_json_object(&event.context_json, "context_json")?;
+    connection.execute(
+        "INSERT INTO feedback_events (
+                id, owner_id, media_kind, media_id, signal, value, compared_media_kind,
+                compared_media_id, context_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            event.id,
+            owner_id,
+            media_kind_to_str(event.media_kind),
+            event.media_id,
+            feedback_signal_to_str(event.signal),
+            event.value,
+            event.compared_media_kind.map(media_kind_to_str),
+            event.compared_media_id,
+            event.context_json,
+            event.created_at.to_rfc3339(),
+        ],
+    )?;
     Ok(())
 }
 

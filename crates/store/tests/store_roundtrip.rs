@@ -9,11 +9,12 @@ use crush_core::{
     DEFAULT_OWNER_ID,
 };
 use crush_store::{
-    AestheticAssessment, EditorialAnnotation, EmbeddingMeta, FeedbackEvent, FeedbackSignal,
-    JobFilter, MediaKind, NewJob, Photo, PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus,
-    ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
-    ReferenceSetStatus, Shot, Store, StyleProfile, TranscriptSegment, Video, VideoSourceMetadata,
-    VideoStatus,
+    AestheticAssessment, Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta,
+    FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, Photo, PhotoProxyProvenance,
+    PhotoSourceMetadata, PhotoStatus, ProblemKind, ReferenceItemRole, ReferenceSet,
+    ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch,
+    Shot, StackItem, StackItemRole, StackMediaKind, Store, StyleProfile, TranscriptSegment,
+    VersionStack, Video, VideoSourceMetadata, VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -137,7 +138,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -148,7 +149,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 7);
+    assert_eq!(reopened.schema_version().unwrap(), 8);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -205,7 +206,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -268,7 +269,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -1698,7 +1699,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -2222,4 +2223,1143 @@ fn style_profile_versions_list_activate_and_reset_round_trip() {
         .is_none());
     assert_eq!(store.style_profiles(DEFAULT_OWNER_ID).unwrap().len(), 3);
     assert_eq!(store.reset_style_profiles(DEFAULT_OWNER_ID).unwrap(), 0);
+}
+
+fn collection(id: &str, name: &str) -> Collection {
+    Collection {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        name: name.to_owned(),
+        description: "editorial selects".to_owned(),
+        created_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+fn collection_item(collection_id: &str, media_kind: MediaKind, media_id: &str) -> CollectionItem {
+    CollectionItem {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        collection_id: collection_id.to_owned(),
+        media_kind,
+        media_id: media_id.to_owned(),
+        context_key: None,
+        marked: false,
+        added_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+fn version_stack(id: &str, name: &str) -> VersionStack {
+    VersionStack {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        name: name.to_owned(),
+        created_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+fn stack_item(
+    stack_id: &str,
+    media_kind: StackMediaKind,
+    media_id: &str,
+    role: StackItemRole,
+) -> StackItem {
+    StackItem {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        stack_id: stack_id.to_owned(),
+        media_kind,
+        media_id: media_id.to_owned(),
+        role,
+        added_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+fn saved_search(id: &str, name: &str) -> SavedSearch {
+    SavedSearch {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        name: name.to_owned(),
+        query: "quiet hero frames".to_owned(),
+        context_key: "default".to_owned(),
+        filters_json: "{}".to_owned(),
+        created_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+#[test]
+fn collections_round_trip_with_owner_isolation_and_cascades() {
+    const OWNER_B: &str = "editor-b";
+    let directory = TestDir::new("collections");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at)
+             VALUES ('editor-b', 'Editor B', '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-col-a", "col-sha-a"),
+        )
+        .unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-col", "col-video-sha"))
+        .unwrap();
+    store
+        .insert_shots(
+            DEFAULT_OWNER_ID,
+            std::slice::from_ref(&shot("shot-col", "video-col", 0)),
+        )
+        .unwrap();
+
+    let set = collection("col-a", "hero selects");
+    store.collection_create(DEFAULT_OWNER_ID, &set).unwrap();
+    assert_eq!(
+        store.collection_get(DEFAULT_OWNER_ID, "col-a").unwrap(),
+        Some(set.clone())
+    );
+    // Owner isolation: the same name is allowed for another owner and neither sees the other.
+    let mut other_owner = collection("col-b", "hero selects");
+    other_owner.owner_id = OWNER_B.to_owned();
+    store.collection_create(OWNER_B, &other_owner).unwrap();
+    assert_eq!(store.collection_list(OWNER_B).unwrap().len(), 1);
+    assert!(store.collection_get(OWNER_B, "col-a").unwrap().is_none());
+    // Cross-owner items are refused before SQL even runs.
+    let mut crossed = collection_item("col-a", MediaKind::Photo, "photo-col-a");
+    crossed.owner_id = OWNER_B.to_owned();
+    assert!(store.collection_add_item(OWNER_B, &crossed).is_err());
+
+    store
+        .collection_add_item(
+            DEFAULT_OWNER_ID,
+            &collection_item("col-a", MediaKind::Photo, "photo-col-a"),
+        )
+        .unwrap();
+    let mut shot_item = collection_item("col-a", MediaKind::Shot, "shot-col");
+    shot_item.context_key = Some("homepage-hero".to_owned());
+    store
+        .collection_add_item(DEFAULT_OWNER_ID, &shot_item)
+        .unwrap();
+    // The target-existence trigger refuses items for missing media.
+    assert!(store
+        .collection_add_item(
+            DEFAULT_OWNER_ID,
+            &collection_item("col-a", MediaKind::Photo, "photo-missing"),
+        )
+        .is_err());
+    // Duplicate membership and blank context keys are refused.
+    assert!(store
+        .collection_add_item(
+            DEFAULT_OWNER_ID,
+            &collection_item("col-a", MediaKind::Photo, "photo-col-a"),
+        )
+        .is_err());
+    let mut blank = collection_item("col-a", MediaKind::Photo, "photo-col-a");
+    blank.context_key = Some("   ".to_owned());
+    assert!(store.collection_add_item(DEFAULT_OWNER_ID, &blank).is_err());
+
+    let mut items = store
+        .collection_items(DEFAULT_OWNER_ID, "col-a")
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.media_kind, item.media_id))
+        .collect::<Vec<_>>();
+    items.sort();
+    assert_eq!(
+        items,
+        vec![
+            (MediaKind::Photo, "photo-col-a".to_owned()),
+            (MediaKind::Shot, "shot-col".to_owned()),
+        ]
+    );
+
+    // Marking round-trips and refuses unknown items.
+    store
+        .collection_set_item_marked(
+            DEFAULT_OWNER_ID,
+            "col-a",
+            MediaKind::Photo,
+            "photo-col-a",
+            true,
+        )
+        .unwrap();
+    let marked = store
+        .collection_items(DEFAULT_OWNER_ID, "col-a")
+        .unwrap()
+        .into_iter()
+        .find(|item| item.media_id == "photo-col-a")
+        .unwrap();
+    assert!(marked.marked);
+    assert!(store
+        .collection_set_item_marked(
+            DEFAULT_OWNER_ID,
+            "col-a",
+            MediaKind::Photo,
+            "photo-missing",
+            true,
+        )
+        .is_err());
+
+    // Renaming works; unique (owner, name) still applies between two of this owner's
+    // collections but never across owners.
+    assert!(store
+        .collection_rename(DEFAULT_OWNER_ID, "col-a", "renamed selects")
+        .unwrap());
+    store
+        .collection_create(DEFAULT_OWNER_ID, &collection("col-c", "second set"))
+        .unwrap();
+    assert!(store
+        .collection_rename(DEFAULT_OWNER_ID, "col-c", "renamed selects")
+        .is_err());
+    assert!(!store
+        .collection_rename(OWNER_B, "col-a", "stolen name")
+        .unwrap());
+
+    // Deleting media scrubs dangling items through the 0008 cleanup triggers.
+    audit
+        .execute("DELETE FROM shots WHERE id = 'shot-col'", [])
+        .unwrap();
+    let remaining = store
+        .collection_items(DEFAULT_OWNER_ID, "col-a")
+        .unwrap()
+        .into_iter()
+        .map(|item| item.media_id)
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, vec!["photo-col-a".to_owned()]);
+
+    // Deleting the collection cascades its items; a second delete reports false.
+    assert!(store.collection_delete(DEFAULT_OWNER_ID, "col-a").unwrap());
+    assert!(store
+        .collection_get(DEFAULT_OWNER_ID, "col-a")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .collection_items(DEFAULT_OWNER_ID, "col-a")
+        .unwrap()
+        .is_empty());
+    assert!(!store.collection_delete(DEFAULT_OWNER_ID, "col-a").unwrap());
+    // Owner scoping: deleting another owner's collection by id touches nothing.
+    assert!(!store.collection_delete(DEFAULT_OWNER_ID, "col-b").unwrap());
+    assert!(store.collection_get(OWNER_B, "col-b").unwrap().is_some());
+}
+
+#[test]
+fn collection_designation_materializes_items_and_survives_collection_delete() {
+    let directory = TestDir::new("collection-designation");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-des-a", "des-sha-a"),
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-des-b", "des-sha-b"),
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-des-c", "des-sha-c"),
+        )
+        .unwrap();
+
+    let set = collection("col-des", "previous work");
+    store.collection_create(DEFAULT_OWNER_ID, &set).unwrap();
+    let mut marked = collection_item("col-des", MediaKind::Photo, "photo-des-a");
+    marked.marked = true;
+    store
+        .collection_add_item(DEFAULT_OWNER_ID, &marked)
+        .unwrap();
+    store
+        .collection_add_item(
+            DEFAULT_OWNER_ID,
+            &collection_item("col-des", MediaKind::Photo, "photo-des-b"),
+        )
+        .unwrap();
+
+    // WholeSet snapshots every current collection item.
+    let whole = store
+        .collection_designate_as_reference_set(
+            DEFAULT_OWNER_ID,
+            "col-des",
+            "whole evidence",
+            "default",
+            ReferenceSetScope::WholeSet,
+        )
+        .unwrap();
+    assert_eq!(whole.status, ReferenceSetStatus::Unconfirmed);
+    assert_eq!(whole.scope, ReferenceSetScope::WholeSet);
+    assert_eq!(whole.source_collection_id.as_deref(), Some("col-des"));
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, &whole.id)
+            .unwrap()
+            .len(),
+        2
+    );
+    // Uncurated designation contributes nothing until the explicit confirm.
+    assert!(store
+        .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+        .unwrap()
+        .is_empty());
+    store
+        .reference_set_confirm(DEFAULT_OWNER_ID, &whole.id)
+        .unwrap();
+    assert_eq!(
+        store
+            .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+            .unwrap()
+            .len(),
+        2
+    );
+    // Later collection edits never rewrite the materialized evidence.
+    store
+        .collection_add_item(
+            DEFAULT_OWNER_ID,
+            &collection_item("col-des", MediaKind::Photo, "photo-des-c"),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, &whole.id)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Selected snapshots only the marked rows.
+    let selected = store
+        .collection_designate_as_reference_set(
+            DEFAULT_OWNER_ID,
+            "col-des",
+            "selected evidence",
+            "default",
+            ReferenceSetScope::Selected,
+        )
+        .unwrap();
+    let selected_items = store
+        .reference_set_items(DEFAULT_OWNER_ID, &selected.id)
+        .unwrap();
+    assert_eq!(selected_items.len(), 1);
+    assert_eq!(selected_items[0].media_id, "photo-des-a");
+    // Re-designation creates a *new* set; UNIQUE(owner_id, name) still applies.
+    assert!(store
+        .collection_designate_as_reference_set(
+            DEFAULT_OWNER_ID,
+            "col-des",
+            "selected evidence",
+            "default",
+            ReferenceSetScope::Selected,
+        )
+        .is_err());
+
+    // Deleting the collection unsets the designation but keeps the confirmed set and its
+    // items: evidence survives and is reproducible from the remaining sets.
+    assert!(store
+        .collection_delete(DEFAULT_OWNER_ID, "col-des")
+        .unwrap());
+    let survivor = store
+        .reference_set_get(DEFAULT_OWNER_ID, &whole.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(survivor.source_collection_id, None);
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, &whole.id)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        store
+            .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn version_stacks_enforce_one_original_with_cascades() {
+    const OWNER_B: &str = "editor-b";
+    let directory = TestDir::new("version-stacks");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at)
+             VALUES ('editor-b', 'Editor B', '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-stack-a", "stack-sha-a"),
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-stack-b", "stack-sha-b"),
+        )
+        .unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-stack", "stack-video-sha"))
+        .unwrap();
+
+    let stack = version_stack("stack-a", "hero photo versions");
+    store.stack_create(DEFAULT_OWNER_ID, &stack).unwrap();
+    assert_eq!(
+        store.stack_get(DEFAULT_OWNER_ID, "stack-a").unwrap(),
+        Some(stack.clone())
+    );
+    // Owner isolation: same name for another owner, ids never cross owners.
+    let mut other_owner = version_stack("stack-b", "hero photo versions");
+    other_owner.owner_id = OWNER_B.to_owned();
+    store.stack_create(OWNER_B, &other_owner).unwrap();
+    assert!(store.stack_get(OWNER_B, "stack-a").unwrap().is_none());
+    let mut crossed = stack_item(
+        "stack-a",
+        StackMediaKind::Photo,
+        "photo-stack-a",
+        StackItemRole::Original,
+    );
+    crossed.owner_id = OWNER_B.to_owned();
+    assert!(store.stack_add_item(OWNER_B, &crossed).is_err());
+
+    store
+        .stack_add_item(
+            DEFAULT_OWNER_ID,
+            &stack_item(
+                "stack-a",
+                StackMediaKind::Photo,
+                "photo-stack-a",
+                StackItemRole::Original,
+            ),
+        )
+        .unwrap();
+    store
+        .stack_add_item(
+            DEFAULT_OWNER_ID,
+            &stack_item(
+                "stack-a",
+                StackMediaKind::Photo,
+                "photo-stack-b",
+                StackItemRole::Derived,
+            ),
+        )
+        .unwrap();
+    // Exactly one original per stack: a second original (even a video) is refused both by the
+    // API and by the partial unique index.
+    let mut second_original = stack_item(
+        "stack-a",
+        StackMediaKind::Video,
+        "video-stack",
+        StackItemRole::Original,
+    );
+    assert!(store
+        .stack_add_item(DEFAULT_OWNER_ID, &second_original)
+        .is_err());
+    second_original.role = StackItemRole::Derived;
+    store
+        .stack_add_item(DEFAULT_OWNER_ID, &second_original)
+        .unwrap();
+    // Unknown media hits the target-existence trigger.
+    let missing = stack_item(
+        "stack-a",
+        StackMediaKind::Photo,
+        "photo-missing",
+        StackItemRole::Derived,
+    );
+    assert!(store.stack_add_item(DEFAULT_OWNER_ID, &missing).is_err());
+
+    assert_eq!(
+        store
+            .stack_items(DEFAULT_OWNER_ID, "stack-a")
+            .unwrap()
+            .len(),
+        3
+    );
+    let stacks_for_photo = store
+        .stacks_for_asset(DEFAULT_OWNER_ID, StackMediaKind::Photo, "photo-stack-a")
+        .unwrap();
+    assert_eq!(stacks_for_photo.len(), 1);
+    assert_eq!(stacks_for_photo[0].id, "stack-a");
+
+    // Deleting media scrubs dangling stack items through the 0008 cleanup triggers.
+    audit
+        .execute("DELETE FROM photos WHERE id = 'photo-stack-b'", [])
+        .unwrap();
+    assert_eq!(
+        store
+            .stack_items(DEFAULT_OWNER_ID, "stack-a")
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Deleting the stack cascades its items and leaves media untouched.
+    assert!(store.stack_delete(DEFAULT_OWNER_ID, "stack-a").unwrap());
+    assert!(store
+        .stack_get(DEFAULT_OWNER_ID, "stack-a")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .stack_items(DEFAULT_OWNER_ID, "stack-a")
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .photo_by_id(DEFAULT_OWNER_ID, "photo-stack-a")
+        .unwrap()
+        .is_some());
+    assert!(!store.stack_delete(DEFAULT_OWNER_ID, "stack-b").unwrap());
+}
+
+#[test]
+fn saved_searches_round_trip_and_validate_filters() {
+    const OWNER_B: &str = "editor-b";
+    let directory = TestDir::new("saved-searches");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at)
+             VALUES ('editor-b', 'Editor B', '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+    let mut search = saved_search("search-a", "quiet hero frames");
+    search.context_key = "homepage-hero".to_owned();
+    search.filters_json = r#"{"usable": false}"#.to_owned();
+    store
+        .saved_search_create(DEFAULT_OWNER_ID, &search)
+        .unwrap();
+    assert_eq!(
+        store.saved_search_list(DEFAULT_OWNER_ID).unwrap(),
+        vec![search.clone()]
+    );
+    // Name uniqueness per owner; other owners may reuse the name.
+    let mut duplicate = saved_search("search-b", "quiet hero frames");
+    duplicate.id = "search-b".to_owned();
+    assert!(store
+        .saved_search_create(DEFAULT_OWNER_ID, &duplicate)
+        .is_err());
+    let mut other_owner = saved_search("search-c", "quiet hero frames");
+    other_owner.owner_id = OWNER_B.to_owned();
+    store.saved_search_create(OWNER_B, &other_owner).unwrap();
+    assert_eq!(store.saved_search_list(OWNER_B).unwrap().len(), 1);
+
+    // filters_json must be a JSON object.
+    let mut array_filters = saved_search("search-d", "array filters");
+    array_filters.filters_json = "[1, 2]".to_owned();
+    assert!(store
+        .saved_search_create(DEFAULT_OWNER_ID, &array_filters)
+        .is_err());
+    let mut garbage_filters = saved_search("search-e", "garbage filters");
+    garbage_filters.filters_json = "not json".to_owned();
+    assert!(store
+        .saved_search_create(DEFAULT_OWNER_ID, &garbage_filters)
+        .is_err());
+
+    assert!(store
+        .saved_search_delete(DEFAULT_OWNER_ID, "search-a")
+        .unwrap());
+    assert!(store
+        .saved_search_list(DEFAULT_OWNER_ID)
+        .unwrap()
+        .is_empty());
+    assert!(!store
+        .saved_search_delete(DEFAULT_OWNER_ID, "search-a")
+        .unwrap());
+    // Owner scoping: another owner's saved search is untouched.
+    assert!(!store
+        .saved_search_delete(DEFAULT_OWNER_ID, "search-c")
+        .unwrap());
+}
+
+#[test]
+fn safety_flags_write_path_is_state_only_and_never_appends_feedback() {
+    let directory = TestDir::new("safety-flags");
+    let store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-flag-a", "flag-sha-a"),
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-flag-b", "flag-sha-b"),
+        )
+        .unwrap();
+    // Pre-existing editable state must survive a flag write untouched.
+    store
+        .upsert_editorial_annotation(
+            DEFAULT_OWNER_ID,
+            &EditorialAnnotation {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                media_kind: MediaKind::Photo,
+                media_id: "photo-flag-a".to_owned(),
+                description: "quiet portrait".to_owned(),
+                subjects: String::new(),
+                action: String::new(),
+                tags: "portrait".to_owned(),
+                quality: Some(4),
+                standout: true,
+                usable: true,
+                faces_visible: false,
+                nametags_visible: false,
+                blur_required: false,
+                crop_x: None,
+                grade_json: None,
+                notes: "keep".to_owned(),
+                updated_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+            },
+        )
+        .unwrap();
+
+    let flagged = store
+        .set_safety_flags(
+            DEFAULT_OWNER_ID,
+            MediaKind::Photo,
+            "photo-flag-a",
+            SafetyFlags {
+                usable: false,
+                faces_visible: true,
+                nametags_visible: false,
+                blur_required: true,
+            },
+        )
+        .unwrap();
+    assert!(!flagged.usable);
+    assert!(flagged.blur_required);
+    assert_eq!(flagged.description, "quiet portrait");
+    assert_eq!(flagged.tags, "portrait");
+    assert_eq!(flagged.quality, Some(4));
+    assert!(flagged.standout);
+    // The dedicated write path is state-only: no feedback event may appear.
+    assert!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().is_empty());
+
+    // Flags clear again through the same explicit path.
+    let cleared = store
+        .set_safety_flags(
+            DEFAULT_OWNER_ID,
+            MediaKind::Photo,
+            "photo-flag-a",
+            SafetyFlags::default(),
+        )
+        .unwrap();
+    assert!(cleared.usable);
+    assert!(!cleared.blur_required);
+    assert!(!cleared.faces_visible);
+
+    // An asset without an annotation gets the 0002 defaults plus the requested flags.
+    let fresh = store
+        .set_safety_flags(
+            DEFAULT_OWNER_ID,
+            MediaKind::Photo,
+            "photo-flag-b",
+            SafetyFlags {
+                usable: false,
+                faces_visible: false,
+                nametags_visible: false,
+                blur_required: true,
+            },
+        )
+        .unwrap();
+    assert!(!fresh.usable);
+    assert!(fresh.blur_required);
+    assert_eq!(fresh.description, "");
+
+    // Unknown media is refused by the target-existence trigger.
+    assert!(store
+        .set_safety_flags(
+            DEFAULT_OWNER_ID,
+            MediaKind::Photo,
+            "photo-missing",
+            SafetyFlags::default(),
+        )
+        .is_err());
+    assert!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().is_empty());
+}
+
+#[test]
+fn bulk_review_appends_events_and_updates_annotations_atomically() {
+    let directory = TestDir::new("bulk-review");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-review-a", "review-sha-a"),
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-review-b", "review-sha-b"),
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-review-c", "review-sha-c"),
+        )
+        .unwrap();
+    store
+        .collection_create(DEFAULT_OWNER_ID, &collection("col-review", "review batch"))
+        .unwrap();
+
+    let applied = store
+        .bulk_review(
+            DEFAULT_OWNER_ID,
+            &[
+                ReviewOp::Pick {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-a".to_owned(),
+                },
+                ReviewOp::Reject {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-b".to_owned(),
+                },
+                ReviewOp::Rate {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-c".to_owned(),
+                    rating: 4,
+                },
+                ReviewOp::SetFlags {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-a".to_owned(),
+                    flags: SafetyFlags {
+                        usable: false,
+                        faces_visible: false,
+                        nametags_visible: false,
+                        blur_required: true,
+                    },
+                },
+                ReviewOp::AddToCollection {
+                    collection_id: "col-review".to_owned(),
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-a".to_owned(),
+                    context_key: Some("homepage-hero".to_owned()),
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(applied, 5);
+
+    let events = store.feedback_events(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(events.len(), 3, "flag and collection ops are state-only");
+    assert_eq!(events[0].signal, FeedbackSignal::Pick);
+    assert_eq!(events[0].value, Some(1.0));
+    assert_eq!(events[1].signal, FeedbackSignal::Reject);
+    assert_eq!(events[1].value, Some(-1.0));
+    assert_eq!(events[2].signal, FeedbackSignal::Rating);
+    assert_eq!(events[2].value, Some(4.0));
+    let annotation_c = store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, "photo-review-c")
+        .unwrap()
+        .unwrap();
+    assert_eq!(annotation_c.quality, Some(4));
+    let annotation_a = store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, "photo-review-a")
+        .unwrap()
+        .unwrap();
+    assert!(!annotation_a.usable);
+    assert!(annotation_a.blur_required);
+    let items = store
+        .collection_items(DEFAULT_OWNER_ID, "col-review")
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].media_id, "photo-review-a");
+    assert_eq!(items[0].context_key.as_deref(), Some("homepage-hero"));
+
+    // One bad op aborts the whole batch: nothing is appended and no state changes.
+    assert!(store
+        .bulk_review(
+            DEFAULT_OWNER_ID,
+            &[
+                ReviewOp::Pick {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-b".to_owned(),
+                },
+                ReviewOp::Rate {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-b".to_owned(),
+                    rating: 9,
+                },
+            ],
+        )
+        .is_err());
+    assert!(store
+        .bulk_review(
+            DEFAULT_OWNER_ID,
+            &[
+                ReviewOp::Pick {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-review-b".to_owned(),
+                },
+                ReviewOp::Pick {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-missing".to_owned(),
+                },
+            ],
+        )
+        .is_err());
+    assert!(store
+        .bulk_review(
+            DEFAULT_OWNER_ID,
+            &[ReviewOp::AddToCollection {
+                collection_id: "col-missing".to_owned(),
+                media_kind: MediaKind::Photo,
+                media_id: "photo-review-b".to_owned(),
+                context_key: None,
+            }],
+        )
+        .is_err());
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 3);
+    assert!(store
+        .collection_items(DEFAULT_OWNER_ID, "col-review")
+        .unwrap()
+        .iter()
+        .all(|item| item.media_id == "photo-review-a"));
+    let annotation_b = store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, "photo-review-b")
+        .unwrap();
+    assert!(
+        annotation_b.is_none(),
+        "the aborted batch must not leave annotation writes behind"
+    );
+}
+
+#[test]
+fn browse_assets_filters_and_counts() {
+    let directory = TestDir::new("browse-assets");
+    let mut store = Store::open(directory.path()).unwrap();
+    let mut photo_flagged = reference_photo("photo-browse-a", "browse-sha-a");
+    photo_flagged.status = PhotoStatus::Done;
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &photo_flagged)
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-browse-b", "browse-sha-b"),
+        )
+        .unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-browse", "browse-video-sha"))
+        .unwrap();
+    store
+        .insert_shots(
+            DEFAULT_OWNER_ID,
+            std::slice::from_ref(&shot("shot-browse", "video-browse", 0)),
+        )
+        .unwrap();
+    store
+        .upsert_editorial_annotation(
+            DEFAULT_OWNER_ID,
+            &EditorialAnnotation {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                media_kind: MediaKind::Photo,
+                media_id: "photo-browse-a".to_owned(),
+                description: String::new(),
+                subjects: String::new(),
+                action: String::new(),
+                tags: "hero".to_owned(),
+                quality: Some(2),
+                standout: false,
+                usable: false,
+                faces_visible: false,
+                nametags_visible: false,
+                blur_required: true,
+                crop_x: None,
+                grade_json: None,
+                notes: String::new(),
+                updated_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+            },
+        )
+        .unwrap();
+    store
+        .upsert_editorial_annotation(
+            DEFAULT_OWNER_ID,
+            &EditorialAnnotation {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                media_kind: MediaKind::Shot,
+                media_id: "shot-browse".to_owned(),
+                description: String::new(),
+                subjects: String::new(),
+                action: String::new(),
+                tags: String::new(),
+                quality: Some(5),
+                standout: true,
+                usable: true,
+                faces_visible: false,
+                nametags_visible: false,
+                blur_required: false,
+                crop_x: None,
+                grade_json: None,
+                notes: String::new(),
+                updated_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+            },
+        )
+        .unwrap();
+    store
+        .collection_create(DEFAULT_OWNER_ID, &collection("col-browse", "browse set"))
+        .unwrap();
+    let mut contextual = collection_item("col-browse", MediaKind::Photo, "photo-browse-a");
+    contextual.context_key = Some("homepage-hero".to_owned());
+    store
+        .collection_add_item(DEFAULT_OWNER_ID, &contextual)
+        .unwrap();
+    store
+        .stack_create(
+            DEFAULT_OWNER_ID,
+            &version_stack("stack-browse", "browse versions"),
+        )
+        .unwrap();
+    store
+        .stack_add_item(
+            DEFAULT_OWNER_ID,
+            &stack_item(
+                "stack-browse",
+                StackMediaKind::Photo,
+                "photo-browse-b",
+                StackItemRole::Original,
+            ),
+        )
+        .unwrap();
+
+    let ids = |assets: &[crush_store::LibraryAsset]| -> Vec<String> {
+        assets.iter().map(|asset| asset.media_id.clone()).collect()
+    };
+    let all = store
+        .browse_assets(DEFAULT_OWNER_ID, &AssetFilter::default())
+        .unwrap();
+    assert_eq!(
+        ids(&all),
+        vec![
+            "photo-browse-a".to_owned(),
+            "photo-browse-b".to_owned(),
+            "shot-browse".to_owned(),
+        ],
+        "photos sort before shots when no timestamps exist"
+    );
+    let shot_row = all
+        .iter()
+        .find(|asset| asset.media_id == "shot-browse")
+        .unwrap();
+    assert_eq!(shot_row.video_id.as_deref(), Some("video-browse"));
+    assert_eq!(shot_row.path, "/footage/video-browse.mov");
+    assert_eq!(shot_row.quality, Some(5));
+    let photo_b = all
+        .iter()
+        .find(|asset| asset.media_id == "photo-browse-b")
+        .unwrap();
+    assert_eq!(photo_b.stack_ids, vec!["stack-browse".to_owned()]);
+    let photo_a = all
+        .iter()
+        .find(|asset| asset.media_id == "photo-browse-a")
+        .unwrap();
+    assert_eq!(photo_a.collection_ids, vec!["col-browse".to_owned()]);
+    assert_eq!(photo_a.status, "done");
+
+    let set_filter = |mutate: &dyn Fn(&mut AssetFilter)| {
+        let mut filter = AssetFilter::default();
+        mutate(&mut filter);
+        ids(&store.browse_assets(DEFAULT_OWNER_ID, &filter).unwrap())
+    };
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.kind = Some(MediaKind::Shot)),
+        vec!["shot-browse".to_owned()]
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.kind = Some(MediaKind::Photo)).len(),
+        2
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.usable = Some(false)),
+        vec!["photo-browse-a".to_owned()]
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.blur_required = Some(true)),
+        vec!["photo-browse-a".to_owned()]
+    );
+    assert!(set_filter(&|f: &mut AssetFilter| f.faces_visible = Some(true)).is_empty());
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.quality_min = Some(3)),
+        vec!["shot-browse".to_owned()]
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.collection_id = Some("col-browse".to_owned())),
+        vec!["photo-browse-a".to_owned()]
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.stack_id = Some("stack-browse".to_owned())),
+        vec!["photo-browse-b".to_owned()]
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.context_key = Some("homepage-hero".to_owned())),
+        vec!["photo-browse-a".to_owned()]
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.search = Some("video-browse".to_owned())),
+        vec!["shot-browse".to_owned()]
+    );
+    assert_eq!(
+        set_filter(&|f: &mut AssetFilter| f.status = Some("done".to_owned())),
+        vec!["photo-browse-a".to_owned()]
+    );
+
+    let counts = store.library_counts(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(counts.photos, 2);
+    assert_eq!(counts.shots, 1);
+    assert_eq!(counts.picks, 0);
+    assert_eq!(counts.rejects, 0);
+    assert_eq!(counts.flagged, 1);
+}
+
+#[test]
+fn schema_v7_upgrades_to_collections_without_losing_rows() {
+    let directory = TestDir::new("migration-v7-v8");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+        (4, include_str!("../migrations/0004_strong_shot.sql")),
+        (5, include_str!("../migrations/0005_feedback_hardening.sql")),
+        (6, include_str!("../migrations/0006_photo_jobs.sql")),
+        (7, include_str!("../migrations/0007_reference_sets.sql")),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('legacy-video', 'local', '/legacy.mov', 'legacy-sha', 1.0, 24.0,
+                       1920, 1080, 1, 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO shots (
+                id, video_id, owner_id, idx, start_s, end_s, rep_frame_s
+             ) VALUES ('legacy-shot', 'legacy-video', 'local', 0, 0.0, 1.0, 0.5)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO photos (
+                id, owner_id, path, sha256, width, height, format, status
+             ) VALUES ('legacy-photo', 'local', '/legacy.jpg', 'legacy-photo-sha',
+                       100, 100, 'jpeg', 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO editorial_annotations (
+                owner_id, media_kind, media_id, quality, updated_at
+             ) VALUES ('local', 'photo', 'legacy-photo', 4, '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO feedback_events (
+                id, owner_id, media_kind, media_id, signal, value, created_at
+             ) VALUES ('legacy-event', 'local', 'photo', 'legacy-photo', 'pick', 1.0,
+                       '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO reference_sets (
+                id, owner_id, name, context_key, description, scope, status, created_at
+             ) VALUES ('legacy-set', 'local', 'previous work', 'default', '',
+                       'whole_set', 'confirmed', '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO reference_set_items (
+                owner_id, set_id, media_kind, media_id, role, added_at
+             ) VALUES ('local', 'legacy-set', 'photo', 'legacy-photo', 'positive',
+                       '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 8);
+    assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .shots_for_video(DEFAULT_OWNER_ID, "legacy-video")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, "legacy-photo")
+            .unwrap()
+            .unwrap()
+            .quality,
+        Some(4)
+    );
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+            .unwrap(),
+        vec![(MediaKind::Photo, "legacy-photo".to_owned())]
+    );
+    // The v8 organization surfaces are live on the upgraded database.
+    store
+        .collection_create(DEFAULT_OWNER_ID, &collection("col-upgrade", "upgraded"))
+        .unwrap();
+    store
+        .collection_add_item(
+            DEFAULT_OWNER_ID,
+            &collection_item("col-upgrade", MediaKind::Photo, "legacy-photo"),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .collection_items(DEFAULT_OWNER_ID, "col-upgrade")
+            .unwrap()
+            .len(),
+        1
+    );
 }

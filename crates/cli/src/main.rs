@@ -12,7 +12,7 @@ use crush_stage_embed::{
     preprocess::{preprocess, Tensor, IMAGE_SIZE, TENSOR_LEN},
 };
 use crush_stage_split::{ffmpeg, scene};
-use crush_store::{EmbeddingMeta, JobFilter, Store};
+use crush_store::{AssetFilter, EmbeddingMeta, JobFilter, LibraryCounts, Store};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -89,6 +89,27 @@ enum Cmd {
     Style {
         #[command(subcommand)]
         command: StyleCommand,
+    },
+    /// Browse the mixed photo/shot library with organization filters (Task 19a).
+    Library {
+        /// Filter to photos or shots (videos map to their shots).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Filter to one collection id.
+        #[arg(long)]
+        collection: Option<String>,
+        /// Filter to one version-stack id.
+        #[arg(long)]
+        stack: Option<String>,
+        /// Filter to a per-item context key (e.g. homepage-hero).
+        #[arg(long)]
+        context: Option<String>,
+        /// Case-insensitive file-name substring over the stored path.
+        #[arg(long)]
+        search: Option<String>,
+        /// Print JSON rows instead of a table.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -189,6 +210,14 @@ fn main() -> anyhow::Result<()> {
         Cmd::Style {
             command: StyleCommand::Reset,
         } => style_reset(&paths),
+        Cmd::Library {
+            kind,
+            collection,
+            stack,
+            context,
+            search,
+            json,
+        } => library(&paths, kind, collection, stack, context, search, json),
     }
 }
 
@@ -543,6 +572,99 @@ fn style_reset(paths: &AppPaths) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn library(
+    paths: &AppPaths,
+    kind: Option<String>,
+    collection: Option<String>,
+    stack: Option<String>,
+    context: Option<String>,
+    search: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let parsed_kind = match kind.as_deref() {
+        Some("photo") => Some(crush_store::MediaKind::Photo),
+        Some("shot" | "video") => Some(crush_store::MediaKind::Shot),
+        Some(other) => anyhow::bail!("unsupported kind {other:?} (use photo or shot)"),
+        None => None,
+    };
+    let filter = AssetFilter {
+        kind: parsed_kind,
+        collection_id: collection,
+        stack_id: stack,
+        context_key: context,
+        search,
+        ..AssetFilter::default()
+    };
+    let store = Store::open(&paths.root)?;
+    let counts: LibraryCounts = store.library_counts(DEFAULT_OWNER_ID)?;
+    let assets = store.browse_assets(DEFAULT_OWNER_ID, &filter)?;
+    if json {
+        let rows: Vec<serde_json::Value> = assets
+            .iter()
+            .map(|asset| {
+                serde_json::json!({
+                    "media_kind": match asset.media_kind {
+                        crush_store::MediaKind::Photo => "photo",
+                        crush_store::MediaKind::Shot => "shot",
+                    },
+                    "media_id": asset.media_id,
+                    "path": asset.path,
+                    "status": asset.status,
+                    "quality": asset.quality,
+                    "usable": asset.usable,
+                    "blur_required": asset.blur_required,
+                    "video_id": asset.video_id,
+                    "start_s": asset.start_s,
+                    "end_s": asset.end_s,
+                    "collections": asset.collection_ids,
+                    "stacks": asset.stack_ids,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "counts": {
+                    "photos": counts.photos,
+                    "shots": counts.shots,
+                    "picks": counts.picks,
+                    "rejects": counts.rejects,
+                    "flagged": counts.flagged,
+                },
+                "assets": rows,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "photos={} shots={} picks={} rejects={} flagged={}",
+        counts.photos, counts.shots, counts.picks, counts.rejects, counts.flagged
+    );
+    println!(
+        "{:<6} {:<24} {:<10} {:>7}  {:<8} {:<8}  ASSET",
+        "KIND", "ID", "STATUS", "QUALITY", "COLS", "STACKS"
+    );
+    for asset in &assets {
+        let kind = match asset.media_kind {
+            crush_store::MediaKind::Photo => "photo",
+            crush_store::MediaKind::Shot => "shot",
+        };
+        println!(
+            "{:<6} {:<24} {:<10} {:>7}  {:<8} {:<8}  {}",
+            kind,
+            asset.media_id,
+            asset.status,
+            asset
+                .quality
+                .map_or_else(|| "—".to_owned(), |value| value.to_string()),
+            asset.collection_ids.len(),
+            asset.stack_ids.len(),
+            asset.path,
+        );
+    }
+    Ok(())
+}
+
 fn metric_text(metric: Option<f64>) -> String {
     metric.map_or_else(|| "—".to_owned(), |value| format!("{value:.3}"))
 }
@@ -858,6 +980,41 @@ mod tests {
         assert!(matches!(
             cli.cmd,
             Cmd::Search { query, top: 3, json: true } if query == "a rocket launching"
+        ));
+    }
+
+    #[test]
+    fn library_cli_shape_is_stable() {
+        let cli = Cli::try_parse_from([
+            "crushctl",
+            "library",
+            "--kind",
+            "shot",
+            "--collection",
+            "col-1",
+            "--stack",
+            "stack-1",
+            "--context",
+            "homepage-hero",
+            "--search",
+            "rocket",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Library {
+                kind: Some(kind),
+                collection: Some(collection),
+                stack: Some(stack),
+                context: Some(context),
+                search: Some(search),
+                json: true,
+            } if kind == "shot"
+                && collection == "col-1"
+                && stack == "stack-1"
+                && context == "homepage-hero"
+                && search == "rocket"
         ));
     }
 
