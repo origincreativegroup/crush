@@ -3596,12 +3596,20 @@ fn plan_items_validate_shot_boundaries_and_reorder() {
     no_bounds.start_s = None;
     no_bounds.end_s = None;
     assert!(store.plan_add_item(DEFAULT_OWNER_ID, &no_bounds).is_err());
+    // A photo item carrying clip boundaries violates the photos-carry-none rule.
+    let mut photo_with_bounds = plan_item("plan-bound", MediaKind::Photo, "photo-bound");
+    photo_with_bounds.start_s = Some(0.0);
+    photo_with_bounds.end_s = Some(1.0);
     assert!(store
+        .plan_add_item(DEFAULT_OWNER_ID, &photo_with_bounds)
+        .is_err());
+    // A plain photo item (no boundaries) is accepted.
+    store
         .plan_add_item(
             DEFAULT_OWNER_ID,
             &plan_item("plan-bound", MediaKind::Photo, "photo-bound"),
         )
-        .is_err());
+        .unwrap();
 
     // In-bounds edits are accepted and persisted; out-of-bounds edits are refused.
     store
@@ -3834,7 +3842,8 @@ fn plan_revisions_are_append_only_and_restore_revalidates() {
         .unwrap();
     audit
         .execute(
-            "UPDATE shots SET start_s = 0.5, end_s = 0.9 WHERE id = 'shot-rev'",
+            "UPDATE shots SET start_s = 0.5, end_s = 0.9, rep_frame_s = 0.7
+             WHERE id = 'shot-rev'",
             [],
         )
         .unwrap();
