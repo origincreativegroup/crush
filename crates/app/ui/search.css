@@ -191,6 +191,34 @@
   white-space: nowrap;
 }
 
+.result-style {
+  margin-top: 3px;
+  color: #9fb4d8;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.result-breakdown {
+  margin-top: 4px;
+  color: #8a8a93;
+  font-size: 11px;
+}
+
+.result-breakdown summary {
+  cursor: pointer;
+  color: #6f6f78;
+  user-select: none;
+}
+
+.result-breakdown summary:hover {
+  color: #b9b9c0;
+}
+
+.result-breakdown ul {
+  margin: 4px 0 0;
+  padding-left: 14px;
+}
+
 /* ---- detail slide-over ---- */
 
 .detail-panel {

@@ -76,28 +76,41 @@
             if (command === "add_folder" || command === "reindex_video") return { jobId: "background-test" };
             if (command === "search") {
               if (scenario === "empty" || args.q === "zzz") return [];
-              return Array.from({ length: 8 }, (_, i) => ({
-                asset_type: i === 0 ? "photo" : "video", asset_id: i === 0 ? "photo-0" : `shot-${i}`,
-                path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : videos[i % videos.length].path,
-                start_s: i === 0 ? null : i * 3.2, end_s: i === 0 ? null : i * 3.2 + 2.75,
-                thumb_path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : null,
-                score: 0.31 - i * 0.02, cosine: 0.31 - i * 0.02,
-                transcript_snippet: i && i % 2 ? "…and then the rocket cleared the tower…" : null,
-                editorial_quality: i === 0 ? 5 : null, aesthetic_score: i === 0 ? 0.89 : null,
-                personal_style_score: i === 0 ? 0.42 : null,
-              }));
+              return Array.from({ length: 8 }, (_, i) => {
+                const breakdown = {
+                  semantic: 0.24 - i * 0.02,
+                  transcript_boost: i && i % 2 ? 0.06 : 0,
+                  editorial: 0,
+                  general_aesthetic: i === 0 ? 0.06 : 0,
+                  personal_style: i === 0 ? 0.05 : 0,
+                };
+                return {
+                  asset_type: i === 0 ? "photo" : "video", asset_id: i === 0 ? "photo-0" : `shot-${i}`,
+                  path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : videos[i % videos.length].path,
+                  start_s: i === 0 ? null : i * 3.2, end_s: i === 0 ? null : i * 3.2 + 2.75,
+                  thumb_path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : null,
+                  score: breakdown.semantic + breakdown.transcript_boost + breakdown.editorial
+                    + breakdown.general_aesthetic + breakdown.personal_style,
+                  cosine: breakdown.semantic,
+                  transcript_snippet: i && i % 2 ? "…and then the rocket cleared the tower…" : null,
+                  editorial_quality: i === 0 ? 5 : null, aesthetic_score: i === 0 ? 0.89 : null,
+                  personal_style_score: i === 0 ? 0.42 : null,
+                  breakdown,
+                };
+              });
             }
             if (command === "shot_detail") {
               const idx = Number(args.id.split("-")[1]);
               return { id: args.id, videoId: "video-one", videoPath: videos[0].path, idx, shotCount: 12,
                 startS: idx * 3.2, endS: idx * 3.2 + 2.75, repFrameS: idx * 3.2 + 1, fps: 29.97, thumbPath: null,
-                aestheticScore: 0.81, technicalScore: 0.76, compositionScore: 0.84, momentScore: 0.86,
+                aestheticScore: 0.81, personalStyleScore: idx % 2 ? -0.18 : 0.42,
+                technicalScore: 0.76, compositionScore: 0.84, momentScore: 0.86,
                 analysisSummary: "General strong-shot score 81/100 from separate technical, design, and moment evidence.",
                 transcripts: idx % 2 ? [{ id: "seg", startS: idx * 3.2, endS: idx * 3.2 + 2, text: "and then the rocket cleared the tower", confidence: 0.9 }] : [] };
             }
             if (command === "photo_detail") {
               return { id: args.id, photoPath: "/Volumes/Photos/Campaign/select.jpg", width: 6000,
-                height: 4000, format: "jpeg", quality: 5, aestheticScore: 0.89,
+                height: 4000, format: "jpeg", quality: 5, aestheticScore: 0.89, personalStyleScore: 0.42,
                 technicalScore: 0.86, compositionScore: 0.92, momentScore: 0.75,
                 analysisSummary: "General strong-shot score 89/100 from separate technical, design, and moment evidence.",
                 description: "Warm geometric portrait with deliberate negative space.",

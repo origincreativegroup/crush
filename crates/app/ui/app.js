@@ -174,6 +174,7 @@ function videoPresentation(video) {
     const stages = {
       split: ["Splitting", 18],
       embed: ["Embedding", 56],
+      analyze: ["Analyzing", 70],
       transcribe: ["Transcribing", 84],
     };
     const [label, progress] = stages[job.stage] || ["Indexing", 10];

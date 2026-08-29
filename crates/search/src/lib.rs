@@ -51,6 +51,15 @@ pub struct SearchResult {
     pub transcript_snippet: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct ScoreBreakdown {
+    pub semantic: f32,
+    pub transcript_boost: f32,
+    pub editorial: f32,
+    pub general_aesthetic: f32,
+    pub personal_style: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AssetSearchResult {
     pub asset_type: String,
@@ -65,6 +74,7 @@ pub struct AssetSearchResult {
     pub editorial_quality: Option<i64>,
     pub aesthetic_score: Option<f64>,
     pub personal_style_score: Option<f32>,
+    pub breakdown: ScoreBreakdown,
 }
 
 /// Rebuild the active owner-specific visual preference vector from retained feedback.
@@ -448,17 +458,19 @@ impl SearchEngine {
                 store.editorial_annotation(&self.owner_id, MediaKind::Shot, &found.shot_id)?;
             let aesthetic =
                 store.aesthetic_assessment(&self.owner_id, MediaKind::Shot, &found.shot_id)?;
-            let personal_style_score = personal_style_score(
+            let personal_style_score = personal_style_score_with_profile(
                 store,
                 &self.owner_id,
                 MediaKind::Shot,
                 &found.shot_id,
                 style_profile.as_ref(),
             )?;
-            let score = found.score
-                + editorial_adjustment(annotation.as_ref())
-                + general_aesthetic_adjustment(aesthetic.as_ref())
-                + personal_style_score.unwrap_or(0.0) * 0.15;
+            let semantic = found.cosine;
+            let transcript_boost = found.score - found.cosine;
+            let editorial = editorial_adjustment(annotation.as_ref());
+            let general_aesthetic = general_aesthetic_adjustment(aesthetic.as_ref());
+            let personal_style = personal_style_score.unwrap_or(0.0) * 0.15;
+            let score = found.score + editorial + general_aesthetic + personal_style;
             results.push(AssetSearchResult {
                 asset_type: "video".to_owned(),
                 asset_id: found.shot_id,
@@ -477,6 +489,13 @@ impl SearchEngine {
                 editorial_quality: annotation.as_ref().and_then(|value| value.quality),
                 aesthetic_score: aesthetic.map(|value| value.overall),
                 personal_style_score,
+                breakdown: ScoreBreakdown {
+                    semantic,
+                    transcript_boost,
+                    editorial,
+                    general_aesthetic,
+                    personal_style,
+                },
             });
         }
 
@@ -488,17 +507,19 @@ impl SearchEngine {
                 store.editorial_annotation(&self.owner_id, MediaKind::Photo, &found.shot_id)?;
             let aesthetic =
                 store.aesthetic_assessment(&self.owner_id, MediaKind::Photo, &found.shot_id)?;
-            let personal_style_score = personal_style_score(
+            let personal_style_score = personal_style_score_with_profile(
                 store,
                 &self.owner_id,
                 MediaKind::Photo,
                 &found.shot_id,
                 style_profile.as_ref(),
             )?;
-            let score = found.score
-                + editorial_adjustment(annotation.as_ref())
-                + general_aesthetic_adjustment(aesthetic.as_ref())
-                + personal_style_score.unwrap_or(0.0) * 0.15;
+            let semantic = found.cosine;
+            let transcript_boost = found.score - found.cosine;
+            let editorial = editorial_adjustment(annotation.as_ref());
+            let general_aesthetic = general_aesthetic_adjustment(aesthetic.as_ref());
+            let personal_style = personal_style_score.unwrap_or(0.0) * 0.15;
+            let score = found.score + editorial + general_aesthetic + personal_style;
             results.push(AssetSearchResult {
                 asset_type: "photo".to_owned(),
                 asset_id: found.shot_id,
@@ -517,6 +538,13 @@ impl SearchEngine {
                 editorial_quality: annotation.as_ref().and_then(|value| value.quality),
                 aesthetic_score: aesthetic.map(|value| value.overall),
                 personal_style_score,
+                breakdown: ScoreBreakdown {
+                    semantic,
+                    transcript_boost,
+                    editorial,
+                    general_aesthetic,
+                    personal_style,
+                },
             });
         }
 
@@ -557,7 +585,19 @@ fn general_aesthetic_adjustment(assessment: Option<&crush_store::AestheticAssess
     assessment.map_or(0.0, |value| ((value.overall - 0.5) * 0.16) as f32)
 }
 
-fn personal_style_score(
+/// Personal-style affinity for one asset (-1..1), or `None` without an active profile.
+/// Loads the active profile itself so callers outside ranking (detail views) stay simple.
+pub fn personal_style_score(
+    store: &Store,
+    owner_id: &str,
+    media_kind: MediaKind,
+    media_id: &str,
+) -> anyhow::Result<Option<f32>> {
+    let profile = store.active_style_profile(owner_id)?;
+    personal_style_score_with_profile(store, owner_id, media_kind, media_id, profile.as_ref())
+}
+
+fn personal_style_score_with_profile(
     store: &Store,
     owner_id: &str,
     media_kind: MediaKind,
@@ -668,8 +708,8 @@ mod tests {
 
     use crush_core::DEFAULT_OWNER_ID;
     use crush_store::{
-        EmbeddingMeta, FeedbackEvent, FeedbackSignal, MediaKind, Shot, TranscriptSegment, Video,
-        VideoStatus,
+        AestheticAssessment, EmbeddingMeta, FeedbackEvent, FeedbackSignal, MediaKind, Shot,
+        TranscriptSegment, Video, VideoStatus,
     };
     use tempfile::TempDir;
 
@@ -828,6 +868,123 @@ mod tests {
         assert_eq!(results[0].asset_id, "shot-b");
         assert!(results[0].personal_style_score.unwrap() > 0.0);
         assert!(results[1].personal_style_score.unwrap() < 0.0);
+    }
+
+    #[test]
+    fn general_aesthetic_adjustment_is_bounded_and_centered() {
+        let assessment_for = |overall: f64| aesthetic_assessment("shot-x", overall);
+        assert_eq!(
+            general_aesthetic_adjustment(Some(&assessment_for(1.0))),
+            0.08
+        );
+        assert_eq!(
+            general_aesthetic_adjustment(Some(&assessment_for(0.0))),
+            -0.08
+        );
+        assert_eq!(
+            general_aesthetic_adjustment(Some(&assessment_for(0.5))),
+            0.0
+        );
+        assert_eq!(general_aesthetic_adjustment(None), 0.0);
+        for overall in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let adjustment = general_aesthetic_adjustment(Some(&assessment_for(overall)));
+            assert!(
+                adjustment.abs() <= 0.08,
+                "overall {overall} produced adjustment {adjustment}"
+            );
+        }
+    }
+
+    #[test]
+    fn equal_cosine_assets_rank_by_general_aesthetic() {
+        let (_directory, store) = populated_store();
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-a", 1.0))
+            .unwrap();
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-b", 0.0))
+            .unwrap();
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| {
+            let mut vector = [0.0_f32; EMBEDDING_DIM];
+            vector[0] = 1.0;
+            Ok(vector)
+        };
+
+        let results = engine
+            .search_assets(&store, &mut embedder, "neutral query", 2)
+            .unwrap();
+        assert_eq!(results[0].asset_id, "shot-a");
+        assert_eq!(results[1].asset_id, "shot-b");
+        assert_eq!(results[0].cosine, results[1].cosine);
+        assert!((results[0].breakdown.general_aesthetic - 0.08).abs() < 1e-6);
+        assert!((results[1].breakdown.general_aesthetic + 0.08).abs() < 1e-6);
+        for result in &results {
+            let breakdown = result.breakdown;
+            let sum = breakdown.semantic
+                + breakdown.transcript_boost
+                + breakdown.editorial
+                + breakdown.general_aesthetic
+                + breakdown.personal_style;
+            assert!(
+                (sum - result.score).abs() < 1e-4,
+                "breakdown {breakdown:?} does not sum to {}",
+                result.score
+            );
+        }
+
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-a", 0.0))
+            .unwrap();
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-b", 1.0))
+            .unwrap();
+        let results = engine
+            .search_assets(&store, &mut embedder, "neutral query", 2)
+            .unwrap();
+        assert_eq!(results[0].asset_id, "shot-b");
+        assert_eq!(results[1].asset_id, "shot-a");
+    }
+
+    fn aesthetic_assessment(media_id: &str, overall: f64) -> AestheticAssessment {
+        AestheticAssessment {
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            media_kind: MediaKind::Shot,
+            media_id: media_id.to_owned(),
+            sharpness: 0.5,
+            exposure: 0.5,
+            contrast: 0.5,
+            color_harmony: 0.5,
+            balance: 0.5,
+            subject_placement: 0.5,
+            negative_space: 0.5,
+            visual_clarity: 0.5,
+            technical_quality: 0.5,
+            blur_control: 0.5,
+            clipping_control: 0.5,
+            noise_control: 0.5,
+            compression_quality: 0.5,
+            resolution_quality: 0.5,
+            motion_stability: 0.5,
+            duplicate_confidence: 0.0,
+            composition_quality: 0.5,
+            hierarchy: 0.5,
+            leading_lines: 0.5,
+            symmetry: 0.5,
+            crop_potential: 0.5,
+            moment_story: 0.5,
+            expression: 0.5,
+            gesture: 0.5,
+            action: 0.5,
+            novelty: 0.5,
+            pacing: 0.5,
+            repetition_risk: 0.0,
+            overall,
+            confidence: 1.0,
+            explanation_json: "{}".to_owned(),
+            model_version: "test-v1".to_owned(),
+            assessed_at: chrono::Utc::now(),
+        }
     }
 
     fn populated_store() -> (TempDir, Store) {
