@@ -3,11 +3,14 @@ mod macos {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+    };
 
     use anyhow::{ensure, Context};
     use crush_core::cancellation::CancellationToken;
-    use crush_core::job::{JobRecord, JobStatus};
+    use crush_core::job::JobRecord;
     use crush_core::models::{self, ModelStatus};
     use crush_core::paths::AppPaths;
     use crush_core::{Config, DEFAULT_OWNER_ID};
@@ -33,6 +36,9 @@ mod macos {
         background: Arc<Mutex<BTreeMap<String, BackgroundTask>>>,
         active_ingest: Arc<Mutex<Option<ActiveIngest>>>,
         search: Arc<Mutex<Option<SearchRuntime>>>,
+        /// Set by `record_feedback`; the next `search` retrains the style profile instead of
+        /// doing it inline on every pick click.
+        retrain_dirty: Arc<AtomicBool>,
     }
 
     struct ActiveIngest {
@@ -43,6 +49,9 @@ mod macos {
     struct SearchRuntime {
         engine: SearchEngine,
         embedder: Embedder,
+        /// Store `data_version` the engine's vector index was built from; the index reloads
+        /// only when the store changes.
+        generation: Option<i64>,
     }
 
     #[derive(Debug, Clone, Copy, Serialize)]
@@ -217,7 +226,13 @@ mod macos {
             Ok(found
                 .into_iter()
                 .map(|check| ModelFileStatus {
-                    bytes: manifest.files[&check.name].bytes,
+                    bytes: manifest
+                        .files
+                        .get(&check.name)
+                        .with_context(|| {
+                            format!("model manifest is missing entry for {}", check.name)
+                        })?
+                        .bytes,
                     name: check.name,
                     status: model_status_name(check.status).to_owned(),
                 })
@@ -314,7 +329,8 @@ mod macos {
                 detail: Some(format!("indexing {}", input.display())),
                 error: None,
             },
-        )?;
+        )
+        .inspect_err(|_| release_ingest_slot(&state.active_ingest, &job_id))?;
         let initial = command_result(job_snapshot(&state.paths.root, &state.background))?;
         let _ = app.emit("ingest-progress", initial);
 
@@ -331,14 +347,7 @@ mod macos {
             let cancelled = spawned_cancellation.is_cancelled();
             let result = result.map(|summary| ingest_summary(&summary));
             let completed = complete_background(&tasks, &spawned_job_id, result, cancelled);
-            if let Ok(mut active) = active_ingest.lock() {
-                if active
-                    .as_ref()
-                    .is_some_and(|current| current.job_id == spawned_job_id)
-                {
-                    *active = None;
-                }
-            }
+            release_ingest_slot(&active_ingest, &spawned_job_id);
             if completed.is_ok() {
                 if let Ok(snapshot) = job_snapshot(&data_dir, &tasks) {
                     let _ = app.emit("ingest-progress", snapshot);
@@ -352,19 +361,14 @@ mod macos {
     fn list_videos(state: State<'_, RuntimeState>) -> CommandResult<Vec<VideoView>> {
         command_result((|| {
             let store = Store::open(&state.paths.root)?;
+            let failures = store
+                .failed_job_errors(DEFAULT_OWNER_ID)?
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
             let mut output = Vec::new();
             for video in store.videos(DEFAULT_OWNER_ID)? {
-                let jobs = store.jobs(
-                    DEFAULT_OWNER_ID,
-                    &JobFilter {
-                        video_id: Some(video.id.clone()),
-                        ..JobFilter::default()
-                    },
-                )?;
                 let last_error = if video.status == VideoStatus::Failed {
-                    jobs.iter()
-                        .find(|job| job.status == JobStatus::Failed)
-                        .and_then(|job| job.error.clone())
+                    failures.get(&video.id).cloned()
                 } else {
                     None
                 };
@@ -459,7 +463,8 @@ mod macos {
                     error: None,
                 },
             )
-            .map_err(anyhow::Error::msg)?;
+            .map_err(anyhow::Error::msg)
+            .inspect_err(|_| release_ingest_slot(&state.active_ingest, &job_id))?;
             let initial = job_snapshot(&state.paths.root, &state.background)?;
             let _ = app.emit("ingest-progress", initial);
 
@@ -476,14 +481,7 @@ mod macos {
                     .map(|()| "re-index complete".to_owned());
                 let cancelled = spawned_cancellation.is_cancelled();
                 let completed = complete_background(&tasks, &spawned_job_id, result, cancelled);
-                if let Ok(mut active) = active_ingest.lock() {
-                    if active
-                        .as_ref()
-                        .is_some_and(|current| current.job_id == spawned_job_id)
-                    {
-                        *active = None;
-                    }
-                }
+                release_ingest_slot(&active_ingest, &spawned_job_id);
                 if completed.is_ok() {
                     if let Ok(snapshot) = job_snapshot(&data_dir, &tasks) {
                         let _ = app.emit("ingest-progress", snapshot);
@@ -503,11 +501,12 @@ mod macos {
         let config = state.config.clone();
         let paths = state.paths.clone();
         let cache = Arc::clone(&state.search);
+        let retrain_dirty = Arc::clone(&state.retrain_dirty);
         tauri::async_runtime::spawn_blocking(move || {
             command_result((|| {
                 ensure!(!q.trim().is_empty(), "search query must not be empty");
                 ensure!(top > 0, "top must be greater than zero");
-                let store = Store::open(&paths.root)?;
+                let mut store = Store::open(&paths.root)?;
                 let mut runtime = lock_anyhow(&cache)?;
                 if runtime.is_none() {
                     *runtime = Some(SearchRuntime {
@@ -524,10 +523,24 @@ mod macos {
                             ProviderPreference::Cpu,
                             config.limits.threads,
                         )?,
+                        generation: None,
                     });
                 }
                 let runtime = runtime.as_mut().context("search runtime was not created")?;
-                runtime.engine.reload(&store)?;
+                // Feedback recorded since the last search defers its retrain to here so a
+                // pick click never blocks the main thread on a full feedback-table pass.
+                // On failure, re-arm the flag so the next search retries it.
+                if retrain_dirty.swap(false, Ordering::AcqRel) {
+                    if let Err(error) = retrain_style_profile(&mut store, DEFAULT_OWNER_ID) {
+                        retrain_dirty.store(true, Ordering::Release);
+                        eprintln!("deferred style retrain failed: {error:#}");
+                    }
+                }
+                let generation = store.data_version()?;
+                if runtime.generation != Some(generation) {
+                    runtime.engine.reload(&store)?;
+                    runtime.generation = Some(generation);
+                }
                 let SearchRuntime { engine, embedder } = runtime;
                 engine.search_assets(&store, &mut |text: &str| embedder.embed_text(text), &q, top)
             })())
@@ -679,7 +692,7 @@ mod macos {
     }
 
     #[tauri::command]
-    fn record_feedback(
+    async fn record_feedback(
         asset_type: String,
         id: String,
         signal: String,
@@ -687,39 +700,78 @@ mod macos {
         context: Option<String>,
         state: State<'_, RuntimeState>,
     ) -> CommandResult<String> {
-        command_result((|| {
-            let media_kind = match asset_type.as_str() {
-                "photo" => MediaKind::Photo,
-                "video" => MediaKind::Shot,
-                _ => anyhow::bail!("unsupported asset type {asset_type:?}"),
-            };
-            let signal = match signal.as_str() {
-                "pick" => FeedbackSignal::Pick,
-                "reject" => FeedbackSignal::Reject,
-                "rating" => FeedbackSignal::Rating,
-                _ => anyhow::bail!("unsupported feedback signal {signal:?}"),
-            };
-            let event_id = Uuid::new_v4().to_string();
-            let mut store = Store::open(&state.paths.root)?;
-            store.append_feedback(
-                DEFAULT_OWNER_ID,
-                &FeedbackEvent {
-                    id: event_id.clone(),
-                    owner_id: DEFAULT_OWNER_ID.to_owned(),
-                    media_kind,
-                    media_id: id,
-                    signal,
-                    value,
-                    compared_media_kind: None,
-                    compared_media_id: None,
-                    context_json: serde_json::json!({ "query": context.unwrap_or_default() })
-                        .to_string(),
-                    created_at: chrono::Utc::now(),
-                },
-            )?;
-            let _ = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)?;
-            Ok(event_id)
-        })())
+        let paths = state.paths.clone();
+        let retrain_dirty = Arc::clone(&state.retrain_dirty);
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result((|| {
+                let media_kind = match asset_type.as_str() {
+                    "photo" => MediaKind::Photo,
+                    "video" => MediaKind::Shot,
+                    _ => anyhow::bail!("unsupported asset type {asset_type:?}"),
+                };
+                let signal = match signal.as_str() {
+                    "pick" => FeedbackSignal::Pick,
+                    "reject" => FeedbackSignal::Reject,
+                    "rating" => FeedbackSignal::Rating,
+                    _ => anyhow::bail!("unsupported feedback signal {signal:?}"),
+                };
+                // Feedback events are append-only, so anything that slips through here is
+                // permanent: validate the value and the asset before writing.
+                let value = match signal {
+                    FeedbackSignal::Rating => {
+                        let value =
+                            value.context("rating feedback requires a value from 1 to 5")?;
+                        ensure!(
+                            (1.0..=5.0).contains(&value),
+                            "rating feedback must be between 1 and 5, got {value}"
+                        );
+                        Some(value)
+                    }
+                    FeedbackSignal::Pick => {
+                        ensure!(value == Some(1.0), "pick feedback requires value 1");
+                        Some(1.0)
+                    }
+                    FeedbackSignal::Reject => {
+                        ensure!(value == Some(-1.0), "reject feedback requires value -1");
+                        Some(-1.0)
+                    }
+                    _ => anyhow::bail!("unsupported feedback signal"),
+                };
+                let store = Store::open(&paths.root)?;
+                let exists = match media_kind {
+                    MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
+                    MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
+                };
+                let kind = match media_kind {
+                    MediaKind::Photo => "photo",
+                    MediaKind::Shot => "shot",
+                };
+                ensure!(exists, "no {kind} exists with id {id}");
+                let event_id = Uuid::new_v4().to_string();
+                store.append_feedback(
+                    DEFAULT_OWNER_ID,
+                    &FeedbackEvent {
+                        id: event_id.clone(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        media_kind,
+                        media_id: id,
+                        signal,
+                        value,
+                        compared_media_kind: None,
+                        compared_media_id: None,
+                        context_json: serde_json::json!({ "query": context.unwrap_or_default() })
+                            .to_string(),
+                        created_at: chrono::Utc::now(),
+                    },
+                )?;
+                // Retraining scans the whole feedback table, so it is deferred to the next
+                // search rather than run inline on every click.
+                retrain_dirty.store(true, Ordering::Release);
+                Ok(event_id)
+            })())
+        })
+        .await
+        .map_err(|error| format!("feedback worker failed: {error}"))?
     }
 
     #[tauri::command]
@@ -858,6 +910,19 @@ mod macos {
         Ok(())
     }
 
+    /// Clears the ingest slot only if it still belongs to `job_id`, so a slot claimed by a
+    /// newer ingest is never released by an older task's cleanup path.
+    fn release_ingest_slot(active_ingest: &Mutex<Option<ActiveIngest>>, job_id: &str) {
+        if let Ok(mut active) = active_ingest.lock() {
+            if active
+                .as_ref()
+                .is_some_and(|current| current.job_id == job_id)
+            {
+                *active = None;
+            }
+        }
+    }
+
     fn complete_background<T: ToString>(
         tasks: &Arc<Mutex<BTreeMap<String, BackgroundTask>>>,
         job_id: &str,
@@ -959,6 +1024,7 @@ mod macos {
                     background: Arc::new(Mutex::new(BTreeMap::new())),
                     active_ingest: Arc::new(Mutex::new(None)),
                     search: Arc::new(Mutex::new(None)),
+                    retrain_dirty: Arc::new(AtomicBool::new(false)),
                 });
                 Ok(())
             })
@@ -1014,7 +1080,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=4"));
+            assert!(report.contains("schema=6"));
         }
     }
 }

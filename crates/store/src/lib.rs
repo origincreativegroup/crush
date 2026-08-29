@@ -4,6 +4,7 @@
 //! records, vector serialization, FTS synchronization, job history, and deep integrity checks.
 
 use std::{
+    collections::HashSet,
     convert::TryFrom,
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -446,6 +447,21 @@ impl Store {
                 |row| row.get(0),
             )
             .context("failed to read schema version")
+    }
+
+    /// Cheap change marker for cache-reload decisions, e.g. the app's vector index.
+    ///
+    /// `PRAGMA data_version` is the simplest correct choice here: it stays stable while only
+    /// this connection reads and changes whenever any other connection commits. Every Crush
+    /// command opens its own short-lived `Store`, so comparing the value across commands
+    /// detects every commit made in between — by the pipeline, other commands, `crushctl`,
+    /// or another process — without tracking writers in Rust. Writes made on this same
+    /// connection do not move the value, which is fine: callers that write (like a retrain)
+    /// only touch non-vector tables, and the next command's fresh connection sees the bump.
+    pub fn data_version(&self) -> anyhow::Result<i64> {
+        self.connection
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .context("failed to read the database data version")
     }
 
     pub fn upsert_photo(&self, owner_id: &str, photo: &Photo) -> anyhow::Result<Photo> {
@@ -2135,6 +2151,32 @@ impl Store {
         )?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to list jobs")
+    }
+
+    /// One latest failure error per video, newest failed job first.
+    /// Lets callers annotate the library with a single query instead of one per video.
+    pub fn failed_job_errors(&self, owner_id: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT video_id, error
+             FROM jobs
+             WHERE owner_id = ?1
+               AND status = 'failed'
+               AND video_id IS NOT NULL
+               AND error IS NOT NULL
+             ORDER BY started_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![owner_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut seen = HashSet::new();
+        let mut output = Vec::new();
+        for row in rows {
+            let (video_id, error) = row.context("failed to list failed job errors")?;
+            if seen.insert(video_id.clone()) {
+                output.push((video_id, error));
+            }
+        }
+        Ok(output)
     }
 
     pub fn fail_running_jobs_as_interrupted(&self, owner_id: &str) -> anyhow::Result<usize> {

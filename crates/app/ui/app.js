@@ -159,7 +159,11 @@ async function onDownloadProgress(event) {
   } else if (progress.status === "done") {
     state.modelJob = null;
     state.modelFailure = null;
-    await refreshModels();
+    try {
+      await refreshModels();
+    } catch (error) {
+      state.modelFailure = String(error);
+    }
   }
   renderModels();
 }
@@ -462,7 +466,11 @@ async function installDragDrop() {
       setVisible(elements.dropOverlay, true);
     } else if (event.payload.type === "drop") {
       setVisible(elements.dropOverlay, false);
-      const [path] = event.payload.paths;
+      const paths = event.payload.paths || [];
+      const [path] = paths;
+      if (paths.length > 1) {
+        showMessage(`Dropped ${paths.length} folders — indexing the first one only.`);
+      }
       if (path) await addPath(path);
     } else {
       setVisible(elements.dropOverlay, false);
@@ -474,7 +482,15 @@ async function showLibrary() {
   setVisible(elements.boot, false);
   setVisible(elements.firstRun, false);
   setVisible(elements.appShell, true);
-  await refreshLibrary();
+  try {
+    await refreshLibrary();
+  } catch (error) {
+    // The shell is already visible, so render the empty state (or the last known table)
+    // instead of leaving the user on a blank screen.
+    showMessage(`Could not load the library: ${String(error)}`, true);
+    renderVideos();
+    managePolling();
+  }
 }
 
 async function runDoctor() {
@@ -526,5 +542,6 @@ async function initialize() {
 }
 
 initialize().catch((error) => {
+  setVisible(elements.boot, true);
   elements.boot.querySelector("p").textContent = `Could not open Crush: ${String(error)}`;
 });

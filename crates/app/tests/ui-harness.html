@@ -3,250 +3,33 @@
   <head>
     <meta charset="UTF-8" />
     <title>Crush UI harness</title>
-    <script>
-      const scenario = new URLSearchParams(location.search).get("scenario") || "empty";
-      const listeners = new Map();
-      const photoPreview = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='800'%3E%3Crect width='1200' height='800' fill='%2322304e'/%3E%3Ccircle cx='760' cy='360' r='180' fill='%23e6a648'/%3E%3Cpath d='M0 650 L420 280 L760 650 Z' fill='%234f8cff'/%3E%3C/svg%3E";
-      const modelFiles = [
-        { name: "clip-image.onnx", bytes: 351000000, status: scenario.startsWith("first-run") ? "missing" : "present" },
-        { name: "clip-text.onnx", bytes: 254000000, status: scenario.startsWith("first-run") ? "missing" : "present" },
-        { name: "bpe_simple_vocab_16e6.txt.gz", bytes: 1300000, status: scenario.startsWith("first-run") ? "missing" : "present" },
-        { name: "ggml-small.bin", bytes: 488000000, status: scenario.startsWith("first-run") ? "missing" : "present" },
-      ];
-      const videos = scenario === "empty" ? [] : [
-        {
-          assetType: "video",
-          id: "video-one",
-          path: "/Volumes/Footage/Launch Day/rocket-launch.mov",
-          durationS: 43.2,
-          fps: 29.97,
-          width: 3840,
-          height: 2160,
-          hasAudio: true,
-          status: scenario === "failed" ? "failed" : scenario === "active" ? "split" : "done",
-          indexedAt: "2026-08-28T12:00:00Z",
-          shots: 12,
-          lastError: scenario === "failed" ? "FFmpeg could not decode frame 218 near 00:00:07.08" : null,
-        },
-        {
-          assetType: "video",
-          id: "video-two",
-          path: "/Volumes/Footage/Interviews/goodnight-earth-vertical.mp4",
-          durationS: 78.8,
-          fps: 24,
-          width: 1080,
-          height: 1920,
-          hasAudio: true,
-          status: "done",
-          indexedAt: "2026-08-28T12:02:00Z",
-          shots: 7,
-          lastError: null,
-        },
-      ];
-      const pipeline = scenario === "active"
-        ? [{ id: "job-active", owner_id: "local", video_id: "video-one", stage: "embed", status: "running", error: null, debug_dir: null }]
-        : scenario === "failed"
-          ? [{ id: "job-failed", owner_id: "local", video_id: "video-one", stage: "split", status: "failed", error: videos[0].lastError, debug_dir: "/tmp/crush-debug/job-failed" }]
-          : [];
-      const background = scenario === "active"
-        ? [{ jobId: "background-active", kind: "ingest", status: "running", detail: "indexing fixtures", error: null }]
-        : [];
-
-      window.__TAURI__ = {
-        core: {
-          convertFileSrc: (path) => path.endsWith("select.jpg") ? photoPreview : `asset://localhost/${encodeURIComponent(path)}`,
-          async invoke(command, args = {}) {
-            if (command === "models_status") return modelFiles;
-            if (command === "models_download") {
-              setTimeout(() => {
-                const handler = listeners.get("download-progress");
-                if (!handler) return;
-                if (scenario === "first-run-failed") {
-                  handler({ payload: { jobId: "models-test", name: null, downloaded: null, total: null, status: "failed", detail: null, error: "The network connection was interrupted." } });
-                } else {
-                  handler({ payload: { jobId: "models-test", name: "clip-image.onnx", downloaded: 182000000, total: 351000000, status: "running", detail: null, error: null } });
-                }
-              }, 60);
-              return { jobId: "models-test" };
-            }
-            if (command === "list_videos") return videos;
-            if (command === "job_status") return { background, pipeline };
-            if (command === "doctor") return "Crush doctor\nffmpeg source=Bundled\nmodels=4/4 present";
-            if (command === "cancel_ingest") return true;
-            if (command === "add_folder" || command === "reindex_video") return { jobId: "background-test" };
-            if (command === "search") {
-              if (scenario === "empty" || args.q === "zzz") return [];
-              return Array.from({ length: 8 }, (_, i) => {
-                const semantic = 0.24 - i * 0.02;
-                const transcriptBoost = i && i % 2 ? 0.06 : 0;
-                const generalAesthetic = i === 0 ? 0.06 : 0;
-                const personalAffinity = i === 0 ? 0.063 : 0;
-                const breakdown = {
-                  semantic,
-                  transcript_boost: transcriptBoost,
-                  editorial: 0,
-                  general_aesthetic: generalAesthetic,
-                  penalties: 0,
-                  personal_affinity: personalAffinity,
-                  context_fit: 0,
-                  total: semantic + transcriptBoost + generalAesthetic + personalAffinity,
-                };
-                return {
-                  asset_type: i === 0 ? "photo" : "video", asset_id: i === 0 ? "photo-0" : `shot-${i}`,
-                  path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : videos[i % videos.length].path,
-                  start_s: i === 0 ? null : i * 3.2, end_s: i === 0 ? null : i * 3.2 + 2.75,
-                  thumb_path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : null,
-                  score: breakdown.total,
-                  cosine: breakdown.semantic,
-                  transcript_snippet: i && i % 2 ? ".and then the rocket cleared the tower." : null,
-                  editorial_quality: i === 0 ? 5 : null, aesthetic_score: i === 0 ? 0.89 : null,
-                  personal_style_score: i === 0 ? 0.42 : null,
-                  score_breakdown: breakdown,
-                };
-              });
-            }
-            if (command === "shot_detail") {
-              const idx = Number(args.id.split("-")[1]);
-              return { id: args.id, videoId: "video-one", videoPath: videos[0].path, idx, shotCount: 12,
-                startS: idx * 3.2, endS: idx * 3.2 + 2.75, repFrameS: idx * 3.2 + 1, fps: 29.97, thumbPath: null,
-                aestheticScore: 0.81, personalStyleScore: idx % 2 ? -0.18 : 0.42,
-                technicalScore: 0.76, compositionScore: 0.84, momentScore: 0.86,
-                analysisSummary: "General strong-shot score 81/100 from separate technical, design, and moment evidence.",
-                transcripts: idx % 2 ? [{ id: "seg", startS: idx * 3.2, endS: idx * 3.2 + 2, text: "and then the rocket cleared the tower", confidence: 0.9 }] : [] };
-            }
-            if (command === "photo_detail") {
-              return { id: args.id, photoPath: "/Volumes/Photos/Campaign/select.jpg", width: 6000,
-                height: 4000, format: "jpeg", quality: 5, aestheticScore: 0.89, personalStyleScore: 0.42,
-                technicalScore: 0.86, compositionScore: 0.92, momentScore: 0.75,
-                analysisSummary: "General strong-shot score 89/100 from separate technical, design, and moment evidence.",
-                description: "Warm geometric portrait with deliberate negative space.",
-                tags: "warm, geometric, campaign", notes: "Prefer the asymmetry." };
-            }
-            if (command === "shot_at_index") return `shot-${args.idx}`;
-            if (command === "record_feedback") return "feedback-test";
-            if (command === "export_clip") return { path: args.out, mode: "Copy" };
-            if (command === "open_in_finder") return null;
-            throw new Error(`Unhandled command: ${command}`);
-          },
-        },
-        event: {
-          async listen(name, handler) {
-            listeners.set(name, handler);
-            return () => listeners.delete(name);
-          },
-        },
-        window: {
-          getCurrentWindow() {
-            return { async onDragDropEvent(handler) { listeners.set("drag-drop", handler); return () => {}; } };
-          },
-        },
-        dialog: { async open() { return null; }, async save(options) { return `/tmp/${options.defaultPath}`; } },
-        clipboardManager: { async writeText() {} },
-      };
-    </script>
-    <link rel="stylesheet" href="../ui/styles.css" />
-    <link rel="stylesheet" href="../ui/search.css" />
-    <script src="../ui/app.js" defer></script>
-    <script src="../ui/search.js" defer></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #0d1117;
+      }
+      /* Same logical size as the shipped Tauri window (1100x720 minimum). */
+      #app-frame {
+        border: 0;
+        width: 1100px;
+        height: 720px;
+        display: block;
+      }
+    </style>
   </head>
   <body>
-    <div id="boot" class="boot-screen"><div class="boot-mark">C</div><p>Opening Crush…</p></div>
-    <main id="first-run" class="first-run" hidden>
-      <section class="setup-card" aria-labelledby="setup-title">
-        <div class="brand-lockup"><div class="brand-mark">C</div><div><p class="eyebrow">First-run setup</p><h1 id="setup-title">Downloading models</h1></div></div>
-        <p class="setup-copy">About 700 MB, one time. Models stay on this Mac and your footage never leaves it.</p>
-        <div id="model-list" class="model-list" aria-live="polite"></div>
-        <p id="model-error" class="error-message" role="alert" hidden></p>
-        <div class="setup-actions"><button id="retry-models" class="button secondary" type="button" hidden>Retry download</button><button id="continue-models" class="button primary" type="button" disabled>Continue</button></div>
-      </section>
-    </main>
-    <div id="app-shell" class="app-shell" hidden>
-      <aside class="sidebar"><div class="sidebar-brand"><div class="brand-mark small">C</div><span>Crush</span></div><nav><button class="nav-item" id="nav-search"><span class="nav-icon">⌕</span>Search</button><button class="nav-item active" id="nav-library"><span class="nav-icon">▦</span>Library</button></nav><footer class="sidebar-footer"><div id="indexing-status" class="indexing-status"><span class="status-dot idle"></span><span>Library idle</span></div><button id="doctor-link" class="doctor-link">Run Doctor</button></footer></aside>
-      <main id="library-view" class="workspace" aria-labelledby="library-title">
-        <header class="toolbar"><div><p class="eyebrow">Footage index</p><h1 id="library-title">Library</h1></div><div class="toolbar-actions"><button id="reindex" class="button secondary" disabled>Re-index selected</button><button id="cancel" class="button danger" hidden>Cancel</button><button id="add-folder" class="button primary">Add Folder…</button></div></header>
-        <div id="library-message" class="library-message" role="status" hidden></div>
-        <section id="library-content" class="library-content"><div id="empty-library" class="empty-state" hidden><div class="empty-icon">＋</div><h2>No footage yet</h2><p>No footage indexed yet. Add a folder to start indexing, or run <span class="mono">crushctl ingest</span>.</p><button id="empty-add-folder" class="button primary">Add Folder…</button></div><div id="video-table-wrap" class="table-wrap" hidden><table class="video-table"><thead><tr><th class="select-column"></th><th>File</th><th>Duration</th><th>Resolution</th><th>Status</th><th class="number-column">Shots</th><th class="expand-column"></th></tr></thead><tbody id="video-rows"></tbody></table></div></section>
-        <div id="drop-overlay" class="drop-overlay" hidden><div><span>↓</span><strong>Drop folder to index</strong></div></div>
-      </main>
-      <main id="search-view" class="workspace search-workspace" aria-labelledby="search-title" hidden>
-        <header class="toolbar search-toolbar">
-          <div class="search-box">
-            <span class="search-icon" aria-hidden="true">⌕</span>
-            <input id="search-input" type="search" autocomplete="off" spellcheck="false"
-              placeholder="Describe the shot… e.g. wide shot of the storefront at dusk" aria-label="Search footage" />
-            <kbd class="search-kbd" aria-hidden="true">⌘F</kbd>
-          </div>
-          <div class="search-meta">
-            <span id="result-count" class="result-count" aria-live="polite"></span>
-            <label class="top-select"><span class="sr-only">Results to show</span>
-              <select id="top-select"><option value="25">Top 25</option><option value="50" selected>Top 50</option><option value="100">Top 100</option></select>
-            </label>
-          </div>
-        </header>
-        <h1 id="search-title" class="sr-only">Search</h1>
-        <div id="search-message" class="library-message search-message" role="status" hidden></div>
-        <section id="search-content" class="search-content">
-          <div id="search-nothing-indexed" class="empty-state" hidden>
-            <div class="empty-icon" aria-hidden="true">▦</div>
-            <h2>Nothing indexed yet</h2>
-            <p>Add a folder in the Library and Crush will split, describe, and transcribe every shot.</p>
-            <button id="go-library" class="button primary" type="button">Open Library</button>
-          </div>
-          <div id="search-idle" class="empty-state muted" hidden>
-            <p>Type what you're looking for and press Enter.</p>
-          </div>
-          <div id="search-no-matches" class="empty-state muted" hidden>
-            <h2>No matches</h2>
-            <p>Try broader words — CLIP understands objects, scenes, and actions better than names.</p>
-          </div>
-          <div id="search-error" class="error-message search-error" role="alert" hidden></div>
-          <div id="results-grid" class="results-grid" role="listbox" aria-label="Search results" hidden></div>
-        </section>
-      </main>
-
-      <aside id="detail" class="detail-panel" role="dialog" aria-label="Asset detail" tabindex="-1" hidden>
-        <div class="detail-head">
-          <div>
-            <p id="detail-kind" class="eyebrow">Asset detail</p>
-            <div id="detail-file" class="file-name detail-file"></div>
-          </div>
-          <button id="detail-close" class="icon-button" type="button" aria-label="Close">×</button>
-        </div>
-        <div class="player-box">
-          <video id="detail-video" preload="metadata" playsinline></video>
-          <img id="detail-photo" alt="Selected photo" hidden />
-          <div id="player-hint" class="player-hint" aria-hidden="true">Space play/pause · L loop · ← → shots</div>
-        </div>
-        <div class="detail-times">
-          <span id="detail-timecodes" class="mono"></span>
-          <span id="detail-shot-index" class="detail-shot-index"></span>
-        </div>
-        <div class="detail-actions">
-          <button id="copy-timecodes" class="button secondary" type="button">Copy path + timecodes</button>
-          <button id="export-clip" class="button secondary" type="button">Export clip…</button>
-          <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>
-        </div>
-        <div class="detail-feedback" aria-label="Editorial feedback">
-          <span class="eyebrow">Teach my style</span>
-          <button id="feedback-pick" class="button secondary" type="button">Pick</button>
-          <button id="feedback-reject" class="button secondary" type="button">Reject</button>
-          <label class="rating-control"><span class="sr-only">Quality rating</span>
-            <select id="feedback-rating" aria-label="Quality rating">
-              <option value="">Rate…</option><option value="1">★ 1</option><option value="2">★ 2</option>
-              <option value="3">★ 3</option><option value="4">★ 4</option><option value="5">★ 5</option>
-            </select>
-          </label>
-        </div>
-        <div class="detail-nav">
-          <button id="prev-shot" class="button secondary" type="button">← Prev shot</button>
-          <button id="next-shot" class="button secondary" type="button">Next shot →</button>
-        </div>
-        <section class="detail-transcript" aria-label="Asset notes">
-          <p id="detail-notes-label" class="eyebrow">Transcript</p>
-          <div id="detail-transcript"></div>
-        </section>
-      </aside>
-    </div>
-    <dialog id="doctor-dialog" class="doctor-dialog"><div class="dialog-heading"><div><p class="eyebrow">Local runtime</p><h2>Doctor</h2></div><button id="close-doctor" class="icon-button">×</button></div><pre id="doctor-result">Ready.</pre><button id="run-doctor" class="button primary">Run Doctor</button></dialog>
+    <iframe id="app-frame" title="Crush app under test"></iframe>
+    <script>
+      // The real app runs unmodified inside the iframe; there is no duplicated DOM here.
+      // scripts/ui-harness.mjs injects crates/app/tests/mock-bridge.js via addInitScript so
+      // the mock bridge exists inside the iframe before app.js and search.js parse. The
+      // scenario rides on the iframe URL so mock-bridge.js can read window.location.search.
+      const scenario = new URLSearchParams(window.location.search).get("scenario") || "empty";
+      document
+        .getElementById("app-frame")
+        .setAttribute("src", `../ui/index.html?scenario=${encodeURIComponent(scenario)}`);
+    </script>
   </body>
 </html>
