@@ -38,11 +38,14 @@ render-golden review in Task 021, and clean-machine acceptance before release in
 `TASK-020-impl-plan.md` is now explicitly reconstructed. 018b was merged in #29; its automatic
 “Learned” claim is replaced with experimental/review-pending copy. Style proof remains OPEN
 (pair/asset leakage, residual-vs-composed evaluation, evidence withdrawal require follow-up).
-020b provides plans UI, frozen profile provenance and truly context-scoped explicit picks.
+020b is merged in #36 and provides plans UI, frozen profile provenance and truly
+context-scoped explicit picks. Task 021 has begun with private no-clobber clip export staging;
+the full renderer and render-golden human review remain open.
 Task 020 overall still lacks automatic sequence/repetition judgment; do not claim it exists.
 Historical statements below describe the incoming handoff, not fresh acceptance of those claims.
 
-Tasks 000–019 are COMPLETE and merged; TASK-020a is merged and TASK-020b is the next work item.
+Tasks 000–019 are COMPLETE and merged; TASK-020a and TASK-020b are merged. Task 020's
+automatic sequence/repetition follow-up remains explicit rather than being misreported as shipped.
 Every task landed as its own squash PR gated by Linux + macOS CI: #14–#19 (original 012–017 work),
 #21 (025 store hardening), #22 (024 fidelity truthfulness + ranking breakdown), #23 (026 pipeline
 ops), #24+#27 (027 app robustness + integration repair), #25 (018a style learner), #29 (018b style
@@ -64,8 +67,10 @@ Known caveats carried forward:
   before any UI may claim "learned"), Task 021 render-golden review, Task 023 clean-machine
   acceptance. Plan files and per-task acceptance records live in `.tasks/done/`.
 
-Next: **TASK-020b** (plans UI: two-column General/Personalized candidates, plan editor, provenance
-pills) per `.tasks/done/TASK-020-impl-plan.md`, then Tasks 021–023.
+Next: **TASK-021** non-destructive recipes and media rendering per
+`.tasks/backlog/TASK-021-impl-plan.md`. The current branch contains only the no-clobber clip-export
+safety foundation. Do not proceed to 022 or call 021 complete until the full render contract and
+John's render-golden review are satisfied; 023 retains its clean-machine human stop.
 
 ## Previous implementation state (2026-08-28)
 

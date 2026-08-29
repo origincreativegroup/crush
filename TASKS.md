@@ -24,8 +24,8 @@
 | TASK-017 | General strong-shot and explainable aesthetic analysis | Codex (Mac) | done — cold-start technical/design/moment evidence, calibrated and backfillable |
 | TASK-018 | Previous-work examples + personal-style learner/evaluation | OpenCode | 018a/b merged (#25/#29); human style proof OPEN — fresh review found evaluation gaps; UI experimental |
 | TASK-019 | Mixed-media review and DAM organization | OpenCode | done — 019a PR #30, 019b PR #31 |
-| TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | OpenCode + Codex | 020a merged (#33/#34); 020b UI implemented; automatic sequence/repetition judgment remains open |
-| TASK-020b | Plans UI + selection provenance | Codex (Mac) | implemented — final PR/CI gate; see done/TASK-020b.md |
+| TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | OpenCode + Codex | 020a merged (#33/#34); 020b UI merged (#36); automatic sequence/repetition judgment remains open |
+| TASK-020b | Plans UI + selection provenance | Codex (Mac) | done — PR #36; Linux/macOS CI and local/browser acceptance green |
 | TASK-021 | Non-destructive recipes + photo/video render and export | Codex (Mac) | in progress — no-clobber clip export foundation; recipes/full renderer/golden review remain; see backlog/TASK-021-impl-plan.md |
 | TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | backlog — import confirmed editorial evidence into the unified schema |
 | TASK-023 | DAM release packaging, UI CI, and clean-machine acceptance | Codex (Mac) | backlog — after end-to-end photo/video render workflow |
