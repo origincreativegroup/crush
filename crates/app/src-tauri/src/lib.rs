@@ -16,17 +16,18 @@ mod macos {
     use crush_core::{Config, DEFAULT_OWNER_ID};
     use crush_pipeline::{IngestSummary, Pipeline};
     use crush_search::{
-        personal_style_score, retrain_style_profile, AssetSearchResult, SearchEngine,
+        personal_style_score, retrain_style_profile, selects_candidates as rank_selects_candidates,
+        AssetSearchResult, SearchEngine, SelectsCandidates,
     };
     use crush_stage_embed::embedder::{Embedder, ProviderPreference};
     use crush_stage_split::ffmpeg;
     use crush_store::{
         reference_scope_from_str, reference_scope_to_str, reference_status_to_str, AssetFilter,
         Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta, FeedbackEvent,
-        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, PhotoStatus, ReferenceItemRole,
-        ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, ReviewOp,
-        SafetyFlags, SavedSearch, StackItem, StackItemRole, StackMediaKind, Store, VersionStack,
-        VideoStatus,
+        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, PhotoStatus, Plan, PlanItem,
+        PlanItemPatch, PlanOrigin, ReferenceItemRole, ReferenceSet, ReferenceSetItem,
+        ReferenceSetScope, ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch, StackItem,
+        StackItemRole, StackMediaKind, Store, VersionStack, VideoStatus,
     };
     use serde::{Deserialize, Serialize};
     use tauri::{AppHandle, Emitter, Manager, State};
@@ -1680,6 +1681,466 @@ mod macos {
         })())
     }
 
+    // ---- Editorial plans (Task 020a) ----
+    //
+    // Plans are documents, not feedback: none of these commands appends a feedback event.
+    // Writes go through the plan state APIs only.
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlanView {
+        id: String,
+        name: String,
+        description: String,
+        context_key: String,
+        brief: String,
+        created_at: String,
+        updated_at: String,
+        item_count: usize,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlanItemView {
+        media_kind: String,
+        media_id: String,
+        position: i64,
+        start_s: Option<f64>,
+        end_s: Option<f64>,
+        pacing: Option<f64>,
+        crop_x: Option<f64>,
+        grade_json: Option<String>,
+        reason: String,
+        signals_json: String,
+        origin: String,
+        rank: Option<f64>,
+        profile_version: Option<i64>,
+        added_at: String,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlanRevisionView {
+        revision: i64,
+        label: String,
+        snapshot_json: String,
+        created_at: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlanItemArgs {
+        asset_type: String,
+        media_id: String,
+        start_s: Option<f64>,
+        end_s: Option<f64>,
+        pacing: Option<f64>,
+        crop_x: Option<f64>,
+        grade_json: Option<String>,
+        reason: Option<String>,
+        signals_json: Option<String>,
+        origin: Option<String>,
+        rank: Option<f64>,
+        profile_version: Option<i64>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlanItemPatchArgs {
+        start_s: Option<f64>,
+        end_s: Option<f64>,
+        pacing: Option<f64>,
+        crop_x: Option<f64>,
+        grade_json: Option<String>,
+        reason: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PlanItemRefArgs {
+        asset_type: String,
+        media_id: String,
+    }
+
+    fn plan_view(store: &Store, plan: Plan) -> anyhow::Result<PlanView> {
+        let item_count = store.plan_items(DEFAULT_OWNER_ID, &plan.id)?.len();
+        Ok(PlanView {
+            id: plan.id,
+            name: plan.name,
+            description: plan.description,
+            context_key: plan.context_key,
+            brief: plan.brief,
+            created_at: plan.created_at.to_rfc3339(),
+            updated_at: plan.updated_at.to_rfc3339(),
+            item_count,
+        })
+    }
+
+    fn plan_item_view(item: PlanItem) -> PlanItemView {
+        PlanItemView {
+            media_kind: match item.media_kind {
+                MediaKind::Photo => "photo".to_owned(),
+                MediaKind::Shot => "shot".to_owned(),
+            },
+            media_id: item.media_id,
+            position: item.position,
+            start_s: item.start_s,
+            end_s: item.end_s,
+            pacing: item.pacing,
+            crop_x: item.crop_x,
+            grade_json: item.grade_json,
+            reason: item.reason,
+            signals_json: item.signals_json,
+            origin: match item.origin {
+                PlanOrigin::General => "general".to_owned(),
+                PlanOrigin::Personal => "personal".to_owned(),
+            },
+            rank: item.rank,
+            profile_version: item.profile_version,
+            added_at: item.added_at.to_rfc3339(),
+        }
+    }
+
+    fn parse_plan_origin(origin: Option<&str>) -> anyhow::Result<PlanOrigin> {
+        match origin.unwrap_or("general") {
+            "general" => Ok(PlanOrigin::General),
+            "personal" => Ok(PlanOrigin::Personal),
+            other => anyhow::bail!("unsupported plan item origin {other:?}"),
+        }
+    }
+
+    #[tauri::command]
+    fn plan_create(
+        name: String,
+        description: Option<String>,
+        brief: Option<String>,
+        context_key: Option<String>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PlanView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let now = chrono::Utc::now();
+            let plan = Plan {
+                id: Uuid::new_v4().to_string(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                name,
+                description: description.unwrap_or_default(),
+                context_key: context_key.unwrap_or_else(|| "default".to_owned()),
+                brief: brief.unwrap_or_default(),
+                created_at: now,
+                updated_at: now,
+            };
+            store.plan_create(DEFAULT_OWNER_ID, &plan)?;
+            plan_view(&store, plan)
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<PlanView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            store
+                .plan_list(DEFAULT_OWNER_ID)?
+                .into_iter()
+                .map(|plan| plan_view(&store, plan))
+                .collect()
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_get(id: String, state: State<'_, RuntimeState>) -> CommandResult<PlanView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let plan = store
+                .plan_get(DEFAULT_OWNER_ID, &id)?
+                .with_context(|| format!("plan {id} was not found"))?;
+            plan_view(&store, plan)
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_update(
+        id: String,
+        name: String,
+        description: String,
+        brief: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.plan_update(DEFAULT_OWNER_ID, &id, &name, &description, &brief)
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_delete(id: String, state: State<'_, RuntimeState>) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.plan_delete(DEFAULT_OWNER_ID, &id)
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_items(id: String, state: State<'_, RuntimeState>) -> CommandResult<Vec<PlanItemView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .plan_items(DEFAULT_OWNER_ID, &id)?
+                .into_iter()
+                .map(plan_item_view)
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_add_item(
+        id: String,
+        item: PlanItemArgs,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PlanItemView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let plan_item = PlanItem {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                plan_id: id,
+                media_kind: parse_library_kind(&item.asset_type)?,
+                media_id: item.media_id,
+                // plan_add_item assigns the next dense position.
+                position: 0,
+                start_s: item.start_s,
+                end_s: item.end_s,
+                pacing: item.pacing,
+                crop_x: item.crop_x,
+                grade_json: item.grade_json,
+                reason: item.reason.unwrap_or_default(),
+                // The UI freezes the score breakdown it showed at selection time.
+                signals_json: item.signals_json.unwrap_or_else(|| "{}".to_owned()),
+                origin: parse_plan_origin(item.origin.as_deref())?,
+                rank: item.rank,
+                profile_version: item.profile_version,
+                added_at: chrono::Utc::now(),
+            };
+            let plan_id = plan_item.plan_id.clone();
+            let media_id = plan_item.media_id.clone();
+            store.plan_add_item(DEFAULT_OWNER_ID, &plan_item)?;
+            let stored = store
+                .plan_items(DEFAULT_OWNER_ID, &plan_id)?
+                .into_iter()
+                .find(|stored| stored.media_id == media_id)
+                .context("stored plan item was not found after insert")?;
+            Ok(plan_item_view(stored))
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_update_item(
+        id: String,
+        asset_type: String,
+        media_id: String,
+        patch: PlanItemPatchArgs,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PlanItemView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            store.plan_update_item(
+                DEFAULT_OWNER_ID,
+                &id,
+                parse_library_kind(&asset_type)?,
+                &media_id,
+                &PlanItemPatch {
+                    start_s: patch.start_s,
+                    end_s: patch.end_s,
+                    pacing: patch.pacing,
+                    crop_x: patch.crop_x,
+                    grade_json: patch.grade_json,
+                    reason: patch.reason,
+                },
+            )?;
+            let stored = store
+                .plan_items(DEFAULT_OWNER_ID, &id)?
+                .into_iter()
+                .find(|stored| stored.media_id == media_id)
+                .context("stored plan item was not found after update")?;
+            Ok(plan_item_view(stored))
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_remove_item(
+        id: String,
+        asset_type: String,
+        media_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.plan_remove_item(
+                DEFAULT_OWNER_ID,
+                &id,
+                parse_library_kind(&asset_type)?,
+                &media_id,
+            )
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_reorder_items(
+        id: String,
+        items: Vec<PlanItemRefArgs>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<PlanItemView>> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            let ordered = items
+                .iter()
+                .map(|reference| {
+                    Ok((
+                        parse_library_kind(&reference.asset_type)?,
+                        reference.media_id.clone(),
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            store.plan_reorder_items(DEFAULT_OWNER_ID, &id, &ordered)?;
+            Ok(store
+                .plan_items(DEFAULT_OWNER_ID, &id)?
+                .into_iter()
+                .map(plan_item_view)
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_save_revision(
+        id: String,
+        label: Option<String>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PlanRevisionView> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            let revision =
+                store.plan_save_revision(DEFAULT_OWNER_ID, &id, &label.unwrap_or_default())?;
+            Ok(PlanRevisionView {
+                revision: revision.revision,
+                label: revision.label,
+                snapshot_json: revision.snapshot_json,
+                created_at: revision.created_at.to_rfc3339(),
+            })
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_revisions(
+        id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<PlanRevisionView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .plan_revisions(DEFAULT_OWNER_ID, &id)?
+                .into_iter()
+                .map(|revision| PlanRevisionView {
+                    revision: revision.revision,
+                    label: revision.label,
+                    snapshot_json: revision.snapshot_json,
+                    created_at: revision.created_at.to_rfc3339(),
+                })
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_restore_revision(
+        id: String,
+        revision: i64,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<PlanItemView>> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.plan_restore_revision(DEFAULT_OWNER_ID, &id, revision)?;
+            Ok(store
+                .plan_items(DEFAULT_OWNER_ID, &id)?
+                .into_iter()
+                .map(plan_item_view)
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn plan_duplicate(
+        id: String,
+        name: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PlanView> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            let copy = store.plan_duplicate(DEFAULT_OWNER_ID, &id, &name)?;
+            plan_view(&store, copy)
+        })())
+    }
+
+    /// Both selects orderings in one response: the general cold-start strong-shot list and,
+    /// when a brief is supplied, the separately explainable personalized ordering.
+    #[tauri::command]
+    async fn selects_candidates(
+        brief: Option<String>,
+        context: Option<String>,
+        top: usize,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<SelectsCandidates> {
+        let config = state.config.clone();
+        let paths = state.paths.clone();
+        let cache = Arc::clone(&state.search);
+        let retrain_dirty = Arc::clone(&state.retrain_dirty);
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result((|| {
+                ensure!(top > 0, "top must be greater than zero");
+                let mut store = Store::open(&paths.root)?;
+                let mut runtime = lock_anyhow(&cache)?;
+                if runtime.is_none() {
+                    *runtime = Some(SearchRuntime {
+                        engine: SearchEngine::load(
+                            &store,
+                            DEFAULT_OWNER_ID,
+                            config.search.transcript_hit_boost,
+                        )?,
+                        embedder: Embedder::new(
+                            paths.models(),
+                            ProviderPreference::Cpu,
+                            config.limits.threads,
+                        )?,
+                        generation: None,
+                    });
+                }
+                let runtime = runtime.as_mut().context("search runtime was not created")?;
+                if retrain_dirty.swap(false, Ordering::AcqRel) {
+                    if let Err(error) = retrain_style_profile(&mut store, DEFAULT_OWNER_ID) {
+                        retrain_dirty.store(true, Ordering::Release);
+                        eprintln!("deferred style retrain failed: {error:#}");
+                    }
+                }
+                let generation = store.data_version()?;
+                if runtime.generation != Some(generation) {
+                    runtime.engine.reload(&store)?;
+                    runtime.generation = Some(generation);
+                }
+                let SearchRuntime {
+                    engine, embedder, ..
+                } = runtime;
+                rank_selects_candidates(
+                    &store,
+                    DEFAULT_OWNER_ID,
+                    engine,
+                    &mut |text: &str| embedder.embed_text(text),
+                    brief.as_deref(),
+                    top,
+                    context.as_deref(),
+                )
+            })())
+        })
+        .await
+        .map_err(|error| format!("selects worker failed: {error}"))?
+    }
+
     /// Read-only projection of the current editorial annotation for the review drawer.
     /// Defaults mirror the 0002 columns and `browse_assets`' COALESCE defaults, so assets
     /// without an annotation row present `usable = true`, every privacy flag cleared.
@@ -2253,6 +2714,21 @@ mod macos {
                 set_safety_flags,
                 set_annotation,
                 review_batch,
+                plan_create,
+                plan_list,
+                plan_get,
+                plan_update,
+                plan_delete,
+                plan_items,
+                plan_add_item,
+                plan_update_item,
+                plan_remove_item,
+                plan_reorder_items,
+                plan_save_revision,
+                plan_revisions,
+                plan_restore_revision,
+                plan_duplicate,
+                selects_candidates,
                 export_clip,
                 open_in_finder
             ])
@@ -2291,7 +2767,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=8"));
+            assert!(report.contains("schema=9"));
         }
     }
 }
