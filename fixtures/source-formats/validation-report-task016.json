@@ -1,0 +1,21 @@
+{
+  "fixture_set": "Task 016 representative packaged pipeline",
+  "platform": "Apple Silicon macOS",
+  "captured_on": "2026-08-28",
+  "elapsed_ms": 11084,
+  "peak_resident_bytes": 985481216,
+  "failures": [],
+  "orientation_check": "EXIF orientation 1 through 8 passed; orientation 6 fixture rendered 50x80 from an 80x50 source",
+  "color_check": "source color fields persisted; exposed ICC profiles were retained byte-for-byte in JPEG derivatives",
+  "photos": ["JPEG", "PNG", "TIFF", "HEIC"],
+  "videos": [
+    {"container":"MXF","codec":"DNxHD","bit_depth":8,"proxy_required":false},
+    {"container":"M4V","codec":"H.264","bit_depth":8,"proxy_required":false},
+    {"container":"MOV","codec":"H.265/HEVC","bit_depth":8,"proxy_required":true},
+    {"container":"MOV","codec":"ProRes","bit_depth":10,"proxy_required":false}
+  ],
+  "commands": [
+    "cargo test -p crush-pipeline --test source_fidelity -- --nocapture",
+    "cargo test -p crush-pipeline --test ingest_fixtures packaged_pipeline_indexes_representative_professional_sources -- --nocapture"
+  ]
+}

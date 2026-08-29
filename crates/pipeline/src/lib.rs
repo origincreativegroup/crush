@@ -1,5 +1,8 @@
 //! End-to-end, resumable, one-video-at-a-time ingestion orchestration.
 
+pub mod source;
+pub mod video_source;
+
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -19,14 +22,15 @@ use crush_stage_embed::embed_missing_shots_with_control;
 use crush_stage_embed::embedder::{Embedder, ProviderPreference};
 use crush_stage_embed::preprocess::preprocess;
 use crush_stage_split::{ffmpeg, scene};
-use crush_store::{EmbeddingMeta, NewJob, Photo, PhotoStatus, Store, Video, VideoStatus};
-use image::{GenericImageView, ImageFormat};
+use crush_store::{
+    EmbeddingMeta, NewJob, Photo, PhotoSourceMetadata, PhotoStatus, Store, Video,
+    VideoSourceMetadata, VideoStatus,
+};
+use image::GenericImageView;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "m4v", "mkv", "avi", "mts"];
-const PHOTO_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png"];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IngestSummary {
@@ -139,27 +143,43 @@ impl Pipeline {
         embedder: &mut Embedder,
     ) -> anyhow::Result<IngestOne> {
         let sha256 = sha256_file(path)?;
-        if let Some(existing) = store.photo_by_sha(DEFAULT_OWNER_ID, &sha256)? {
-            if existing.status == PhotoStatus::Done {
+        let existing = store.photo_by_sha(DEFAULT_OWNER_ID, &sha256)?;
+        if let Some(existing) = &existing {
+            let fidelity_complete = store
+                .photo_source_metadata(DEFAULT_OWNER_ID, &existing.id)?
+                .and_then(|metadata| {
+                    let relative = metadata.proxy_rel?;
+                    let expected_hash = metadata.proxy_sha256?;
+                    let proxy = store.proxy_path(&relative).ok()?;
+                    proxy
+                        .is_file()
+                        .then(|| sha256_file(&proxy).ok())
+                        .flatten()
+                        .filter(|hash| hash == &expected_hash)
+                })
+                .is_some();
+            if existing.status == PhotoStatus::Done && fidelity_complete {
+                if existing.path != path.to_string_lossy() {
+                    let mut updated = existing.clone();
+                    updated.path = path.to_string_lossy().into_owned();
+                    store.upsert_photo(DEFAULT_OWNER_ID, &updated)?;
+                }
                 tracing::info!(path = %path.display(), "skip: photo already indexed");
                 return Ok(IngestOne::Skipped);
             }
         }
-        let photo_id = format!("photo-{}", &sha256[..32]);
+        let photo_id = existing
+            .map(|photo| photo.id)
+            .unwrap_or_else(|| format!("photo-{}", &sha256[..32]));
         let result = (|| {
             ensure!(
                 !self.cancellation.is_cancelled(),
                 "photo embedding cancelled"
             );
-            let image = image::open(path)
-                .with_context(|| format!("failed to decode photo {}", path.display()))?;
-            let (width, height) = image.dimensions();
-            let extension = path
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("image")
-                .to_ascii_lowercase();
+            let decoded = source::decode_photo(path)?;
+            let (width, height) = decoded.image.dimensions();
             let thumb_rel = format!("photos/{photo_id}.jpg");
+            let proxy_rel = format!("photos/{photo_id}.jpg");
             store.upsert_photo(
                 DEFAULT_OWNER_ID,
                 &Photo {
@@ -169,30 +189,65 @@ impl Pipeline {
                     sha256: sha256.clone(),
                     width: i64::from(width),
                     height: i64::from(height),
-                    format: extension,
-                    orientation: None,
-                    captured_at: None,
-                    camera_make: None,
-                    camera_model: None,
-                    lens: None,
+                    format: decoded.source_format.clone(),
+                    orientation: decoded.orientation,
+                    captured_at: decoded.captured_at,
+                    camera_make: decoded.camera_make.clone(),
+                    camera_model: decoded.camera_model.clone(),
+                    lens: decoded.lens.clone(),
                     thumb_rel: Some(thumb_rel.clone()),
                     status: PhotoStatus::Pending,
                     indexed_at: None,
                 },
             )?;
+            let proxy = source::write_jpeg_derivative(
+                &decoded.image,
+                &store.proxy_path(&proxy_rel)?,
+                2560,
+                92,
+                decoded.icc_profile.as_deref(),
+            )?;
             let thumbnail_path = store.thumbnail_path(&thumb_rel)?;
-            if let Some(parent) = thumbnail_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            image
-                .thumbnail(960, 960)
-                .save_with_format(&thumbnail_path, ImageFormat::Jpeg)
-                .with_context(|| {
-                    format!("failed to write thumbnail {}", thumbnail_path.display())
-                })?;
-            let vector = embedder.embed_image(&preprocess(&image))?;
+            source::write_jpeg_derivative(
+                &decoded.image,
+                &thumbnail_path,
+                960,
+                85,
+                decoded.icc_profile.as_deref(),
+            )?;
+            let original_size_bytes = i64::try_from(std::fs::metadata(path)?.len())
+                .context("photo size exceeds SQLite integer range")?;
+            store.upsert_photo_source_metadata(
+                DEFAULT_OWNER_ID,
+                &PhotoSourceMetadata {
+                    photo_id: photo_id.clone(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    source_format: decoded.source_format,
+                    decoder: decoded.decoder,
+                    proxy_rel: Some(proxy_rel),
+                    proxy_width: Some(i64::from(proxy.width)),
+                    proxy_height: Some(i64::from(proxy.height)),
+                    proxy_sha256: Some(proxy.sha256),
+                    proxy_provenance: decoded.proxy_provenance,
+                    orientation_applied: decoded.orientation_applied,
+                    bit_depth: decoded.bit_depth,
+                    color_space: decoded.color_space,
+                    icc_profile_name: decoded.icc_profile_name,
+                    icc_profile_sha256: decoded.icc_profile_sha256,
+                    exposure_json: decoded.exposure_json,
+                    gps_present: decoded.gps_present,
+                    metadata_json: decoded.metadata_json,
+                    original_size_bytes,
+                    extracted_at: Utc::now(),
+                },
+            )?;
+            let vector = embedder.embed_image(&preprocess(&decoded.image))?;
             store.put_photo_vector(DEFAULT_OWNER_ID, &photo_id, &vector)?;
             store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Embedded)?;
+            ensure!(
+                sha256_file(path)? == sha256,
+                "photo source changed while it was being indexed; no source writes were attempted"
+            );
             store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Done)?;
             Ok(IngestOne::Indexed)
         })();
@@ -285,14 +340,35 @@ impl Pipeline {
     fn ingest_one(&self, store: &mut Store, path: &Path, debug: bool) -> anyhow::Result<IngestOne> {
         let sha256 = sha256_file(path)?;
         if let Some(existing) = store.video_by_sha(DEFAULT_OWNER_ID, &sha256)? {
-            if existing.status == VideoStatus::Done {
+            let fidelity_complete = store
+                .video_source_metadata(DEFAULT_OWNER_ID, &existing.id)?
+                .map(|metadata| {
+                    if !metadata.proxy_required {
+                        return true;
+                    }
+                    let Some(relative) = metadata.proxy_rel else {
+                        return false;
+                    };
+                    let Some(expected_hash) = metadata.proxy_sha256 else {
+                        return false;
+                    };
+                    store.proxy_path(&relative).is_ok_and(|proxy| {
+                        proxy.is_file()
+                            && sha256_file(&proxy).is_ok_and(|hash| hash == expected_hash)
+                    })
+                })
+                .unwrap_or(false);
+            let mut existing = existing;
+            if existing.path != path.to_string_lossy() {
+                existing.path = path.to_string_lossy().into_owned();
+                store.upsert_video(DEFAULT_OWNER_ID, &existing)?;
+            }
+            if existing.status == VideoStatus::Done && fidelity_complete {
                 tracing::info!(path = %path.display(), "skip: already indexed");
                 return Ok(IngestOne::Skipped);
             }
-            if existing.path != path.to_string_lossy() {
-                let mut updated = existing.clone();
-                updated.path = path.to_string_lossy().into_owned();
-                store.upsert_video(DEFAULT_OWNER_ID, &updated)?;
+            if existing.status == VideoStatus::Done {
+                store.set_video_status(DEFAULT_OWNER_ID, &existing.id, VideoStatus::Pending)?;
             }
             self.process_video(store, &existing.id, debug)?;
             return Ok(IngestOne::Indexed);
@@ -359,8 +435,11 @@ impl Pipeline {
         let job = self.start_job(store, video, Stage::Split, debug)?;
         let result = (|| {
             ensure!(!self.cancellation.is_cancelled(), "split cancelled");
+            let source_path = Path::new(&video.path);
+            video_source::validate_decoder_policy(source_path)?;
             let runner = self.runner(&job)?;
-            let probe = runner.probe(Path::new(&video.path))?.value;
+            let probe = runner.probe(source_path)?.value;
+            let proxy_policy = video_source::proxy_policy(&probe)?;
             let mut probed = video.clone();
             probed.duration_s = Some(probe.duration_s);
             probed.fps = Some(probe.fps);
@@ -370,6 +449,72 @@ impl Pipeline {
             probed.status = VideoStatus::Pending;
             store.upsert_video(DEFAULT_OWNER_ID, &probed)?;
 
+            let (processing_path, proxy_rel, proxy_sha256) = if proxy_policy.required {
+                let relative = format!("videos/{}.mp4", video.id);
+                let proxy_path = store.proxy_path(&relative)?;
+                let reusable = store
+                    .video_source_metadata(DEFAULT_OWNER_ID, &video.id)?
+                    .filter(|metadata| metadata.proxy_rel.as_deref() == Some(relative.as_str()))
+                    .and_then(|metadata| {
+                        proxy_path
+                            .is_file()
+                            .then(|| sha256_file(&proxy_path).ok())
+                            .flatten()
+                            .filter(|hash| metadata.proxy_sha256.as_deref() == Some(hash.as_str()))
+                    });
+                let hash = if let Some(hash) = reusable {
+                    hash
+                } else {
+                    runner.generate_edit_proxy_with_control(
+                        source_path,
+                        &proxy_path,
+                        &self.cancellation,
+                        |_| {},
+                    )?;
+                    sha256_file(&proxy_path)?
+                };
+                (proxy_path, Some(relative), Some(hash))
+            } else {
+                (source_path.to_path_buf(), None, None)
+            };
+            let original_size_bytes = i64::try_from(std::fs::metadata(source_path)?.len())
+                .context("video size exceeds SQLite integer range")?;
+            store.upsert_video_source_metadata(
+                DEFAULT_OWNER_ID,
+                &VideoSourceMetadata {
+                    video_id: video.id.clone(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    container: probe
+                        .container
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    video_codec: probe
+                        .video_codec
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_owned()),
+                    codec_profile: probe.codec_profile.clone(),
+                    pixel_format: probe.pixel_format.clone(),
+                    bit_depth: probe.bit_depth.map(i64::from),
+                    color_space: probe.color_space.clone(),
+                    color_primaries: probe.color_primaries.clone(),
+                    color_transfer: probe.color_transfer.clone(),
+                    color_range: probe.color_range.clone(),
+                    rotation: probe.rotation.map(i64::from),
+                    proxy_rel,
+                    proxy_sha256,
+                    proxy_required: proxy_policy.required,
+                    proxy_reason: proxy_policy.reason,
+                    original_size_bytes,
+                    metadata_json: serde_json::json!({
+                        "decoder": "bundled_ffmpeg",
+                        "codec_tag": probe.codec_tag,
+                        "proxy_policy_version": 1,
+                    })
+                    .to_string(),
+                    probed_at: Utc::now(),
+                },
+            )?;
+
             let temporary;
             let frames = if let Some(directory) = &job.directory {
                 directory.join("frames")
@@ -378,7 +523,7 @@ impl Pipeline {
                 temporary.path().join("frames")
             };
             runner.sample_frames_with_control(
-                Path::new(&video.path),
+                &processing_path,
                 f64::from(self.config.split.sample_fps),
                 &frames,
                 &self.cancellation,
@@ -403,11 +548,15 @@ impl Pipeline {
                 store,
                 DEFAULT_OWNER_ID,
                 &video.id,
-                Path::new(&video.path),
+                &processing_path,
                 &detection.shots,
                 &self.paths.thumbs(),
                 &self.cancellation,
             )?;
+            ensure!(
+                sha256_file(source_path)? == video.sha256,
+                "video source changed while it was being indexed; no source writes were attempted"
+            );
             store.set_video_status(DEFAULT_OWNER_ID, &video.id, VideoStatus::Split)?;
             Ok(())
         })();
@@ -649,23 +798,11 @@ fn collect_video_files_inner(input: &Path, files: &mut Vec<PathBuf>) -> anyhow::
 }
 
 fn is_video(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| {
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|expected| extension.eq_ignore_ascii_case(expected))
-        })
+    video_source::is_video_extension(path)
 }
 
 fn is_photo(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| {
-            PHOTO_EXTENSIONS
-                .iter()
-                .any(|expected| extension.eq_ignore_ascii_case(expected))
-        })
+    source::is_supported_photo_extension(path)
 }
 
 pub fn sha256_file(path: &Path) -> anyhow::Result<String> {
