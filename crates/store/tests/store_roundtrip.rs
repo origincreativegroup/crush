@@ -9,12 +9,12 @@ use crush_core::{
     DEFAULT_OWNER_ID,
 };
 use crush_store::{
-    AestheticAssessment, Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta,
-    FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, Photo, PhotoProxyProvenance,
-    PhotoSourceMetadata, PhotoStatus, ProblemKind, ReferenceItemRole, ReferenceSet,
-    ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch,
-    Shot, StackItem, StackItemRole, StackMediaKind, Store, StyleProfile, TranscriptSegment,
-    VersionStack, Video, VideoSourceMetadata, VideoStatus,
+    AestheticAssessment, AssetFilter, Collection, CollectionItem, EditorialAnnotation,
+    EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, Photo,
+    PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, ProblemKind, ReferenceItemRole,
+    ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, ReviewOp, SafetyFlags,
+    SavedSearch, Shot, StackItem, StackItemRole, StackMediaKind, Store, StyleProfile,
+    TranscriptSegment, VersionStack, Video, VideoSourceMetadata, VideoStatus,
 };
 use rusqlite::Connection;
 
