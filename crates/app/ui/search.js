@@ -434,6 +434,9 @@
   el.video.addEventListener("error", () => {
     showMessage(`Could not play ${fileName(state.detail?.videoPath || "")}. Is the drive mounted?`, { error: true });
   });
+  el.photo.addEventListener("error", () => {
+    showMessage(`Could not load ${fileName(state.detail?.photoPath || "")}. Is the drive mounted?`, { error: true });
+  });
 
   function renderTranscript(segments) {
     el.transcript.replaceChildren();
@@ -627,9 +630,15 @@
   el.reveal.addEventListener("click", revealFile);
   el.feedbackPick.addEventListener("click", () => recordFeedback("pick", 1));
   el.feedbackReject.addEventListener("click", () => recordFeedback("reject", -1));
-  el.feedbackRating.addEventListener("change", () => {
+  el.feedbackRating.addEventListener("change", async () => {
     const value = Number(el.feedbackRating.value);
-    if (value) recordFeedback("rating", value);
+    if (!value) return;
+    try {
+      await recordFeedback("rating", value);
+    } finally {
+      // Reset to the placeholder so the same rating can be recorded twice in a row.
+      el.feedbackRating.value = "";
+    }
   });
   el.prev.addEventListener("click", () => stepShot(-1));
   el.next.addEventListener("click", () => stepShot(1));
