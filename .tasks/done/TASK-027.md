@@ -43,3 +43,18 @@ Standing guardrails for every change: no network egress from the UI; build DOM w
 - [ ] `tauri.conf.json` ships a strict CSP with each exception documented and verified against thumbnails, photo/video detail, and IPC (F8).
 - [ ] Harness renders the real `../ui/index.html` with no duplicated DOM and the scripted scenarios (first-run retry, cancel completion, failed-row expand, photo row, search error, feedback + rating reset) pass locally via system Chrome (F9).
 - [ ] Harness asserts shipped copy (e.g. "No media yet") so drift like F9 cannot recur; privacy and goldens guardrails hold; `cargo check -p crush-app` (or CI) is green.
+
+## Record (merged as PR #24)
+
+Implemented by the agent team 2026-08-29. Startup failure now renders the Library with empty state +
+error instead of a blank screen; failed insert_background releases the ingest slot (add_folder and
+reindex_video); models_status returns an error for a missing manifest key instead of panicking;
+record_feedback validates rating range/pick values/media existence, runs via spawn_blocking, and
+defers retraining to the next search through a dirty flag (retrain_style_profile math unchanged);
+list_videos batches failed-job errors in one query; the vector index reloads only when the store
+data_version changes; UI small fixes (model-done catch, multi-file drop notice, photo load error,
+rating select reset); strict CSP shipped and documented in docs/app-csp.md; harness rebuilt as an
+iframe loading the real index.html with playwright-core driving system Chrome (no browser download)
+and 7/7 scripted scenarios passing locally; CI harness step is continue-on-error until proven on the
+runner. Integration note: post-merge semantic collisions with Task 024 (models_status ?-operator in a
+non-Result closure, SearchRuntime destructure missing generation) were repaired on main by PR #27.
