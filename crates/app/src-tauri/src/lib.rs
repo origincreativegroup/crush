@@ -214,7 +214,9 @@ mod macos {
         media_kind: String,
         media_id: String,
         path: String,
-        thumb_rel: Option<String>,
+        /// Absolute path resolved from the store's relative thumb location, ready for
+        /// `convertFileSrc` in the webview.
+        thumb_path: Option<String>,
         status: String,
         indexed_at: Option<String>,
         video_id: Option<String>,
@@ -241,6 +243,20 @@ mod macos {
         picks: i64,
         rejects: i64,
         flagged: i64,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AnnotationView {
+        description: String,
+        subjects: String,
+        action: String,
+        tags: String,
+        notes: String,
+        usable: bool,
+        faces_visible: bool,
+        nametags_visible: bool,
+        blur_required: bool,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -1245,7 +1261,7 @@ mod macos {
         }
     }
 
-    fn library_asset_view(asset: LibraryAsset) -> LibraryAssetView {
+    fn library_asset_view(asset: LibraryAsset, thumb_path: Option<String>) -> LibraryAssetView {
         LibraryAssetView {
             media_kind: match asset.media_kind {
                 MediaKind::Photo => "photo".to_owned(),
@@ -1253,7 +1269,7 @@ mod macos {
             },
             media_id: asset.media_id,
             path: asset.path,
-            thumb_rel: asset.thumb_rel,
+            thumb_path,
             status: asset.status,
             indexed_at: asset.indexed_at.map(|value| value.to_rfc3339()),
             video_id: asset.video_id,
@@ -1317,7 +1333,21 @@ mod macos {
             };
             let store = Store::open(&state.paths.root)?;
             let assets = store.browse_assets(DEFAULT_OWNER_ID, &asset_filter)?;
-            Ok(assets.into_iter().map(library_asset_view).collect())
+            let views = assets
+                .into_iter()
+                .map(|asset| {
+                    // Resolve the stored relative thumb to an absolute path so the grid can
+                    // load it through `convertFileSrc` without a second round trip.
+                    let thumb_path = asset
+                        .thumb_rel
+                        .as_deref()
+                        .map(|relative| store.thumbnail_path(relative))
+                        .transpose()?
+                        .map(|path| path.display().to_string());
+                    Ok(library_asset_view(asset, thumb_path))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(views)
         })())
     }
 
@@ -1581,6 +1611,18 @@ mod macos {
     }
 
     #[tauri::command]
+    fn stack_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<StackView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .stack_list(DEFAULT_OWNER_ID)?
+                .into_iter()
+                .map(stack_view)
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
     fn saved_search_create(
         name: String,
         query: String,
@@ -1635,6 +1677,49 @@ mod macos {
         command_result((|| {
             let mut store = Store::open(&state.paths.root)?;
             store.saved_search_delete(DEFAULT_OWNER_ID, &id)
+        })())
+    }
+
+    /// Read-only projection of the current editorial annotation for the review drawer.
+    /// Defaults mirror the 0002 columns and `browse_assets`' COALESCE defaults, so assets
+    /// without an annotation row present `usable = true`, every privacy flag cleared.
+    #[tauri::command]
+    fn editorial_annotation_get(
+        asset_type: String,
+        id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<AnnotationView> {
+        command_result((|| {
+            let media_kind = parse_library_kind(&asset_type)?;
+            let store = Store::open(&state.paths.root)?;
+            let annotation = store.editorial_annotation(DEFAULT_OWNER_ID, media_kind, &id)?;
+            Ok(AnnotationView {
+                description: annotation
+                    .as_ref()
+                    .map_or_else(String::new, |value| value.description.clone()),
+                subjects: annotation
+                    .as_ref()
+                    .map_or_else(String::new, |value| value.subjects.clone()),
+                action: annotation
+                    .as_ref()
+                    .map_or_else(String::new, |value| value.action.clone()),
+                tags: annotation
+                    .as_ref()
+                    .map_or_else(String::new, |value| value.tags.clone()),
+                notes: annotation
+                    .as_ref()
+                    .map_or_else(String::new, |value| value.notes.clone()),
+                usable: annotation.as_ref().map_or(true, |value| value.usable),
+                faces_visible: annotation
+                    .as_ref()
+                    .map_or(false, |value| value.faces_visible),
+                nametags_visible: annotation
+                    .as_ref()
+                    .map_or(false, |value| value.nametags_visible),
+                blur_required: annotation
+                    .as_ref()
+                    .map_or(false, |value| value.blur_required),
+            })
         })())
     }
 
@@ -2160,9 +2245,11 @@ mod macos {
                 stack_add_item,
                 stack_remove_item,
                 stacks_for_asset,
+                stack_list,
                 saved_search_create,
                 saved_search_list,
                 saved_search_delete,
+                editorial_annotation_get,
                 set_safety_flags,
                 set_annotation,
                 review_batch,
