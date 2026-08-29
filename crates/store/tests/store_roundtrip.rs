@@ -72,11 +72,67 @@ fn shot(id: &str, video_id: &str, idx: i64) -> Shot {
     }
 }
 
+fn photo(id: &str, sha256: &str) -> Photo {
+    Photo {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        path: format!("/photos/{id}.jpg"),
+        sha256: sha256.to_owned(),
+        width: 6000,
+        height: 4000,
+        format: "jpeg".to_owned(),
+        orientation: Some(1),
+        captured_at: None,
+        camera_make: None,
+        camera_model: None,
+        lens: None,
+        thumb_rel: None,
+        status: PhotoStatus::Pending,
+        indexed_at: None,
+    }
+}
+
+fn feedback(
+    id: &str,
+    media_kind: MediaKind,
+    media_id: &str,
+    signal: FeedbackSignal,
+) -> FeedbackEvent {
+    FeedbackEvent {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind,
+        media_id: media_id.to_owned(),
+        signal,
+        value: None,
+        compared_media_kind: None,
+        compared_media_id: None,
+        context_json: "{}".to_owned(),
+        created_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+fn style_profile(id: &str) -> StyleProfile {
+    StyleProfile {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        name: format!("style-{id}"),
+        version: 1,
+        algorithm_version: "pairwise-linear-v1".to_owned(),
+        embedding_weights: vec![0.1, -0.2, 0.3],
+        feature_weights_json: "{}".to_owned(),
+        sample_count: 10,
+        held_out_metric: None,
+        active: true,
+        trained_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
 #[test]
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(store.schema_version().unwrap(), 5);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -87,7 +143,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 4);
+    assert_eq!(reopened.schema_version().unwrap(), 5);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -144,7 +200,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(store.schema_version().unwrap(), 5);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -463,8 +519,14 @@ fn videos_shots_and_delete_cascade_round_trip() {
             .video_id,
         "video-1"
     );
+    assert!(
+        store
+            .put_vector(DEFAULT_OWNER_ID, "shot-1", &[1.0, -0.0, f32::NAN])
+            .is_err(),
+        "vectors must reject non-finite values"
+    );
     store
-        .put_vector(DEFAULT_OWNER_ID, "shot-1", &[1.0, -0.0, f32::NAN])
+        .put_vector(DEFAULT_OWNER_ID, "shot-1", &[1.0, -0.0])
         .unwrap();
     let exact_vector = store
         .vector_for_shot(DEFAULT_OWNER_ID, "shot-1")
@@ -472,7 +534,6 @@ fn videos_shots_and_delete_cascade_round_trip() {
         .unwrap();
     assert_eq!(exact_vector[0].to_bits(), 1.0_f32.to_bits());
     assert_eq!(exact_vector[1].to_bits(), (-0.0_f32).to_bits());
-    assert!(exact_vector[2].is_nan());
     store
         .insert_transcript_segments(
             DEFAULT_OWNER_ID,
@@ -498,6 +559,30 @@ fn videos_shots_and_delete_cascade_round_trip() {
                 debug_dir: None,
             },
         )
+        .unwrap();
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &photo("photo-cascade", "cascade-sha"))
+        .unwrap();
+    let on_shot = feedback(
+        "feedback-shot",
+        MediaKind::Shot,
+        "shot-1",
+        FeedbackSignal::Pick,
+    );
+    store.append_feedback(DEFAULT_OWNER_ID, &on_shot).unwrap();
+    let preference = FeedbackEvent {
+        value: Some(1.0),
+        compared_media_kind: Some(MediaKind::Shot),
+        compared_media_id: Some("shot-1".to_owned()),
+        ..feedback(
+            "feedback-prefer",
+            MediaKind::Photo,
+            "photo-cascade",
+            FeedbackSignal::Prefer,
+        )
+    };
+    store
+        .append_feedback(DEFAULT_OWNER_ID, &preference)
         .unwrap();
 
     assert!(store
@@ -528,6 +613,10 @@ fn videos_shots_and_delete_cascade_round_trip() {
         .jobs(DEFAULT_OWNER_ID, &JobFilter::default())
         .unwrap()
         .is_empty());
+    assert!(
+        store.feedback_events(DEFAULT_OWNER_ID).unwrap().is_empty(),
+        "shot cleanup must remove feedback on the deleted shot and its comparisons"
+    );
     assert!(!store
         .delete_video_cascade(DEFAULT_OWNER_ID, "video-1")
         .unwrap());
@@ -553,7 +642,11 @@ fn vectors_are_exact_and_load_as_a_contiguous_matrix_under_budget() {
     for index in 0..ROWS {
         let values = (0..DIM)
             .map(|column| {
-                f32::from_bits(((index * DIM + column) as u32).wrapping_mul(2_654_435_761))
+                // Masked to subnormal bits so every generated value is finite; the store
+                // rejects non-finite vectors and the round trip must stay bit-exact.
+                f32::from_bits(
+                    ((index * DIM + column) as u32).wrapping_mul(2_654_435_761) & 0x007F_FFFF,
+                )
             })
             .collect::<Vec<_>>();
         store
@@ -888,6 +981,7 @@ fn interrupted_jobs_fail_and_failed_videos_restore_last_completed_stage() {
 fn deep_integrity_reports_missing_vectors_and_thumbnail_files() {
     let directory = TestDir::new("integrity");
     let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap();
     store
         .upsert_video(DEFAULT_OWNER_ID, &video("video-i", "sha-i"))
         .unwrap();
@@ -906,12 +1000,24 @@ fn deep_integrity_reports_missing_vectors_and_thumbnail_files() {
         .set_video_status(DEFAULT_OWNER_ID, "video-i", VideoStatus::Embedded)
         .unwrap();
 
+    let mut integrity_photo = photo("photo-integrity", "sha-photo-i");
+    integrity_photo.thumb_rel = Some("present.jpg".to_owned());
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &integrity_photo)
+        .unwrap();
+    store
+        .set_photo_status(DEFAULT_OWNER_ID, "photo-integrity", PhotoStatus::Embedded)
+        .unwrap();
+
     let problems = store.integrity().unwrap();
     assert!(problems.iter().any(|problem| {
         problem.kind == ProblemKind::MissingVector && problem.entity_id == "shot-missing"
     }));
     assert!(problems.iter().any(|problem| {
         problem.kind == ProblemKind::MissingThumbnail && problem.entity_id == "shot-missing"
+    }));
+    assert!(problems.iter().any(|problem| {
+        problem.kind == ProblemKind::MissingVector && problem.entity_id == "photo-integrity"
     }));
     assert_eq!(
         problems
@@ -921,9 +1027,571 @@ fn deep_integrity_reports_missing_vectors_and_thumbnail_files() {
         0
     );
 
+    store
+        .put_photo_vector(DEFAULT_OWNER_ID, "photo-integrity", &[0.0; 512])
+        .unwrap();
+    let metadata = PhotoSourceMetadata {
+        photo_id: "photo-integrity".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        source_format: "jpeg".to_owned(),
+        decoder: "image-rs".to_owned(),
+        proxy_rel: Some("photos/photo-integrity.bin".to_owned()),
+        proxy_width: Some(2560),
+        proxy_height: Some(1707),
+        proxy_sha256: Some("proxy-sha".to_owned()),
+        proxy_provenance: PhotoProxyProvenance::FullRender,
+        orientation_applied: true,
+        bit_depth: Some(8),
+        color_space: None,
+        icc_profile_name: None,
+        icc_profile_sha256: None,
+        exposure_json: "{}".to_owned(),
+        gps_present: false,
+        metadata_json: "{}".to_owned(),
+        original_size_bytes: 1_024,
+        extracted_at: now,
+    };
+    store
+        .upsert_photo_source_metadata(DEFAULT_OWNER_ID, &metadata)
+        .unwrap();
+
+    let problems = store.integrity().unwrap();
+    assert!(problems.iter().any(|problem| {
+        problem.kind == ProblemKind::MissingProxy && problem.entity_id == "photo-integrity"
+    }));
+
+    std::fs::create_dir_all(directory.path().join("proxies/photos")).unwrap();
+    std::fs::write(
+        directory.path().join("proxies/photos/photo-integrity.bin"),
+        b"proxy",
+    )
+    .unwrap();
+
+    // The API rejects unsafe proxy paths, so corrupt one through raw SQL.
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "UPDATE photo_source_metadata SET proxy_rel = '../escape.bin'
+             WHERE photo_id = 'photo-integrity'",
+            [],
+        )
+        .unwrap();
+    let problems = store.integrity().unwrap();
+    assert!(problems.iter().any(|problem| {
+        problem.kind == ProblemKind::UnsafeProxyPath && problem.entity_id == "photo-integrity"
+    }));
+    audit
+        .execute(
+            "UPDATE photo_source_metadata SET proxy_rel = 'photos/photo-integrity.bin'
+             WHERE photo_id = 'photo-integrity'",
+            [],
+        )
+        .unwrap();
+
+    // Raw-SQL corruption the typed API cannot produce: an orphan photo vector and a
+    // truncated shot vector blob. The orphan insert needs foreign keys off on the audit
+    // connection because photo_vectors carries a composite FK — the row models a
+    // pre-existing corrupted database, which is exactly what integrity() must catch.
+    audit.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+    audit
+        .execute(
+            "INSERT INTO photo_vectors (photo_id, owner_id, dim, vec)
+             VALUES ('ghost-photo', 'local', 1, X'00000000')",
+            [],
+        )
+        .unwrap();
+    audit.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+    audit
+        .execute(
+            "UPDATE shot_vectors SET vec = X'00' WHERE shot_id = 'shot-vector'",
+            [],
+        )
+        .unwrap();
+    let problems = store.integrity().unwrap();
+    assert!(problems.iter().any(|problem| {
+        problem.kind == ProblemKind::OrphanVector && problem.entity_id == "ghost-photo"
+    }));
+    assert!(problems.iter().any(|problem| {
+        problem.kind == ProblemKind::InvalidVectorBytes && problem.entity_id == "shot-vector"
+    }));
+    audit
+        .execute(
+            "DELETE FROM photo_vectors WHERE photo_id = 'ghost-photo'",
+            [],
+        )
+        .unwrap();
+
+    // Style profile weights must match their declared embedding dimension.
+    store
+        .put_style_profile(DEFAULT_OWNER_ID, &style_profile("style-integrity"))
+        .unwrap();
+    audit
+        .execute(
+            "UPDATE style_profiles SET embedding_weights = X'00' WHERE id = 'style-integrity'",
+            [],
+        )
+        .unwrap();
+    let problems = store.integrity().unwrap();
+    let weights = problems
+        .iter()
+        .find(|problem| {
+            problem.kind == ProblemKind::InvalidVectorBytes
+                && problem.entity_id == "style-integrity"
+        })
+        .expect("style profile weight corruption must be reported");
+    assert!(weights.detail.contains("style-integrity"));
+    audit
+        .execute(
+            "DELETE FROM style_profiles WHERE id = 'style-integrity'",
+            [],
+        )
+        .unwrap();
+    drop(audit);
+
+    store
+        .put_vector(DEFAULT_OWNER_ID, "shot-vector", &[0.0; 512])
+        .unwrap();
     std::fs::write(directory.path().join("thumbs/missing.jpg"), b"jpeg").unwrap();
     store
         .put_vector(DEFAULT_OWNER_ID, "shot-missing", &[0.0; 512])
         .unwrap();
     assert!(store.integrity().unwrap().is_empty());
+}
+
+#[test]
+fn feedback_is_append_only_and_enforces_signal_rules_at_the_api() {
+    let directory = TestDir::new("feedback-hardening");
+    let store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &photo("photo-a", "sha-a"))
+        .unwrap();
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &photo("photo-b", "sha-b"))
+        .unwrap();
+    let base = feedback(
+        "feedback-base",
+        MediaKind::Photo,
+        "photo-a",
+        FeedbackSignal::Pick,
+    );
+    store.append_feedback(DEFAULT_OWNER_ID, &base).unwrap();
+    let on_photo_b = feedback(
+        "feedback-photo-b",
+        MediaKind::Photo,
+        "photo-b",
+        FeedbackSignal::Pick,
+    );
+    store
+        .append_feedback(DEFAULT_OWNER_ID, &on_photo_b)
+        .unwrap();
+    let pair = FeedbackEvent {
+        value: Some(1.0),
+        compared_media_kind: Some(MediaKind::Photo),
+        compared_media_id: Some("photo-b".to_owned()),
+        ..feedback(
+            "feedback-pair",
+            MediaKind::Photo,
+            "photo-a",
+            FeedbackSignal::Prefer,
+        )
+    };
+    store.append_feedback(DEFAULT_OWNER_ID, &pair).unwrap();
+
+    // The '{}' context default round-trips through the typed API.
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO feedback_events (
+                id, owner_id, media_kind, media_id, signal, created_at
+             ) VALUES ('feedback-default', 'local', 'photo', 'photo-a', 'tag',
+                       '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    let defaulted = store
+        .feedback_events(DEFAULT_OWNER_ID)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.id == "feedback-default")
+        .expect("feedback row written without context_json");
+    assert_eq!(defaulted.context_json, "{}");
+
+    // Rating values stay API-enforced and must fall within 1..=5.
+    for rating in [0.0, 5.5, f64::NAN] {
+        assert!(store
+            .append_feedback(
+                DEFAULT_OWNER_ID,
+                &FeedbackEvent {
+                    id: format!("feedback-rating-{rating}"),
+                    signal: FeedbackSignal::Rating,
+                    value: Some(rating),
+                    ..base.clone()
+                },
+            )
+            .is_err());
+    }
+    // Prefer requires a compared asset.
+    assert!(store
+        .append_feedback(
+            DEFAULT_OWNER_ID,
+            &feedback(
+                "feedback-lone-prefer",
+                MediaKind::Photo,
+                "photo-a",
+                FeedbackSignal::Prefer,
+            ),
+        )
+        .is_err());
+    // Only prefer feedback may compare two assets.
+    assert!(store
+        .append_feedback(
+            DEFAULT_OWNER_ID,
+            &FeedbackEvent {
+                compared_media_kind: Some(MediaKind::Photo),
+                compared_media_id: Some("photo-b".to_owned()),
+                ..feedback(
+                    "feedback-crossed",
+                    MediaKind::Photo,
+                    "photo-a",
+                    FeedbackSignal::Pick,
+                )
+            },
+        )
+        .is_err());
+    // Duplicate event ids are rejected and leave the original row untouched.
+    assert!(store.append_feedback(DEFAULT_OWNER_ID, &base).is_err());
+    // context_json must be a valid JSON object.
+    let bad_context = FeedbackEvent {
+        id: "feedback-context-bad".to_owned(),
+        context_json: "not json".to_owned(),
+        ..base.clone()
+    };
+    assert!(store
+        .append_feedback(DEFAULT_OWNER_ID, &bad_context)
+        .is_err());
+    let array_context = FeedbackEvent {
+        id: "feedback-context-array".to_owned(),
+        context_json: "[1, 2]".to_owned(),
+        ..base.clone()
+    };
+    assert!(store
+        .append_feedback(DEFAULT_OWNER_ID, &array_context)
+        .is_err());
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 4);
+
+    // Live feedback rows are immutable and cannot be deleted.
+    assert!(audit
+        .execute(
+            "UPDATE feedback_events SET value = 9.0 WHERE id = 'feedback-base'",
+            [],
+        )
+        .is_err());
+    assert!(audit
+        .execute("DELETE FROM feedback_events WHERE id = 'feedback-base'", [],)
+        .is_err());
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 4);
+
+    // Cleanup paths still remove dependent feedback rows: deleting photo-b removes the pick
+    // that targeted it and the preference that compared against it.
+    audit
+        .execute("DELETE FROM photos WHERE id = 'photo-b'", [])
+        .unwrap();
+    let remaining = store
+        .feedback_events(DEFAULT_OWNER_ID)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.id)
+        .collect::<Vec<_>>();
+    assert_eq!(remaining, vec!["feedback-base", "feedback-default"]);
+    // Deleting photo-a removes the remaining rows, both of which target it.
+    audit
+        .execute("DELETE FROM photos WHERE id = 'photo-a'", [])
+        .unwrap();
+    assert!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().is_empty());
+}
+
+#[test]
+fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
+    let directory = TestDir::new("migration-v4-v5");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+        (4, include_str!("../migrations/0004_strong_shot.sql")),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO photos (
+                id, owner_id, path, sha256, width, height, format, status
+             ) VALUES ('legacy-photo', 'local', '/legacy.jpg', 'legacy-sha', 100, 100,
+                       'jpeg', 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO photo_vectors (photo_id, owner_id, dim, vec)
+             VALUES ('legacy-photo', 'local', 2, X'0000803F0000803F')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO feedback_events (
+                id, owner_id, media_kind, media_id, signal, value, context_json, created_at
+             ) VALUES ('legacy-feedback', 'local', 'photo', 'legacy-photo', 'pick', NULL,
+                       '{}', '2026-08-28T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO style_profiles (
+                id, owner_id, name, version, algorithm_version, embedding_dim,
+                embedding_weights, feature_weights_json, sample_count, active, trained_at
+             ) VALUES ('legacy-style', 'local', 'legacy', 1, 'pairwise-linear-v1', 2,
+                       X'0000803F0000803F', '{}', 3, 1, '2026-08-28T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 5);
+    assert!(store
+        .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        store
+            .vector_for_photo(DEFAULT_OWNER_ID, "legacy-photo")
+            .unwrap(),
+        Some(vec![1.0, 1.0])
+    );
+    let events = store.feedback_events(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].id, "legacy-feedback");
+    assert_eq!(events[0].context_json, "{}");
+    let profile = store
+        .active_style_profile(DEFAULT_OWNER_ID)
+        .unwrap()
+        .expect("legacy style profile should survive the upgrade");
+    assert_eq!(profile.id, "legacy-style");
+    assert_eq!(profile.embedding_weights, vec![1.0, 1.0]);
+
+    // The append-only guards are enforced on the upgraded database too.
+    let audit = Connection::open(store.db_path()).unwrap();
+    assert!(audit
+        .execute(
+            "UPDATE feedback_events SET value = 4.0 WHERE id = 'legacy-feedback'",
+            [],
+        )
+        .is_err());
+    assert!(audit
+        .execute(
+            "DELETE FROM feedback_events WHERE id = 'legacy-feedback'",
+            [],
+        )
+        .is_err());
+}
+
+#[test]
+fn second_owner_rows_are_isolated_from_the_default_owner() {
+    let directory = TestDir::new("owner-isolation");
+    let mut store = Store::open(directory.path()).unwrap();
+    const OWNER_B: &str = "editor-b";
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at)
+             VALUES ('editor-b', 'Editor B', '2026-08-28T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+
+    // Photos.
+    let mut photo_b = photo("photo-owner-b", "sha-photo-b");
+    photo_b.owner_id = OWNER_B.to_owned();
+    store.upsert_photo(OWNER_B, &photo_b).unwrap();
+    let photo_a = photo("photo-owner-a", "sha-photo-a");
+    store.upsert_photo(DEFAULT_OWNER_ID, &photo_a).unwrap();
+    let mut id_collision = photo("placeholder", "sha-collision");
+    id_collision.id = "photo-owner-b".to_owned();
+    assert!(store.upsert_photo(DEFAULT_OWNER_ID, &id_collision).is_err());
+    assert!(store
+        .photo_by_path(DEFAULT_OWNER_ID, &photo_b.path)
+        .unwrap()
+        .is_none());
+    assert!(store
+        .photo_by_path(OWNER_B, &photo_a.path)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.photos(DEFAULT_OWNER_ID).unwrap(),
+        vec![photo_a.clone()]
+    );
+    assert_eq!(store.photos(OWNER_B).unwrap(), vec![photo_b.clone()]);
+
+    // Videos and shots.
+    let mut video_b = video("video-owner-b", "sha-video-b");
+    video_b.owner_id = OWNER_B.to_owned();
+    store.upsert_video(OWNER_B, &video_b).unwrap();
+    let video_a = video("video-owner-a", "sha-video-a");
+    store.upsert_video(DEFAULT_OWNER_ID, &video_a).unwrap();
+    let mut shot_b = shot("shot-owner-b", "video-owner-b", 0);
+    shot_b.owner_id = OWNER_B.to_owned();
+    store
+        .insert_shots(OWNER_B, std::slice::from_ref(&shot_b))
+        .unwrap();
+    let shot_a = shot("shot-owner-a", "video-owner-a", 0);
+    store
+        .insert_shots(DEFAULT_OWNER_ID, std::slice::from_ref(&shot_a))
+        .unwrap();
+    assert!(store
+        .video_by_id(DEFAULT_OWNER_ID, "video-owner-b")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .shot_by_id(DEFAULT_OWNER_ID, "shot-owner-b")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.shots_for_video(OWNER_B, "video-owner-b").unwrap(),
+        vec![shot_b.clone()]
+    );
+    assert!(store
+        .insert_shots(DEFAULT_OWNER_ID, &[shot("cross-owner", "video-owner-b", 1)])
+        .is_err());
+    assert!(store
+        .set_video_status(DEFAULT_OWNER_ID, "video-owner-b", VideoStatus::Done)
+        .is_err());
+
+    // Vectors.
+    store
+        .put_vector(DEFAULT_OWNER_ID, "shot-owner-a", &[1.0, 2.0])
+        .unwrap();
+    store
+        .put_vector(OWNER_B, "shot-owner-b", &[3.0, 4.0])
+        .unwrap();
+    store
+        .put_photo_vector(DEFAULT_OWNER_ID, "photo-owner-a", &[5.0])
+        .unwrap();
+    store
+        .put_photo_vector(OWNER_B, "photo-owner-b", &[6.0])
+        .unwrap();
+    assert!(store
+        .put_vector(DEFAULT_OWNER_ID, "shot-owner-b", &[0.0])
+        .is_err());
+    assert!(store
+        .put_photo_vector(DEFAULT_OWNER_ID, "photo-owner-b", &[0.0])
+        .is_err());
+    assert!(store
+        .vector_for_shot(DEFAULT_OWNER_ID, "shot-owner-b")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .vector_for_photo(DEFAULT_OWNER_ID, "photo-owner-b")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store.load_all_vectors(DEFAULT_OWNER_ID).unwrap().0,
+        vec!["shot-owner-a"]
+    );
+    assert_eq!(
+        store.load_all_vectors(OWNER_B).unwrap().0,
+        vec!["shot-owner-b"]
+    );
+    assert_eq!(
+        store.load_all_photo_vectors(DEFAULT_OWNER_ID).unwrap().0,
+        vec!["photo-owner-a"]
+    );
+    assert_eq!(
+        store.load_all_photo_vectors(OWNER_B).unwrap().0,
+        vec!["photo-owner-b"]
+    );
+
+    // Feedback.
+    let event_a = feedback(
+        "feedback-owner-a",
+        MediaKind::Photo,
+        "photo-owner-a",
+        FeedbackSignal::Pick,
+    );
+    store.append_feedback(DEFAULT_OWNER_ID, &event_a).unwrap();
+    let mut event_b = feedback(
+        "feedback-owner-b",
+        MediaKind::Photo,
+        "photo-owner-b",
+        FeedbackSignal::Pick,
+    );
+    event_b.owner_id = OWNER_B.to_owned();
+    store.append_feedback(OWNER_B, &event_b).unwrap();
+    assert!(store.append_feedback(DEFAULT_OWNER_ID, &event_b).is_err());
+    let crossed = FeedbackEvent {
+        media_id: "photo-owner-b".to_owned(),
+        ..event_a.clone()
+    };
+    assert!(store.append_feedback(DEFAULT_OWNER_ID, &crossed).is_err());
+    assert_eq!(
+        store.feedback_events(DEFAULT_OWNER_ID).unwrap(),
+        vec![event_a.clone()]
+    );
+    assert_eq!(
+        store.feedback_events(OWNER_B).unwrap(),
+        vec![event_b.clone()]
+    );
+
+    // Style profiles: same-owner upserts update, cross-owner id collisions fail closed.
+    let profile_a = style_profile("style-owner-a");
+    store
+        .put_style_profile(DEFAULT_OWNER_ID, &profile_a)
+        .unwrap();
+    assert_eq!(
+        store.active_style_profile(DEFAULT_OWNER_ID).unwrap(),
+        Some(profile_a.clone())
+    );
+    let mut profile_b = style_profile("style-owner-b");
+    profile_b.owner_id = OWNER_B.to_owned();
+    store.put_style_profile(OWNER_B, &profile_b).unwrap();
+    let mut stolen = style_profile("style-owner-a");
+    stolen.owner_id = OWNER_B.to_owned();
+    assert!(store.put_style_profile(OWNER_B, &stolen).is_err());
+    assert_eq!(
+        store.active_style_profile(DEFAULT_OWNER_ID).unwrap(),
+        Some(profile_a.clone()),
+        "the original owner's profile must be unchanged after a rejected upsert"
+    );
+    assert_eq!(
+        store.active_style_profile(OWNER_B).unwrap().map(|p| p.id),
+        Some("style-owner-b".to_owned())
+    );
+    let mut updated_a = profile_a.clone();
+    updated_a.version = 2;
+    store
+        .put_style_profile(DEFAULT_OWNER_ID, &updated_a)
+        .unwrap();
+    assert_eq!(
+        store.active_style_profile(DEFAULT_OWNER_ID).unwrap(),
+        Some(updated_a)
+    );
 }
