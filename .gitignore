@@ -11,3 +11,4 @@ crush.toml
 .DS_Store
 reference/.venv/
 __pycache__/
+node_modules/
