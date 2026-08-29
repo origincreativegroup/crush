@@ -2,8 +2,10 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
+#[cfg(target_os = "macos")]
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
@@ -345,6 +347,7 @@ fn decoded_photo(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn read_container_exif(path: &Path) -> anyhow::Result<ExtractedExif> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -407,6 +410,7 @@ fn capture_time(exif: &exif::Exif) -> (Option<DateTime<Utc>>, Option<&'static st
     (parsed, parsed.map(|_| "utc_when_exif_offset_missing"))
 }
 
+#[cfg(target_os = "macos")]
 fn parse_property_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -485,6 +489,7 @@ fn macos_imageio_formats() -> anyhow::Result<BTreeSet<String>> {
     Ok(BTreeSet::new())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_sips_formats(output: &str) -> BTreeSet<String> {
     output
         .lines()
