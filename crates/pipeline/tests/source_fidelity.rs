@@ -11,7 +11,9 @@ use crush_pipeline::source::{decode_photo, write_jpeg_derivative};
 use crush_pipeline::video_source::proxy_policy;
 use crush_stage_split::ffmpeg::{self, Runner};
 use image::codecs::jpeg::JpegEncoder;
-use image::{GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Rgb, RgbImage};
+use image::{
+    GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Rgb, RgbImage,
+};
 use serde::Serialize;
 
 fn root() -> PathBuf {
@@ -159,9 +161,7 @@ fn corrupt_raw_variant_reports_decoder_and_never_falls_back_to_preview() {
 #[test]
 fn oriented_heic_decodes_upright_and_matches_the_image_rs_reference() {
     let temporary = tempfile::tempdir().unwrap();
-    let base = RgbImage::from_fn(80, 50, |x, y| {
-        Rgb([(x * 2) as u8, (y * 5) as u8, 128])
-    });
+    let base = RgbImage::from_fn(80, 50, |x, y| Rgb([(x * 2) as u8, (y * 5) as u8, 128]));
     let jpeg = temporary.path().join("oriented-source.jpg");
     base.save_with_format(&jpeg, ImageFormat::Jpeg).unwrap();
     let oriented = temporary.path().join("orientation-6.jpg");
@@ -187,9 +187,7 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         return;
     };
     let temporary = tempfile::tempdir().unwrap();
-    let base = RgbImage::from_fn(80, 50, |x, y| {
-        Rgb([(x * 3) as u8, (y * 4) as u8, 96])
-    });
+    let base = RgbImage::from_fn(80, 50, |x, y| Rgb([(x * 3) as u8, (y * 4) as u8, 96]));
 
     let jpeg = temporary.path().join("srgb-icc.jpg");
     let mut encoder = JpegEncoder::new_with_quality(File::create(&jpeg).unwrap(), 92);
@@ -219,7 +217,10 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         decoded_jpeg.icc_profile.as_deref(),
     )
     .unwrap();
-    assert_eq!(read_back_profile(&jpeg_derivative.path).as_deref(), Some(srgb.as_slice()));
+    assert_eq!(
+        read_back_profile(&jpeg_derivative.path).as_deref(),
+        Some(srgb.as_slice())
+    );
 
     let decoded_heic = decode_photo(&heic).unwrap();
     let heic_profile = decoded_heic
@@ -234,7 +235,10 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         Some(&heic_profile),
     )
     .unwrap();
-    assert_eq!(read_back_profile(&heic_derivative.path).as_deref(), Some(heic_profile.as_slice()));
+    assert_eq!(
+        read_back_profile(&heic_derivative.path).as_deref(),
+        Some(heic_profile.as_slice())
+    );
 
     let mismatch = write_jpeg_derivative(
         &decoded_jpeg.image,
@@ -244,8 +248,8 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         Some(&display_p3),
     )
     .unwrap();
-    let read_back = read_back_profile(&mismatch.path)
-        .expect("the Display P3 profile should be embedded");
+    let read_back =
+        read_back_profile(&mismatch.path).expect("the Display P3 profile should be embedded");
     assert_ne!(read_back, srgb);
     assert_eq!(read_back, display_p3);
 }
@@ -363,14 +367,20 @@ fn convert_with_sips(arguments: &[&str], source: &Path, output: &Path) {
 fn system_profile(name: &str) -> Option<Vec<u8>> {
     let path = Path::new("/System/Library/ColorSync/Profiles").join(name);
     if !path.exists() {
-        eprintln!("skipping ICC profile check: {} is not installed", path.display());
+        eprintln!(
+            "skipping ICC profile check: {} is not installed",
+            path.display()
+        );
         return None;
     }
     Some(std::fs::read(&path).unwrap())
 }
 
 fn read_back_profile(path: &Path) -> Option<Vec<u8>> {
-    let reader = ImageReader::open(path).unwrap().with_guessed_format().unwrap();
+    let reader = ImageReader::open(path)
+        .unwrap()
+        .with_guessed_format()
+        .unwrap();
     let mut decoder = reader.into_decoder().unwrap();
     decoder.icc_profile().unwrap()
 }

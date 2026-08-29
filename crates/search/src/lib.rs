@@ -873,9 +873,18 @@ mod tests {
     #[test]
     fn general_aesthetic_adjustment_is_bounded_and_centered() {
         let assessment_for = |overall: f64| aesthetic_assessment("shot-x", overall);
-        assert_eq!(general_aesthetic_adjustment(Some(&assessment_for(1.0))), 0.08);
-        assert_eq!(general_aesthetic_adjustment(Some(&assessment_for(0.0))), -0.08);
-        assert_eq!(general_aesthetic_adjustment(Some(&assessment_for(0.5))), 0.0);
+        assert_eq!(
+            general_aesthetic_adjustment(Some(&assessment_for(1.0))),
+            0.08
+        );
+        assert_eq!(
+            general_aesthetic_adjustment(Some(&assessment_for(0.0))),
+            -0.08
+        );
+        assert_eq!(
+            general_aesthetic_adjustment(Some(&assessment_for(0.5))),
+            0.0
+        );
         assert_eq!(general_aesthetic_adjustment(None), 0.0);
         for overall in [0.0, 0.25, 0.5, 0.75, 1.0] {
             let adjustment = general_aesthetic_adjustment(Some(&assessment_for(overall)));
