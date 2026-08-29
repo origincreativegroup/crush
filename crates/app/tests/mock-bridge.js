@@ -72,6 +72,8 @@
     "photo-row": () => [{ ...video }, { ...photo }],
     "search-error": () => [{ ...video }],
     feedback: () => [{ ...video }],
+    "style-panel": () => [{ ...video }, { ...photo }],
+    "style-add-item": () => [{ ...video }],
   }[scenario]?.() ?? [];
 
   const pipeline = [];
@@ -297,6 +299,84 @@
     notes: "Prefer the asymmetry.",
   });
 
+  // Task 018b style mock state: one confirmed set (feeding the "learned" profile) and one
+  // unconfirmed set (inert until confirmed). style_profile_status reports the Task 018a
+  // eval-gate metrics verbatim; style_profile_reset flips the profile to the general model.
+  const styleState = {
+    sets: ["style-panel", "style-add-item"].includes(scenario)
+      ? [
+          {
+            id: "set-confirmed",
+            name: "Launch selects",
+            contextKey: "default",
+            description: "Strongest launch coverage",
+            scope: "whole_set",
+            status: "confirmed",
+            itemCount: 4,
+            createdAt: "2026-08-28T09:00:00Z",
+            confirmedAt: "2026-08-28T09:30:00Z",
+          },
+          {
+            id: "set-unconfirmed",
+            name: "Quiet travel film",
+            contextKey: "homepage-hero",
+            description: "",
+            scope: "selected",
+            status: "unconfirmed",
+            itemCount: 2,
+            createdAt: "2026-08-28T10:00:00Z",
+            confirmedAt: null,
+          },
+        ]
+      : [],
+    profileReset: false,
+  };
+
+  const styleProfileStatus = () => {
+    const confirmed = styleState.sets.filter((set) => set.status === "confirmed").length;
+    const base = {
+      hasActiveProfile: false,
+      learned: false,
+      profileId: null,
+      contextKey: null,
+      version: null,
+      algorithmVersion: null,
+      sampleCount: null,
+      heldOutMetric: null,
+      baselineMetric: null,
+      metrics: null,
+      referenceSetsTotal: styleState.sets.length,
+      referenceSetsConfirmed: confirmed,
+    };
+    if (styleState.profileReset) return base;
+    return {
+      ...base,
+      hasActiveProfile: true,
+      learned: true,
+      profileId: "profile-demo",
+      contextKey: "default",
+      version: 3,
+      algorithmVersion: "personal-residual-v1",
+      sampleCount: 12,
+      heldOutMetric: 0.78,
+      baselineMetric: 0.61,
+      metrics: {
+        held_out_pairs: 6,
+        personal_accuracy: 0.78,
+        baseline_accuracy: 0.61,
+        learned: true,
+        split: "loo-every-3rd",
+        trainer: "personal-residual-v1",
+      },
+    };
+  };
+
+  const findStyleSet = (setId) => {
+    const set = styleState.sets.find((candidate) => candidate.id === setId);
+    if (!set) throw `No reference set ${setId}`;
+    return set;
+  };
+
   async function invoke(command, args = {}) {
     calls.push({ command, args });
     switch (command) {
@@ -330,6 +410,52 @@
         return `shot-${args.idx}`;
       case "record_feedback":
         return "feedback-test";
+      case "reference_set_list":
+        return styleState.sets.map((set) => ({ ...set }));
+      case "reference_set_create": {
+        styleState.sets.push({
+          id: `set-new-${styleState.sets.length + 1}`,
+          name: String(args.name || "Untitled set"),
+          contextKey: String(args.contextKey || "default"),
+          description: String(args.description || ""),
+          scope: args.scope === "selected" ? "selected" : "whole_set",
+          status: "unconfirmed",
+          itemCount: 0,
+          createdAt: "2026-08-28T11:00:00Z",
+          confirmedAt: null,
+        });
+        return null;
+      }
+      case "reference_set_add_item": {
+        findStyleSet(args.setId).itemCount += 1;
+        return null;
+      }
+      case "reference_set_remove_item":
+        return true;
+      case "reference_set_confirm": {
+        const set = findStyleSet(args.setId);
+        set.status = "confirmed";
+        set.confirmedAt = "2026-08-28T11:05:00Z";
+        return true;
+      }
+      case "reference_set_disable": {
+        findStyleSet(args.setId).status = "disabled";
+        return true;
+      }
+      case "reference_set_delete": {
+        const index = styleState.sets.findIndex((candidate) => candidate.id === args.setId);
+        if (index === -1) throw `No reference set ${args.setId}`;
+        styleState.sets.splice(index, 1);
+        return true;
+      }
+      case "style_profile_status":
+        return styleProfileStatus();
+      case "style_profile_retrain":
+        return { trained: !styleState.profileReset, status: styleProfileStatus() };
+      case "style_profile_reset": {
+        styleState.profileReset = true;
+        return 1;
+      }
       case "export_clip":
         return { path: args.out, mode: "Copy" };
       case "open_in_finder":

@@ -12,8 +12,10 @@
     shell: $("#app-shell"),
     libraryView: $("#library-view"),
     searchView: $("#search-view"),
+    styleView: $("#style-view"),
     navSearch: $("#nav-search"),
     navLibrary: $("#nav-library"),
+    navStyle: $("#nav-style"),
     input: $("#search-input"),
     top: $("#top-select"),
     count: $("#result-count"),
@@ -108,8 +110,10 @@
     state.view = view;
     el.libraryView.hidden = view !== "library";
     el.searchView.hidden = view !== "search";
+    el.styleView.hidden = view !== "style";
     el.navSearch.classList.toggle("active", view === "search");
     el.navLibrary.classList.toggle("active", view === "library");
+    el.navStyle.classList.toggle("active", view === "style");
     if (view === "search") {
       el.input.focus();
       el.input.select();
@@ -117,6 +121,19 @@
     } else {
       closeDetail();
     }
+    if (view === "style") {
+      // style.js owns the panel contents; it refreshes on this event.
+      document.dispatchEvent(new CustomEvent("crush:style-shown"));
+    }
+  }
+
+  // style.js renders the "Add to style set" control in the detail drawer and needs the
+  // current asset; a plain DOM event keeps the two modules decoupled (no shared state).
+  function notifyDetailChanged() {
+    const d = state.detail;
+    document.dispatchEvent(new CustomEvent("crush:detail", {
+      detail: d ? { kind: d.kind, id: d.id } : null,
+    }));
   }
 
   async function refreshIndexedState() {
@@ -314,6 +331,7 @@
     try {
       const detail = await invoke("shot_detail", { id: shotId });
       state.detail = { ...detail, kind: "video" };
+      notifyDetailChanged();
       renderDetail();
     } catch (error) {
       showMessage(String(error), { error: true });
@@ -324,6 +342,7 @@
     try {
       const detail = await invoke("photo_detail", { id: photoId });
       state.detail = { ...detail, kind: "photo" };
+      notifyDetailChanged();
       renderDetail();
     } catch (error) {
       showMessage(String(error), { error: true });
@@ -338,6 +357,7 @@
     el.photo.removeAttribute("src");
     el.detail.hidden = true;
     state.detail = null;
+    notifyDetailChanged();
     if (state.view === "search") el.input.focus();
   }
 
@@ -617,6 +637,7 @@
   // ---------- wiring ----------
   el.navSearch.addEventListener("click", () => showView("search"));
   el.navLibrary.addEventListener("click", () => showView("library"));
+  el.navStyle.addEventListener("click", () => showView("style"));
   el.goLibrary.addEventListener("click", () => showView("library"));
   el.input.addEventListener("input", scheduleSearch);
   el.input.addEventListener("keydown", (event) => {
