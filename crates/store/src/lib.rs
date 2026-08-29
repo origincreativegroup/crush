@@ -14,13 +14,14 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
     (3, include_str!("../migrations/0003_source_fidelity.sql")),
     (4, include_str!("../migrations/0004_strong_shot.sql")),
-    (5, include_str!("../migrations/0005_photo_jobs.sql")),
+    (5, include_str!("../migrations/0005_feedback_hardening.sql")),
+    (6, include_str!("../migrations/0006_photo_jobs.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,6 +583,10 @@ impl Store {
         values: &[f32],
     ) -> anyhow::Result<()> {
         ensure!(!values.is_empty(), "vector must not be empty");
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "vector contains non-finite values"
+        );
         self.connection.execute(
             "INSERT INTO photo_vectors (photo_id, owner_id, dim, vec)
              VALUES (?1, ?2, ?3, ?4)
@@ -877,6 +882,7 @@ impl Store {
                 "rating feedback requires a value from 1 to 5"
             );
         }
+        validate_json_object(&event.context_json, "context_json")?;
         self.connection.execute(
             "INSERT INTO feedback_events (
                 id, owner_id, media_kind, media_id, signal, value, compared_media_kind,
@@ -949,7 +955,7 @@ impl Store {
                 embedding_weights, feature_weights_json, sample_count, held_out_metric, active,
                 trained_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-             ON CONFLICT(id) DO UPDATE SET
+             ON CONFLICT(id, owner_id) DO UPDATE SET
                 name = excluded.name,
                 version = excluded.version,
                 algorithm_version = excluded.algorithm_version,
@@ -976,7 +982,15 @@ impl Store {
             ],
         )?;
         transaction.commit()?;
-        Ok(())
+        let stored_owner: String = self
+            .connection
+            .query_row(
+                "SELECT owner_id FROM style_profiles WHERE id = ?1",
+                params![profile.id],
+                |row| row.get(0),
+            )
+            .context("upserted style profile could not be read back")?;
+        ensure_owner_matches(owner_id, &stored_owner, "style profile")
     }
 
     pub fn active_style_profile(&self, owner_id: &str) -> anyhow::Result<Option<StyleProfile>> {
@@ -1363,10 +1377,10 @@ impl Store {
 
     pub fn put_vector(&self, owner_id: &str, shot_id: &str, values: &[f32]) -> anyhow::Result<()> {
         ensure!(!values.is_empty(), "vector must not be empty");
-        let mut bytes = Vec::with_capacity(std::mem::size_of_val(values));
-        for value in values {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "vector contains non-finite values"
+        );
 
         self.connection.execute(
             "INSERT INTO shot_vectors (shot_id, owner_id, dim, vec)
@@ -1375,7 +1389,7 @@ impl Store {
                 owner_id = excluded.owner_id,
                 dim = excluded.dim,
                 vec = excluded.vec",
-            params![shot_id, owner_id, values.len() as i64, bytes],
+            params![shot_id, owner_id, values.len() as i64, vector_bytes(values),],
         )?;
         Ok(())
     }
@@ -1784,14 +1798,19 @@ impl Store {
                 ..JobFilter::default()
             },
         )?;
-        for job in &jobs {
-            self.job_fail(owner_id, &job.id, now, "interrupted")?;
-            if let Some(video_id) = &job.video_id {
-                self.set_video_status(owner_id, video_id, VideoStatus::Failed)?;
-            }
-            if let Some(photo_id) = &job.photo_id {
-                self.set_photo_status(owner_id, photo_id, PhotoStatus::Failed)?;
-            }
+        // The whole pass is atomic: either every running job and its video/photo end up
+        // failed, or nothing changes. `transaction_with_behavior` requires `&mut self` and
+        // this API stays shared-access, so the Immediate transaction is driven directly on
+        // the connection.
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let marked = mark_jobs_interrupted(&self.connection, owner_id, now, &jobs);
+        if let Err(error) = marked {
+            let _ = self.connection.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        if let Err(error) = self.connection.execute_batch("COMMIT") {
+            let _ = self.connection.execute_batch("ROLLBACK");
+            return Err(error.into());
         }
         Ok(jobs.len())
     }
@@ -1956,6 +1975,21 @@ impl Store {
             &mut problems,
         )?;
 
+        collect_string_pairs(
+            &self.connection,
+            "SELECT p.id, p.status
+             FROM photos AS p
+             LEFT JOIN photo_vectors AS pv ON pv.photo_id = p.id AND pv.owner_id = p.owner_id
+             WHERE p.status IN ('embedded', 'done') AND pv.photo_id IS NULL
+             ORDER BY p.id",
+            |photo_id, status| Problem {
+                kind: ProblemKind::MissingVector,
+                entity_id: photo_id,
+                detail: format!("{status} photo has no vector"),
+            },
+            &mut problems,
+        )?;
+
         let mut statement = self
             .connection
             .prepare("SELECT id, thumb_rel FROM shots WHERE thumb_rel IS NOT NULL ORDER BY id")?;
@@ -1977,6 +2011,34 @@ impl Store {
                     problems.push(Problem {
                         kind: ProblemKind::MissingThumbnail,
                         entity_id: shot_id,
+                        detail: format!("thumbnail does not exist: {}", path.display()),
+                    });
+                }
+            }
+        }
+        drop(statement);
+
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, thumb_rel FROM photos WHERE thumb_rel IS NOT NULL ORDER BY id")?;
+        let thumbs = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for thumb in thumbs {
+            let (photo_id, relative) = thumb?;
+            let relative_path = Path::new(&relative);
+            if !safe_relative_path(relative_path) {
+                problems.push(Problem {
+                    kind: ProblemKind::UnsafeThumbnailPath,
+                    entity_id: photo_id,
+                    detail: format!("photo thumbnail path is not a safe relative path: {relative}"),
+                });
+            } else {
+                let path = self.data_dir.join("thumbs").join(relative_path);
+                if !path.is_file() {
+                    problems.push(Problem {
+                        kind: ProblemKind::MissingThumbnail,
+                        entity_id: photo_id,
                         detail: format!("thumbnail does not exist: {}", path.display()),
                     });
                 }
@@ -2034,6 +2096,21 @@ impl Store {
             &mut problems,
         )?;
 
+        collect_string_pairs(
+            &self.connection,
+            "SELECT pv.photo_id, pv.owner_id
+             FROM photo_vectors AS pv
+             LEFT JOIN photos AS p ON p.id = pv.photo_id AND p.owner_id = pv.owner_id
+             WHERE p.id IS NULL
+             ORDER BY pv.photo_id",
+            |photo_id, owner_id| Problem {
+                kind: ProblemKind::OrphanVector,
+                entity_id: photo_id,
+                detail: format!("vector for owner {owner_id} has no matching photo"),
+            },
+            &mut problems,
+        )?;
+
         let mut statement = self.connection.prepare(
             "SELECT shot_id, dim, length(vec)
              FROM shot_vectors
@@ -2055,6 +2132,57 @@ impl Store {
                 detail: format!("dim {dim} requires {} bytes, found {byte_len}", dim * 4),
             });
         }
+        drop(statement);
+
+        let mut statement = self.connection.prepare(
+            "SELECT photo_id, dim, length(vec)
+             FROM photo_vectors
+             WHERE length(vec) != dim * 4
+             ORDER BY photo_id",
+        )?;
+        let invalid = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for item in invalid {
+            let (photo_id, dim, byte_len) = item?;
+            problems.push(Problem {
+                kind: ProblemKind::InvalidVectorBytes,
+                entity_id: photo_id,
+                detail: format!("dim {dim} requires {} bytes, found {byte_len}", dim * 4),
+            });
+        }
+        drop(statement);
+
+        let mut statement = self.connection.prepare(
+            "SELECT id, embedding_dim, length(embedding_weights)
+             FROM style_profiles
+             WHERE length(embedding_weights) % 4 != 0
+                OR length(embedding_weights) != embedding_dim * 4
+             ORDER BY id",
+        )?;
+        let invalid_weights = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for item in invalid_weights {
+            let (profile_id, dim, byte_len) = item?;
+            problems.push(Problem {
+                kind: ProblemKind::InvalidVectorBytes,
+                entity_id: profile_id.clone(),
+                detail: format!(
+                    "style profile {profile_id} with dim {dim} requires {} bytes, found {byte_len}",
+                    dim * 4
+                ),
+            });
+        }
+        drop(statement);
 
         Ok(problems)
     }
@@ -2619,6 +2747,45 @@ fn ensure_owner_matches(owner_id: &str, record_owner: &str, kind: &str) -> anyho
 
 fn ensure_changed(changed: usize, kind: &str, id: &str) -> anyhow::Result<()> {
     ensure!(changed == 1, "{kind} {id} was not found");
+    Ok(())
+}
+
+/// Inlines the `job_fail` and `set_video_status`/`set_photo_status` writes for one
+/// interrupted pass so they can share a single transaction; statuses, error text, and counts
+/// match the standalone APIs.
+fn mark_jobs_interrupted(
+    connection: &Connection,
+    owner_id: &str,
+    finished_at: DateTime<Utc>,
+    jobs: &[JobRecord],
+) -> anyhow::Result<()> {
+    for job in jobs {
+        let duration_ms = finished_at
+            .signed_duration_since(job.started_at)
+            .num_milliseconds();
+        ensure!(duration_ms >= 0, "job finish time precedes its start time");
+        let changed = connection.execute(
+            "UPDATE jobs
+             SET status = 'failed', finished_at = ?3, duration_ms = ?4, error = ?5
+             WHERE owner_id = ?1 AND id = ?2 AND status = 'running'",
+            params![
+                owner_id,
+                job.id,
+                finished_at.to_rfc3339(),
+                duration_ms,
+                "interrupted",
+            ],
+        )?;
+        ensure_changed(changed, "running job", &job.id)?;
+        connection.execute(
+            "UPDATE videos SET status = 'failed' WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, job.video_id],
+        )?;
+        connection.execute(
+            "UPDATE photos SET status = 'failed' WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, job.photo_id],
+        )?;
+    }
     Ok(())
 }
 

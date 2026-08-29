@@ -1,4 +1,4 @@
--- Crush schema v5: photo ingest and photo analysis share the resumable job log.
+-- Crush schema v6: photo ingest and photo analysis share the resumable job log.
 --
 -- Rebuilds `jobs` because SQLite cannot alter FOREIGN KEY clauses: video jobs keep their
 -- composite FK to videos(id, owner_id), photo jobs gain the same pattern against
