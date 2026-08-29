@@ -132,7 +132,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), 6);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -143,7 +143,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 5);
+    assert_eq!(reopened.schema_version().unwrap(), 6);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -200,11 +200,146 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), 6);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
     assert_eq!(jobs[0].stage, Stage::Embed);
+    assert_eq!(
+        jobs[0].video_id.as_deref(),
+        Some("legacy-video"),
+        "video job ownership must survive the photo-jobs migration"
+    );
+    assert!(jobs[0].photo_id.is_none());
+}
+
+#[test]
+fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
+    let directory = TestDir::new("migration-v4-v5");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+        (4, include_str!("../migrations/0004_strong_shot.sql")),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('legacy-video', 'local', '/legacy.mov', 'legacy-sha', 1.0, 24.0,
+                       1920, 1080, 1, 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO jobs (
+                id, owner_id, video_id, stage, status, started_at
+             ) VALUES ('legacy-job', 'local', 'legacy-video', 'split', 'done',
+                       '2026-08-28T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 6);
+    let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].stage, Stage::Split);
+
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &Photo {
+                id: "photo-job-target".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                path: "/photos/job-target.jpg".to_owned(),
+                sha256: "photo-job-sha".to_owned(),
+                width: 100,
+                height: 100,
+                format: "jpeg".to_owned(),
+                orientation: Some(1),
+                captured_at: None,
+                camera_make: None,
+                camera_model: None,
+                lens: None,
+                thumb_rel: None,
+                status: PhotoStatus::Pending,
+                indexed_at: None,
+            },
+        )
+        .unwrap();
+    let started_at = Utc.with_ymd_and_hms(2026, 8, 28, 19, 0, 0).unwrap();
+    let photo_job = store
+        .job_start(
+            DEFAULT_OWNER_ID,
+            &NewJob {
+                id: "photo-ingest-job".to_owned(),
+                video_id: None,
+                photo_id: Some("photo-job-target".to_owned()),
+                stage: Stage::PhotoIngest,
+                started_at,
+                debug_dir: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(photo_job.stage, Stage::PhotoIngest);
+    assert_eq!(photo_job.photo_id.as_deref(), Some("photo-job-target"));
+    assert!(photo_job.video_id.is_none());
+
+    assert!(
+        store
+            .job_start(
+                DEFAULT_OWNER_ID,
+                &NewJob {
+                    id: "ambiguous-job".to_owned(),
+                    video_id: Some("legacy-video".to_owned()),
+                    photo_id: Some("photo-job-target".to_owned()),
+                    stage: Stage::Analyze,
+                    started_at,
+                    debug_dir: None,
+                },
+            )
+            .is_err(),
+        "a job must reference exactly one owned asset"
+    );
+    assert!(
+        store
+            .job_start(
+                DEFAULT_OWNER_ID,
+                &NewJob {
+                    id: "detached-job".to_owned(),
+                    video_id: None,
+                    photo_id: None,
+                    stage: Stage::Analyze,
+                    started_at,
+                    debug_dir: None,
+                },
+            )
+            .is_err(),
+        "a job must reference exactly one owned asset"
+    );
 }
 
 #[test]
@@ -553,7 +688,8 @@ fn videos_shots_and_delete_cascade_round_trip() {
             DEFAULT_OWNER_ID,
             &NewJob {
                 id: "job-cascade".to_owned(),
-                video_id: "video-1".to_owned(),
+                video_id: Some("video-1".to_owned()),
+                photo_id: None,
                 stage: Stage::Split,
                 started_at: Utc.with_ymd_and_hms(2026, 8, 27, 11, 0, 0).unwrap(),
                 debug_dir: None,
@@ -812,7 +948,8 @@ fn jobs_and_embedding_metadata_round_trip_for_every_terminal_state() {
                 DEFAULT_OWNER_ID,
                 &NewJob {
                     id: id.to_owned(),
-                    video_id: "video-j".to_owned(),
+                    video_id: Some("video-j".to_owned()),
+                    photo_id: None,
                     stage,
                     started_at,
                     debug_dir: Some(format!("debug/{id}")),
@@ -923,7 +1060,8 @@ fn interrupted_jobs_fail_and_failed_videos_restore_last_completed_stage() {
             DEFAULT_OWNER_ID,
             &NewJob {
                 id: "split-done".to_owned(),
-                video_id: "video-i".to_owned(),
+                video_id: Some("video-i".to_owned()),
+                photo_id: None,
                 stage: Stage::Split,
                 started_at: started,
                 debug_dir: None,
@@ -938,7 +1076,8 @@ fn interrupted_jobs_fail_and_failed_videos_restore_last_completed_stage() {
             DEFAULT_OWNER_ID,
             &NewJob {
                 id: "embed-running".to_owned(),
-                video_id: "video-i".to_owned(),
+                video_id: Some("video-i".to_owned()),
+                photo_id: None,
                 stage: Stage::Embed,
                 started_at: started,
                 debug_dir: None,
@@ -1156,6 +1295,179 @@ fn deep_integrity_reports_missing_vectors_and_thumbnail_files() {
         .put_vector(DEFAULT_OWNER_ID, "shot-missing", &[0.0; 512])
         .unwrap();
     assert!(store.integrity().unwrap().is_empty());
+}
+
+#[test]
+fn photos_for_analysis_returns_only_missing_or_stale_done_photos() {
+    let directory = TestDir::new("photos-for-analysis");
+    let store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 28, 19, 30, 0).unwrap();
+    let photo = |id: &str, path: &str, status: PhotoStatus| Photo {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        path: path.to_owned(),
+        sha256: format!("sha-{id}"),
+        width: 100,
+        height: 100,
+        format: "jpeg".to_owned(),
+        orientation: Some(1),
+        captured_at: None,
+        camera_make: None,
+        camera_model: None,
+        lens: None,
+        thumb_rel: None,
+        status,
+        indexed_at: None,
+    };
+    let current = photo("photo-current", "/photos/z-current.jpg", PhotoStatus::Done);
+    let stale = photo("photo-stale", "/photos/a-stale.jpg", PhotoStatus::Done);
+    let missing = photo("photo-missing", "/photos/m-missing.jpg", PhotoStatus::Done);
+    let pending = photo(
+        "photo-pending",
+        "/photos/p-pending.jpg",
+        PhotoStatus::Pending,
+    );
+    for candidate in [&current, &stale, &missing, &pending] {
+        store.upsert_photo(DEFAULT_OWNER_ID, candidate).unwrap();
+    }
+    let assessment = |photo_id: &str, model_version: &str| AestheticAssessment {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind: MediaKind::Photo,
+        media_id: photo_id.to_owned(),
+        sharpness: 0.5,
+        exposure: 0.5,
+        contrast: 0.5,
+        color_harmony: 0.5,
+        balance: 0.5,
+        subject_placement: 0.5,
+        negative_space: 0.5,
+        visual_clarity: 0.5,
+        technical_quality: 0.5,
+        blur_control: 0.5,
+        clipping_control: 0.5,
+        noise_control: 0.5,
+        compression_quality: 0.5,
+        resolution_quality: 0.5,
+        motion_stability: 0.5,
+        duplicate_confidence: 0.0,
+        composition_quality: 0.5,
+        hierarchy: 0.5,
+        leading_lines: 0.5,
+        symmetry: 0.5,
+        crop_potential: 0.5,
+        moment_story: 0.5,
+        expression: 0.5,
+        gesture: 0.5,
+        action: 0.5,
+        novelty: 0.5,
+        pacing: 0.5,
+        repetition_risk: 0.0,
+        overall: 0.5,
+        confidence: 0.5,
+        explanation_json: "{}".to_owned(),
+        model_version: model_version.to_owned(),
+        assessed_at: now,
+    };
+    store
+        .upsert_aesthetic_assessment(
+            DEFAULT_OWNER_ID,
+            &assessment("photo-current", "strong-shot-v1"),
+        )
+        .unwrap();
+    store
+        .upsert_aesthetic_assessment(
+            DEFAULT_OWNER_ID,
+            &assessment("photo-stale", "strong-shot-v0"),
+        )
+        .unwrap();
+
+    let needed = store
+        .photos_for_analysis(DEFAULT_OWNER_ID, "strong-shot-v1")
+        .unwrap();
+    assert_eq!(
+        needed
+            .iter()
+            .map(|photo| photo.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["photo-stale", "photo-missing"],
+        "only stale or missing assessments are backfilled, in photos() order (path, id)"
+    );
+
+    store
+        .upsert_aesthetic_assessment(
+            DEFAULT_OWNER_ID,
+            &assessment("photo-stale", "strong-shot-v1"),
+        )
+        .unwrap();
+    let needed = store
+        .photos_for_analysis(DEFAULT_OWNER_ID, "strong-shot-v1")
+        .unwrap();
+    assert_eq!(
+        needed
+            .iter()
+            .map(|photo| photo.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["photo-missing"]
+    );
+}
+
+#[test]
+fn embedded_preview_provenance_is_rejected_structurally() {
+    let directory = TestDir::new("embedded-preview-rejected");
+    let store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 28, 19, 45, 0).unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &Photo {
+                id: "photo-preview".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                path: "/photos/preview.jpg".to_owned(),
+                sha256: "sha-preview".to_owned(),
+                width: 100,
+                height: 100,
+                format: "jpeg".to_owned(),
+                orientation: Some(1),
+                captured_at: None,
+                camera_make: None,
+                camera_model: None,
+                lens: None,
+                thumb_rel: None,
+                status: PhotoStatus::Pending,
+                indexed_at: None,
+            },
+        )
+        .unwrap();
+    let metadata = PhotoSourceMetadata {
+        photo_id: "photo-preview".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        source_format: "cr3".to_owned(),
+        decoder: "macos-imageio".to_owned(),
+        proxy_rel: Some("photos/photo-preview.jpg".to_owned()),
+        proxy_width: Some(960),
+        proxy_height: Some(640),
+        proxy_sha256: Some("proxy-sha".to_owned()),
+        proxy_provenance: PhotoProxyProvenance::EmbeddedPreview,
+        orientation_applied: true,
+        bit_depth: Some(8),
+        color_space: None,
+        icc_profile_name: None,
+        icc_profile_sha256: None,
+        exposure_json: "{}".to_owned(),
+        gps_present: false,
+        metadata_json: "{}".to_owned(),
+        original_size_bytes: 1000,
+        extracted_at: now,
+    };
+    let error = store
+        .upsert_photo_source_metadata(DEFAULT_OWNER_ID, &metadata)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("embedded_preview provenance is not producible"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -1377,7 +1689,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), 6);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()

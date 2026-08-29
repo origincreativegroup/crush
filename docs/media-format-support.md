@@ -48,7 +48,18 @@ rotation before processing.
 BRAW, R3D, and ProRes RAW errors explicitly state that embedded-preview extraction would not count
 as full support. Source files are never rewritten. Video proxies have content-derived stable paths,
 are used for visual analysis/playback, and the original remains the source for audio and final clip
-export.
+export. Edit proxies carry explicit output color tags: probed source color tags pass through
+unchanged, untagged sources are explicitly tagged SDR BT.709, and no tonemap filter is applied.
+After encoding, the proxy is re-probed and its color tags are recorded in the video source
+metadata_json next to the exact proxy recipe.
+
+## Known-unsupported formats
+
+Discovery never lets a recognized media file vanish silently. A curated registry of unsupported
+still-image and acquisition extensions (AVIF, JPEG XL, and acquisition RAW families such as ERF,
+IIQ, 3FR, X3F, GPR, MRW, PEF, and SRW) records a precise capability reason per file in the ingest
+summary errors; arbitrary non-media files stay unflagged. The registry is mirrored in
+`fixtures/source-formats/support-matrix.json` under `known_unsupported` and kept in sync by test.
 
 ## Evidence
 
