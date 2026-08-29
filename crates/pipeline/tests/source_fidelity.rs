@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -9,7 +10,10 @@ use crush_pipeline::sha256_file;
 use crush_pipeline::source::{decode_photo, write_jpeg_derivative};
 use crush_pipeline::video_source::proxy_policy;
 use crush_stage_split::ffmpeg::{self, Runner};
-use image::{GenericImageView, ImageDecoder, ImageFormat, ImageReader, Rgb, RgbImage};
+use image::codecs::jpeg::JpegEncoder;
+use image::{
+    GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Rgb, RgbImage,
+};
 use serde::Serialize;
 
 fn root() -> PathBuf {
@@ -155,6 +159,108 @@ fn corrupt_raw_variant_reports_decoder_and_never_falls_back_to_preview() {
 }
 
 #[test]
+fn oriented_heic_decodes_upright_and_matches_the_image_rs_reference() {
+    let temporary = tempfile::tempdir().unwrap();
+    let base = RgbImage::from_fn(80, 50, |x, y| Rgb([(x * 2) as u8, (y * 5) as u8, 128]));
+    let jpeg = temporary.path().join("oriented-source.jpg");
+    base.save_with_format(&jpeg, ImageFormat::Jpeg).unwrap();
+    let oriented = temporary.path().join("orientation-6.jpg");
+    std::fs::write(&oriented, jpeg_with_orientation(&jpeg, 6)).unwrap();
+    let heic = temporary.path().join("orientation-6.heic");
+    convert_with_sips(&["-s", "format", "heic"], &oriented, &heic);
+
+    let reference = decode_photo(&oriented).unwrap();
+    assert_eq!(reference.image.dimensions(), (50, 80));
+    assert_eq!(reference.orientation, Some(6));
+    let decoded = decode_photo(&heic).unwrap();
+    assert_eq!(decoded.image.dimensions(), (50, 80));
+    assert!(decoded.orientation_applied);
+    assert_pixels_match(&decoded.image.to_rgb8(), &reference.image.to_rgb8(), 16);
+}
+
+#[test]
+fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
+    let Some(srgb) = system_profile("sRGB Profile.icc") else {
+        return;
+    };
+    let Some(display_p3) = system_profile("Display P3.icc") else {
+        return;
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let base = RgbImage::from_fn(80, 50, |x, y| Rgb([(x * 3) as u8, (y * 4) as u8, 96]));
+
+    let jpeg = temporary.path().join("srgb-icc.jpg");
+    let mut encoder = JpegEncoder::new_with_quality(File::create(&jpeg).unwrap(), 92);
+    encoder.set_icc_profile(srgb.clone()).unwrap();
+    encoder.encode_image(&base).unwrap();
+    let heic = temporary.path().join("srgb-icc.heic");
+    let heic = try_convert_with_sips(
+        &[
+            "-s",
+            "format",
+            "heic",
+            "-s",
+            "iccProfile",
+            "/System/Library/ColorSync/Profiles/sRGB Profile.icc",
+        ],
+        &jpeg,
+        &heic,
+    );
+
+    let decoded_jpeg = decode_photo(&jpeg).unwrap();
+    assert_eq!(decoded_jpeg.icc_profile.as_deref(), Some(srgb.as_slice()));
+    let jpeg_derivative = write_jpeg_derivative(
+        &decoded_jpeg.image,
+        &temporary.path().join("srgb-derivative.jpg"),
+        64,
+        92,
+        decoded_jpeg.icc_profile.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(
+        read_back_profile(&jpeg_derivative.path).as_deref(),
+        Some(srgb.as_slice())
+    );
+
+    let Some(heic) = heic else {
+        eprintln!(
+            "skipping the HEIC ICC sub-case: sips refused --setProperty iccProfile on this macOS"
+        );
+        return;
+    };
+    let decoded_heic = decode_photo(&heic).unwrap();
+    let heic_profile = decoded_heic
+        .icc_profile
+        .clone()
+        .expect("sips should embed the requested ICC profile in the HEIC");
+    let heic_derivative = write_jpeg_derivative(
+        &decoded_heic.image,
+        &temporary.path().join("heic-derivative.jpg"),
+        64,
+        92,
+        Some(&heic_profile),
+    )
+    .unwrap();
+    assert_eq!(
+        read_back_profile(&heic_derivative.path).as_deref(),
+        Some(heic_profile.as_slice())
+    );
+
+    let mismatch = write_jpeg_derivative(
+        &decoded_jpeg.image,
+        &temporary.path().join("p3-derivative.jpg"),
+        64,
+        92,
+        Some(&display_p3),
+    )
+    .unwrap();
+    let read_back =
+        read_back_profile(&mismatch.path).expect("the Display P3 profile should be embedded");
+    assert_ne!(read_back, srgb);
+    assert_eq!(read_back, display_p3);
+}
+
+#[test]
 fn representative_video_containers_codecs_and_proxy_path_record_fidelity() {
     let resolved = ffmpeg::resolve().expect("Task 016 requires bundled development sidecars");
     let temporary = tempfile::tempdir().unwrap();
@@ -247,6 +353,76 @@ fn representative_video_containers_codecs_and_proxy_path_record_fidelity() {
             checks,
         },
     );
+}
+
+fn convert_with_sips(arguments: &[&str], source: &Path, output: &Path) {
+    let sips = Command::new("/usr/bin/sips")
+        .args(arguments)
+        .arg(source)
+        .arg("--out")
+        .arg(output)
+        .output()
+        .unwrap();
+    assert!(
+        sips.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sips.stderr)
+    );
+}
+
+fn try_convert_with_sips(arguments: &[&str], source: &Path, output: &Path) -> Option<PathBuf> {
+    let sips = Command::new("/usr/bin/sips")
+        .args(arguments)
+        .arg(source)
+        .arg("--out")
+        .arg(output)
+        .output()
+        .unwrap();
+    if sips.status.success() {
+        Some(output.to_path_buf())
+    } else {
+        eprintln!(
+            "sips failed ({}): {}",
+            sips.status,
+            String::from_utf8_lossy(&sips.stderr).trim()
+        );
+        None
+    }
+}
+
+fn system_profile(name: &str) -> Option<Vec<u8>> {
+    let path = Path::new("/System/Library/ColorSync/Profiles").join(name);
+    if !path.exists() {
+        eprintln!(
+            "skipping ICC profile check: {} is not installed",
+            path.display()
+        );
+        return None;
+    }
+    Some(std::fs::read(&path).unwrap())
+}
+
+fn read_back_profile(path: &Path) -> Option<Vec<u8>> {
+    let reader = ImageReader::open(path)
+        .unwrap()
+        .with_guessed_format()
+        .unwrap();
+    let mut decoder = reader.into_decoder().unwrap();
+    decoder.icc_profile().unwrap()
+}
+
+fn assert_pixels_match(left: &RgbImage, right: &RgbImage, tolerance: i32) {
+    assert_eq!(left.dimensions(), right.dimensions());
+    for (x, y, left_pixel) in left.enumerate_pixels() {
+        let right_pixel = right.get_pixel(x, y);
+        for channel in 0..3 {
+            let difference = i32::from(left_pixel.0[channel]) - i32::from(right_pixel.0[channel]);
+            assert!(
+                difference.abs() <= tolerance,
+                "channel {channel} at ({x},{y}) differs by {difference}"
+            );
+        }
+    }
 }
 
 fn jpeg_with_orientation(source: &Path, orientation: u16) -> Vec<u8> {

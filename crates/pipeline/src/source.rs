@@ -281,7 +281,17 @@ fn decode_with_macos_imageio(path: &Path, extension: &str) -> anyhow::Result<Dec
         format!("macOS ImageIO rendered .{extension}, but its output could not be decoded")
     })?;
     let icc_profile = decoder.icc_profile()?;
-    let image = DynamicImage::from_decoder(decoder)?;
+    let rendered_orientation = decoder
+        .exif_metadata()?
+        .and_then(|bytes| ExifReader::new().read_raw(bytes).ok())
+        .and_then(|exif| extract_exif(&exif).orientation);
+    extracted.orientation = rendered_orientation.or(extracted.orientation);
+    let orientation = extracted
+        .orientation
+        .and_then(Orientation::from_exif)
+        .unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
     let bit_depth = properties
         .get("bitsPerSample")
         .and_then(|value| value.parse::<i64>().ok())

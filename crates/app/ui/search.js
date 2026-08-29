@@ -82,6 +82,7 @@
 
   const fileName = (path) => path.split(/[\\/]/).at(-1) || path;
   const displayScore = (score) => Math.round(Math.min(1, Math.max(0, score)) * 100);
+  const signedPercent = (value) => `${value >= 0 ? "+" : ""}${Math.round(value * 100)}`;
 
   function showMessage(text, { error = false, action = null } = {}) {
     clearTimeout(state.messageTimer);
@@ -188,6 +189,42 @@
     }
   }
 
+  function resultBreakdownRows(result) {
+    const breakdown = result.breakdown || {};
+    return [
+      ["semantic match", breakdown.semantic],
+      ["transcript match", breakdown.transcript_boost],
+      ["general quality", breakdown.general_aesthetic],
+      ["your style", breakdown.personal_style],
+      [breakdown.editorial < 0 ? "editorial penalty" : "editorial context", breakdown.editorial],
+    ].filter(([, value]) => Number.isFinite(value) && Math.abs(value) >= 0.0001);
+  }
+
+  function breakdownSummary(result) {
+    const headline = `Score ${displayScore(result.score)}`;
+    const rows = resultBreakdownRows(result);
+    if (!rows.length) return `${headline} · cosine ${Number(result.cosine).toFixed(3)}`;
+    return `${headline}: ${rows.map(([label, value]) => `${label} ${signedPercent(value)}`).join(", ")}`;
+  }
+
+  function buildBreakdown(result) {
+    const rows = resultBreakdownRows(result);
+    const details = document.createElement("details");
+    details.className = "result-breakdown";
+    const summary = document.createElement("summary");
+    summary.textContent = "Why this result?";
+    const list = document.createElement("ul");
+    for (const [label, value] of rows) {
+      const item = document.createElement("li");
+      item.textContent = `${label} ${signedPercent(value)}`;
+      list.append(item);
+    }
+    details.append(summary, list);
+    details.hidden = !rows.length;
+    details.addEventListener("click", (event) => event.stopPropagation());
+    return details;
+  }
+
   function renderResults() {
     el.grid.replaceChildren();
     state.results.forEach((result, index) => {
@@ -222,25 +259,29 @@
       const score = document.createElement("span");
       score.className = "badge badge-score mono";
       score.textContent = String(displayScore(result.score));
-      score.title = `cosine ${result.cosine.toFixed(3)}`;
+      score.title = breakdownSummary(result);
       thumb.append(play, duration, score);
 
       const name = document.createElement("div");
       name.className = "file-name result-name";
       name.textContent = fileName(result.path);
       name.title = result.path;
-      const snippet = document.createElement("div");
-      snippet.className = "result-snippet";
+      const transcript = document.createElement("div");
+      transcript.className = "result-snippet";
+      transcript.textContent = result.transcript_snippet || "";
+      transcript.hidden = !result.transcript_snippet;
       const aesthetic = Number.isFinite(result.aesthetic_score)
         ? `Strong ${Math.round(result.aesthetic_score * 100)}`
         : "";
       const personal = Number.isFinite(result.personal_style_score)
-        ? `Style ${result.personal_style_score >= 0 ? "+" : ""}${Math.round(result.personal_style_score * 100)}`
+        ? `Style ${signedPercent(result.personal_style_score)}`
         : "";
-      snippet.textContent = result.transcript_snippet || [personal, aesthetic].filter(Boolean).join(" · ");
-      snippet.hidden = !snippet.textContent;
+      const styleLine = document.createElement("div");
+      styleLine.className = "result-style";
+      styleLine.textContent = [personal, aesthetic].filter(Boolean).join(" · ");
+      styleLine.hidden = !styleLine.textContent;
 
-      card.append(thumb, name, snippet);
+      card.append(thumb, name, transcript, styleLine, buildBreakdown(result));
       card.addEventListener("click", () => {
         selectResult(index);
         openAssetDetail(result);
@@ -322,6 +363,7 @@
       if (Number.isFinite(d.technicalScore)) scores.push(`technical ${Math.round(d.technicalScore * 100)}`);
       if (Number.isFinite(d.compositionScore)) scores.push(`design ${Math.round(d.compositionScore * 100)}`);
       if (Number.isFinite(d.momentScore)) scores.push(`moment ${Math.round(d.momentScore * 100)}`);
+      if (Number.isFinite(d.personalStyleScore)) scores.push(`your style ${signedPercent(d.personalStyleScore)}`);
       el.shotIndex.textContent = scores.join(" · ") || "Unreviewed";
       el.photo.src = fileSrc(d.photoPath);
       renderPhotoContext(d);
@@ -336,6 +378,7 @@
     if (Number.isFinite(d.technicalScore)) analysis.push(`technical ${Math.round(d.technicalScore * 100)}`);
     if (Number.isFinite(d.compositionScore)) analysis.push(`design ${Math.round(d.compositionScore * 100)}`);
     if (Number.isFinite(d.momentScore)) analysis.push(`moment ${Math.round(d.momentScore * 100)}`);
+    if (Number.isFinite(d.personalStyleScore)) analysis.push(`your style ${signedPercent(d.personalStyleScore)}`);
     el.shotIndex.textContent = [`shot ${d.idx + 1} of ${d.shotCount}`, ...analysis].join(" · ");
     el.prev.disabled = d.idx <= 0;
     el.next.disabled = d.idx + 1 >= d.shotCount;
