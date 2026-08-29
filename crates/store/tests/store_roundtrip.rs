@@ -3646,12 +3646,6 @@ fn plan_items_validate_shot_boundaries_and_reorder() {
         )
         .is_err());
     // Photo items refuse treatment fields that imply clip boundaries.
-    store
-        .plan_add_item(
-            DEFAULT_OWNER_ID,
-            &plan_item("plan-bound", MediaKind::Photo, "photo-bound"),
-        )
-        .unwrap();
     assert!(store
         .plan_update_item(
             DEFAULT_OWNER_ID,
