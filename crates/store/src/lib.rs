@@ -399,7 +399,7 @@ pub struct Plan {
 /// stay inside the source shot, plus pacing, crop, and grade treatment. Every item records
 /// its provenance (origin, rank, and profile version) and freezes the explainability signals
 /// observed when it was chosen in `signals_json`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PlanItem {
     pub owner_id: String,
     pub plan_id: String,
