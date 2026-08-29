@@ -21,11 +21,14 @@ mod macos {
     use crush_stage_embed::embedder::{Embedder, ProviderPreference};
     use crush_stage_split::ffmpeg;
     use crush_store::{
-        EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, PhotoStatus,
-        ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus,
-        Store, VideoStatus,
+        reference_scope_from_str, reference_scope_to_str, reference_status_to_str, AssetFilter,
+        Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta, FeedbackEvent,
+        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, PhotoStatus, ReferenceItemRole,
+        ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, ReviewOp,
+        SafetyFlags, SavedSearch, StackItem, StackItemRole, StackMediaKind, Store, VersionStack,
+        VideoStatus,
     };
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use tauri::{AppHandle, Emitter, Manager, State};
     use uuid::Uuid;
 
@@ -188,6 +191,131 @@ mod macos {
     struct ExportedClip {
         path: String,
         mode: String,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LibraryFilterArgs {
+        kind: Option<String>,
+        status: Option<String>,
+        usable: Option<bool>,
+        faces_visible: Option<bool>,
+        blur_required: Option<bool>,
+        quality_min: Option<i64>,
+        collection_id: Option<String>,
+        stack_id: Option<String>,
+        context_key: Option<String>,
+        search: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LibraryAssetView {
+        media_kind: String,
+        media_id: String,
+        path: String,
+        thumb_rel: Option<String>,
+        status: String,
+        indexed_at: Option<String>,
+        video_id: Option<String>,
+        start_s: Option<f64>,
+        end_s: Option<f64>,
+        width: Option<i64>,
+        height: Option<i64>,
+        quality: Option<i64>,
+        usable: bool,
+        standout: bool,
+        faces_visible: bool,
+        nametags_visible: bool,
+        blur_required: bool,
+        tags: String,
+        collection_ids: Vec<String>,
+        stack_ids: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LibraryCountsView {
+        photos: i64,
+        shots: i64,
+        picks: i64,
+        rejects: i64,
+        flagged: i64,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CollectionView {
+        id: String,
+        name: String,
+        description: String,
+        created_at: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CollectionItemArgs {
+        asset_type: String,
+        media_id: String,
+        context_key: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CollectionItemView {
+        media_kind: String,
+        media_id: String,
+        context_key: Option<String>,
+        marked: bool,
+        added_at: String,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StackView {
+        id: String,
+        name: String,
+        created_at: String,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SavedSearchView {
+        id: String,
+        name: String,
+        query: String,
+        context_key: String,
+        filters_json: String,
+        created_at: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReviewOpArgs {
+        op: String,
+        asset_type: Option<String>,
+        media_id: Option<String>,
+        rating: Option<i64>,
+        faces_visible: Option<bool>,
+        nametags_visible: Option<bool>,
+        blur_required: Option<bool>,
+        usable: Option<bool>,
+        collection_id: Option<String>,
+        context_key: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AnnotationPatchArgs {
+        description: Option<String>,
+        subjects: Option<String>,
+        action: Option<String>,
+        tags: Option<String>,
+        notes: Option<String>,
+        quality: Option<i64>,
+        crop_x: Option<f64>,
+        grade_json: Option<String>,
+        standout: Option<bool>,
     }
 
     #[tauri::command]
@@ -703,6 +831,8 @@ mod macos {
         signal: String,
         value: Option<f64>,
         context: Option<String>,
+        compared_asset_type: Option<String>,
+        compared_id: Option<String>,
         state: State<'_, RuntimeState>,
     ) -> CommandResult<String> {
         let paths = state.paths.clone();
@@ -718,6 +848,7 @@ mod macos {
                     "pick" => FeedbackSignal::Pick,
                     "reject" => FeedbackSignal::Reject,
                     "rating" => FeedbackSignal::Rating,
+                    "prefer" => FeedbackSignal::Prefer,
                     _ => anyhow::bail!("unsupported feedback signal {signal:?}"),
                 };
                 // Feedback events are append-only, so anything that slips through here is
@@ -740,7 +871,19 @@ mod macos {
                         ensure!(value == Some(-1.0), "reject feedback requires value -1");
                         Some(-1.0)
                     }
+                    FeedbackSignal::Prefer => {
+                        ensure!(value.is_none(), "prefer feedback does not take a value");
+                        None
+                    }
                     _ => anyhow::bail!("unsupported feedback signal"),
+                };
+                let compared_media_kind = match compared_asset_type.as_deref() {
+                    Some("photo") => Some(MediaKind::Photo),
+                    Some("video") => Some(MediaKind::Shot),
+                    Some(other) => {
+                        anyhow::bail!("unsupported compared asset type {other:?}")
+                    }
+                    None => None,
                 };
                 let store = Store::open(&paths.root)?;
                 let exists = match media_kind {
@@ -752,6 +895,21 @@ mod macos {
                     MediaKind::Shot => "shot",
                 };
                 ensure!(exists, "no {kind} exists with id {id}");
+                if let Some(compared_id) = &compared_id {
+                    let compared_exists = match compared_media_kind {
+                        Some(MediaKind::Photo) => {
+                            store.photo_by_id(DEFAULT_OWNER_ID, compared_id)?.is_some()
+                        }
+                        Some(MediaKind::Shot) => {
+                            store.shot_by_id(DEFAULT_OWNER_ID, compared_id)?.is_some()
+                        }
+                        None => false,
+                    };
+                    ensure!(
+                        compared_exists,
+                        "no compared asset exists with id {compared_id}"
+                    );
+                }
                 let event_id = Uuid::new_v4().to_string();
                 store.append_feedback(
                     DEFAULT_OWNER_ID,
@@ -762,8 +920,8 @@ mod macos {
                         media_id: id,
                         signal,
                         value,
-                        compared_media_kind: None,
-                        compared_media_id: None,
+                        compared_media_kind,
+                        compared_media_id: compared_id,
                         context_json: serde_json::json!({ "query": context.unwrap_or_default() })
                             .to_string(),
                         created_at: chrono::Utc::now(),
@@ -841,8 +999,8 @@ mod macos {
             name: set.name,
             context_key: set.context_key,
             description: set.description,
-            scope: crush_store::reference_scope_to_str(set.scope).to_owned(),
-            status: crush_store::reference_status_to_str(set.status).to_owned(),
+            scope: reference_scope_to_str(set.scope).to_owned(),
+            status: reference_status_to_str(set.status).to_owned(),
             item_count,
             created_at: set.created_at.to_rfc3339(),
             confirmed_at: set.confirmed_at.map(|value| value.to_rfc3339()),
@@ -1059,6 +1217,636 @@ mod macos {
         .map_err(|error| format!("style retrain worker failed: {error}"))?
     }
 
+    // ---- Library organization (Task 019a) ----
+
+    /// Mirrors `parse_media_kind` for the library commands; the UI talks about
+    /// "photo"/"video" assets.
+    fn parse_library_kind(value: &str) -> anyhow::Result<MediaKind> {
+        match value {
+            "photo" => Ok(MediaKind::Photo),
+            "video" | "shot" => Ok(MediaKind::Shot),
+            other => anyhow::bail!("unsupported asset type {other:?}"),
+        }
+    }
+
+    fn parse_stack_asset_type(value: &str) -> anyhow::Result<StackMediaKind> {
+        match value {
+            "photo" => Ok(StackMediaKind::Photo),
+            "video" => Ok(StackMediaKind::Video),
+            other => anyhow::bail!("unsupported stack asset type {other:?}"),
+        }
+    }
+
+    fn parse_stack_role(value: &str) -> anyhow::Result<StackItemRole> {
+        match value {
+            "original" => Ok(StackItemRole::Original),
+            "derived" => Ok(StackItemRole::Derived),
+            other => anyhow::bail!("unsupported stack item role {other:?}"),
+        }
+    }
+
+    fn library_asset_view(asset: LibraryAsset) -> LibraryAssetView {
+        LibraryAssetView {
+            media_kind: match asset.media_kind {
+                MediaKind::Photo => "photo".to_owned(),
+                MediaKind::Shot => "shot".to_owned(),
+            },
+            media_id: asset.media_id,
+            path: asset.path,
+            thumb_rel: asset.thumb_rel,
+            status: asset.status,
+            indexed_at: asset.indexed_at.map(|value| value.to_rfc3339()),
+            video_id: asset.video_id,
+            start_s: asset.start_s,
+            end_s: asset.end_s,
+            width: asset.width,
+            height: asset.height,
+            quality: asset.quality,
+            usable: asset.usable,
+            standout: asset.standout,
+            faces_visible: asset.faces_visible,
+            nametags_visible: asset.nametags_visible,
+            blur_required: asset.blur_required,
+            tags: asset.tags,
+            collection_ids: asset.collection_ids,
+            stack_ids: asset.stack_ids,
+        }
+    }
+
+    fn collection_view(collection: Collection) -> CollectionView {
+        CollectionView {
+            id: collection.id,
+            name: collection.name,
+            description: collection.description,
+            created_at: collection.created_at.to_rfc3339(),
+        }
+    }
+
+    fn stack_view(stack: VersionStack) -> StackView {
+        StackView {
+            id: stack.id,
+            name: stack.name,
+            created_at: stack.created_at.to_rfc3339(),
+        }
+    }
+
+    #[tauri::command]
+    fn library_browse(
+        filter: Option<LibraryFilterArgs>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<LibraryAssetView>> {
+        command_result((|| {
+            let args = filter.unwrap_or_default();
+            let kind = match args.kind.as_deref() {
+                Some("photo") => Some(MediaKind::Photo),
+                Some("shot" | "video") => Some(MediaKind::Shot),
+                Some(other) => anyhow::bail!("unsupported asset kind {other:?}"),
+                None => None,
+            };
+            let asset_filter = AssetFilter {
+                kind,
+                status: args.status,
+                usable: args.usable,
+                faces_visible: args.faces_visible,
+                blur_required: args.blur_required,
+                quality_min: args.quality_min,
+                collection_id: args.collection_id,
+                stack_id: args.stack_id,
+                context_key: args.context_key,
+                search: args.search,
+            };
+            let store = Store::open(&state.paths.root)?;
+            let assets = store.browse_assets(DEFAULT_OWNER_ID, &asset_filter)?;
+            Ok(assets.into_iter().map(library_asset_view).collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn library_counts(state: State<'_, RuntimeState>) -> CommandResult<LibraryCountsView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let counts = store.library_counts(DEFAULT_OWNER_ID)?;
+            Ok(LibraryCountsView {
+                photos: counts.photos,
+                shots: counts.shots,
+                picks: counts.picks,
+                rejects: counts.rejects,
+                flagged: counts.flagged,
+            })
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_create(
+        name: String,
+        description: Option<String>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<CollectionView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let collection = Collection {
+                id: Uuid::new_v4().to_string(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                name,
+                description: description.unwrap_or_default(),
+                created_at: chrono::Utc::now(),
+            };
+            store.collection_create(DEFAULT_OWNER_ID, &collection)?;
+            Ok(collection_view(collection))
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<CollectionView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .collection_list(DEFAULT_OWNER_ID)?
+                .into_iter()
+                .map(collection_view)
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_rename(
+        id: String,
+        name: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.collection_rename(DEFAULT_OWNER_ID, &id, &name)
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_delete(id: String, state: State<'_, RuntimeState>) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.collection_delete(DEFAULT_OWNER_ID, &id)
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_add_items(
+        id: String,
+        items: Vec<CollectionItemArgs>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<usize> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let added_at = chrono::Utc::now();
+            let mut added = 0usize;
+            for item in &items {
+                store.collection_add_item(
+                    DEFAULT_OWNER_ID,
+                    &CollectionItem {
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        collection_id: id.clone(),
+                        media_kind: parse_library_kind(&item.asset_type)?,
+                        media_id: item.media_id.clone(),
+                        context_key: item.context_key.clone(),
+                        marked: false,
+                        added_at,
+                    },
+                )?;
+                added += 1;
+            }
+            Ok(added)
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_remove_item(
+        id: String,
+        asset_type: String,
+        media_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            store.collection_remove_item(
+                DEFAULT_OWNER_ID,
+                &id,
+                parse_library_kind(&asset_type)?,
+                &media_id,
+            )
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_items(
+        id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<CollectionItemView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .collection_items(DEFAULT_OWNER_ID, &id)?
+                .into_iter()
+                .map(|item| CollectionItemView {
+                    media_kind: match item.media_kind {
+                        MediaKind::Photo => "photo".to_owned(),
+                        MediaKind::Shot => "shot".to_owned(),
+                    },
+                    media_id: item.media_id,
+                    context_key: item.context_key,
+                    marked: item.marked,
+                    added_at: item.added_at.to_rfc3339(),
+                })
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn collection_set_item_marked(
+        id: String,
+        asset_type: String,
+        media_id: String,
+        marked: bool,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<()> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            store.collection_set_item_marked(
+                DEFAULT_OWNER_ID,
+                &id,
+                parse_library_kind(&asset_type)?,
+                &media_id,
+                marked,
+            )
+        })())
+    }
+
+    /// Creates a new `unconfirmed` reference set from a collection. The explicit confirm step
+    /// afterwards is what makes the set contribute positive signal.
+    #[tauri::command]
+    fn collection_designate_reference_set(
+        collection_id: String,
+        name: String,
+        context_key: String,
+        scope: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<ReferenceSetView> {
+        command_result((|| {
+            let scope = reference_scope_from_str(&scope)?;
+            let mut store = Store::open(&state.paths.root)?;
+            let set = store.collection_designate_as_reference_set(
+                DEFAULT_OWNER_ID,
+                &collection_id,
+                &name,
+                &context_key,
+                scope,
+            )?;
+            reference_set_view(&store, set)
+        })())
+    }
+
+    #[tauri::command]
+    fn stack_create(name: String, state: State<'_, RuntimeState>) -> CommandResult<StackView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let stack = VersionStack {
+                id: Uuid::new_v4().to_string(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                name,
+                created_at: chrono::Utc::now(),
+            };
+            store.stack_create(DEFAULT_OWNER_ID, &stack)?;
+            Ok(stack_view(stack))
+        })())
+    }
+
+    #[tauri::command]
+    fn stack_add_item(
+        stack_id: String,
+        asset_type: String,
+        media_id: String,
+        role: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<()> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            store.stack_add_item(
+                DEFAULT_OWNER_ID,
+                &StackItem {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    stack_id,
+                    media_kind: parse_stack_asset_type(&asset_type)?,
+                    media_id,
+                    role: parse_stack_role(&role)?,
+                    added_at: chrono::Utc::now(),
+                },
+            )
+        })())
+    }
+
+    #[tauri::command]
+    fn stack_remove_item(
+        stack_id: String,
+        asset_type: String,
+        media_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            store.stack_remove_item(
+                DEFAULT_OWNER_ID,
+                &stack_id,
+                parse_stack_asset_type(&asset_type)?,
+                &media_id,
+            )
+        })())
+    }
+
+    #[tauri::command]
+    fn stacks_for_asset(
+        asset_type: String,
+        media_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<StackView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .stacks_for_asset(
+                    DEFAULT_OWNER_ID,
+                    parse_stack_asset_type(&asset_type)?,
+                    &media_id,
+                )?
+                .into_iter()
+                .map(stack_view)
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn saved_search_create(
+        name: String,
+        query: String,
+        context_key: Option<String>,
+        filters_json: Option<String>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<SavedSearchView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let saved = SavedSearch {
+                id: Uuid::new_v4().to_string(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                name,
+                query,
+                context_key: context_key.unwrap_or_else(|| "default".to_owned()),
+                filters_json: filters_json.unwrap_or_else(|| "{}".to_owned()),
+                created_at: chrono::Utc::now(),
+            };
+            store.saved_search_create(DEFAULT_OWNER_ID, &saved)?;
+            Ok(SavedSearchView {
+                id: saved.id,
+                name: saved.name,
+                query: saved.query,
+                context_key: saved.context_key,
+                filters_json: saved.filters_json,
+                created_at: saved.created_at.to_rfc3339(),
+            })
+        })())
+    }
+
+    #[tauri::command]
+    fn saved_search_list(state: State<'_, RuntimeState>) -> CommandResult<Vec<SavedSearchView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .saved_search_list(DEFAULT_OWNER_ID)?
+                .into_iter()
+                .map(|saved| SavedSearchView {
+                    id: saved.id,
+                    name: saved.name,
+                    query: saved.query,
+                    context_key: saved.context_key,
+                    filters_json: saved.filters_json,
+                    created_at: saved.created_at.to_rfc3339(),
+                })
+                .collect())
+        })())
+    }
+
+    #[tauri::command]
+    fn saved_search_delete(id: String, state: State<'_, RuntimeState>) -> CommandResult<bool> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            store.saved_search_delete(DEFAULT_OWNER_ID, &id)
+        })())
+    }
+
+    /// The only UI path to the safety columns. Clearing a flag is an explicit user action; the
+    /// confirm dialog lives in the review UI (019b), and no machine path shares this writer.
+    #[tauri::command]
+    fn set_safety_flags(
+        asset_type: String,
+        id: String,
+        faces_visible: bool,
+        nametags_visible: bool,
+        blur_required: bool,
+        usable: bool,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<()> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            store.set_safety_flags(
+                DEFAULT_OWNER_ID,
+                parse_library_kind(&asset_type)?,
+                &id,
+                SafetyFlags {
+                    usable,
+                    faces_visible,
+                    nametags_visible,
+                    blur_required,
+                },
+            )?;
+            Ok(())
+        })())
+    }
+
+    /// Editable current-state metadata; each edited category also appends its append-only
+    /// feedback signal (tags, edits, crops, grades, ratings).
+    #[tauri::command]
+    fn set_annotation(
+        asset_type: String,
+        id: String,
+        fields: Option<AnnotationPatchArgs>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<()> {
+        command_result((|| {
+            let patch = fields.unwrap_or_default();
+            let media_kind = parse_library_kind(&asset_type)?;
+            let store = Store::open(&state.paths.root)?;
+            let now = chrono::Utc::now();
+            let mut annotation =
+                match store.editorial_annotation(DEFAULT_OWNER_ID, media_kind, &id)? {
+                    Some(value) => value,
+                    None => {
+                        // Defaults mirror the 0002 columns; the upsert's target-existence
+                        // triggers refuse unknown media.
+                        EditorialAnnotation {
+                            owner_id: DEFAULT_OWNER_ID.to_owned(),
+                            media_kind,
+                            media_id: id.clone(),
+                            description: String::new(),
+                            subjects: String::new(),
+                            action: String::new(),
+                            tags: String::new(),
+                            quality: None,
+                            standout: false,
+                            usable: true,
+                            faces_visible: false,
+                            nametags_visible: false,
+                            blur_required: false,
+                            crop_x: None,
+                            grade_json: None,
+                            notes: String::new(),
+                            updated_at: now,
+                        }
+                    }
+                };
+            // Capture the edit flags before the patch fields are moved into the annotation.
+            let tags_edited = patch.tags.is_some();
+            let copy_edited = patch.description.is_some()
+                || patch.subjects.is_some()
+                || patch.action.is_some()
+                || patch.notes.is_some();
+            let crop_edited = patch.crop_x.is_some();
+            let grade_edited = patch.grade_json.is_some();
+            if let Some(value) = patch.description {
+                annotation.description = value;
+            }
+            if let Some(value) = patch.subjects {
+                annotation.subjects = value;
+            }
+            if let Some(value) = patch.action {
+                annotation.action = value;
+            }
+            if let Some(value) = patch.tags {
+                annotation.tags = value;
+            }
+            if let Some(value) = patch.notes {
+                annotation.notes = value;
+            }
+            if let Some(value) = patch.quality {
+                annotation.quality = Some(value);
+            }
+            if let Some(value) = patch.crop_x {
+                annotation.crop_x = Some(value);
+            }
+            if let Some(value) = patch.grade_json {
+                annotation.grade_json = Some(value);
+            }
+            if let Some(value) = patch.standout {
+                annotation.standout = value;
+            }
+            annotation.updated_at = now;
+            store.upsert_editorial_annotation(DEFAULT_OWNER_ID, &annotation)?;
+
+            let mut signals: Vec<(FeedbackSignal, Option<f64>)> = Vec::new();
+            if tags_edited {
+                signals.push((FeedbackSignal::Tag, None));
+            }
+            if copy_edited {
+                signals.push((FeedbackSignal::Edit, None));
+            }
+            if crop_edited {
+                signals.push((FeedbackSignal::Crop, None));
+            }
+            if grade_edited {
+                signals.push((FeedbackSignal::Grade, None));
+            }
+            if let Some(rating) = patch.quality {
+                signals.push((FeedbackSignal::Rating, Some(rating as f64)));
+            }
+            for (signal, value) in signals {
+                store.append_feedback(
+                    DEFAULT_OWNER_ID,
+                    &FeedbackEvent {
+                        id: Uuid::new_v4().to_string(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        media_kind,
+                        media_id: id.clone(),
+                        signal,
+                        value,
+                        compared_media_kind: None,
+                        compared_media_id: None,
+                        context_json: "{}".to_owned(),
+                        created_at: now,
+                    },
+                )?;
+            }
+            Ok(())
+        })())
+    }
+
+    /// Bulk pick/reject/rate/flag/add-to-collection. One bad op aborts the whole batch.
+    #[tauri::command]
+    fn review_batch(
+        ops: Vec<ReviewOpArgs>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<usize> {
+        command_result((|| {
+            let mut review_ops = Vec::with_capacity(ops.len());
+            for op in &ops {
+                let media_kind = match &op.asset_type {
+                    Some(value) => parse_library_kind(value)?,
+                    None => anyhow::bail!("review op {:?} requires assetType", op.op),
+                };
+                let media_id = op
+                    .media_id
+                    .clone()
+                    .with_context(|| format!("review op {:?} requires mediaId", op.op))?;
+                review_ops.push(match op.op.as_str() {
+                    "pick" => ReviewOp::Pick {
+                        media_kind,
+                        media_id,
+                    },
+                    "reject" => ReviewOp::Reject {
+                        media_kind,
+                        media_id,
+                    },
+                    "rate" => ReviewOp::Rate {
+                        media_kind,
+                        media_id,
+                        rating: op.rating.context("rate op requires rating")?,
+                    },
+                    "flag" => ReviewOp::SetFlags {
+                        media_kind,
+                        media_id,
+                        flags: SafetyFlags {
+                            usable: op.usable.context("flag op requires usable")?,
+                            faces_visible: op
+                                .faces_visible
+                                .context("flag op requires facesVisible")?,
+                            nametags_visible: op
+                                .nametags_visible
+                                .context("flag op requires nametagsVisible")?,
+                            blur_required: op
+                                .blur_required
+                                .context("flag op requires blurRequired")?,
+                        },
+                    },
+                    "add_to_collection" => ReviewOp::AddToCollection {
+                        collection_id: op
+                            .collection_id
+                            .clone()
+                            .context("add_to_collection op requires collectionId")?,
+                        media_kind,
+                        media_id,
+                        context_key: op.context_key.clone(),
+                    },
+                    other => anyhow::bail!("unsupported review op {other:?}"),
+                });
+            }
+            let mut store = Store::open(&state.paths.root)?;
+            store.bulk_review(DEFAULT_OWNER_ID, &review_ops)
+        })())
+    }
+
     #[tauri::command]
     fn shot_at_index(
         video_id: String,
@@ -1091,6 +1879,7 @@ mod macos {
     async fn export_clip(
         id: String,
         out: String,
+        allow_unsafe_export: Option<bool>,
         state: State<'_, RuntimeState>,
     ) -> CommandResult<ExportedClip> {
         let config = state.config.clone();
@@ -1098,6 +1887,25 @@ mod macos {
         tauri::async_runtime::spawn_blocking(move || {
             command_result((|| {
                 let output = PathBuf::from(out);
+                // Earliest privacy enforcement point (TASK-021 adds the full render/export
+                // gate): refuse to export a shot the owner flagged unusable or blur-required
+                // unless the request explicitly acknowledges it. Machine scores can never
+                // clear these flags, so this refusal can only be lifted by the user.
+                {
+                    let store = Store::open(&paths.root)?;
+                    let annotation = store.editorial_annotation(
+                        DEFAULT_OWNER_ID,
+                        crush_store::MediaKind::Shot,
+                        &id,
+                    )?;
+                    let flagged =
+                        annotation.is_some_and(|value| !value.usable || value.blur_required);
+                    ensure!(
+                        !flagged || allow_unsafe_export == Some(true),
+                        "shot {id} is flagged unusable or blur-required; export was refused \
+                         because allow_unsafe_export was not set"
+                    );
+                }
                 let result = Pipeline::new(config, paths, CancellationToken::default())
                     .export_clip(&id, &output)?;
                 Ok(ExportedClip {
@@ -1337,6 +2145,27 @@ mod macos {
                 style_profile_status,
                 style_profile_reset,
                 style_profile_retrain,
+                library_browse,
+                library_counts,
+                collection_create,
+                collection_list,
+                collection_rename,
+                collection_delete,
+                collection_add_items,
+                collection_remove_item,
+                collection_items,
+                collection_set_item_marked,
+                collection_designate_reference_set,
+                stack_create,
+                stack_add_item,
+                stack_remove_item,
+                stacks_for_asset,
+                saved_search_create,
+                saved_search_list,
+                saved_search_delete,
+                set_safety_flags,
+                set_annotation,
+                review_batch,
                 export_clip,
                 open_in_finder
             ])
@@ -1375,7 +2204,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=6"));
+            assert!(report.contains("schema=8"));
         }
     }
 }
