@@ -537,7 +537,7 @@ fn style_status(paths: &AppPaths) -> anyhow::Result<()> {
 }
 
 fn style_reset(paths: &AppPaths) -> anyhow::Result<()> {
-    let store = Store::open(&paths.root)?;
+    let mut store = Store::open(&paths.root)?;
     let count = store.reset_style_profiles(DEFAULT_OWNER_ID)?;
     println!("Deactivated {count} style profile(s); ranking uses the general model.");
     Ok(())
