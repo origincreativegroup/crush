@@ -75,9 +75,7 @@ impl Pipeline {
         lower_priority();
         let media = collect_media_files(input)?;
         ensure!(
-            !media.videos.is_empty()
-                || !media.photos.is_empty()
-                || !media.unsupported.is_empty(),
+            !media.videos.is_empty() || !media.photos.is_empty() || !media.unsupported.is_empty(),
             "no supported photo or video files found at {}",
             input.display()
         );
@@ -312,12 +310,7 @@ impl Pipeline {
                 if self.cancellation.is_cancelled() {
                     store.job_cancel(DEFAULT_OWNER_ID, &job.id, Utc::now())?;
                 } else {
-                    store.job_fail(
-                        DEFAULT_OWNER_ID,
-                        &job.id,
-                        Utc::now(),
-                        &format!("{error:#}"),
-                    )?;
+                    store.job_fail(DEFAULT_OWNER_ID, &job.id, Utc::now(), &format!("{error:#}"))?;
                 }
                 if store.photo_by_id(DEFAULT_OWNER_ID, photo_id)?.is_some() {
                     store.set_photo_status(DEFAULT_OWNER_ID, photo_id, PhotoStatus::Failed)?;
@@ -1207,9 +1200,10 @@ fn decode_photo_thumbnails(
 /// recorded at index time. Rows without a recorded thumbnail hash are treated as incomplete
 /// so the next ingest re-indexes them and backfills the hash.
 fn photo_fidelity_complete(store: &Store, photo: &Photo, metadata: &PhotoSourceMetadata) -> bool {
-    let (Some(proxy_rel), Some(proxy_sha256)) =
-        (metadata.proxy_rel.as_deref(), metadata.proxy_sha256.as_deref())
-    else {
+    let (Some(proxy_rel), Some(proxy_sha256)) = (
+        metadata.proxy_rel.as_deref(),
+        metadata.proxy_sha256.as_deref(),
+    ) else {
         return false;
     };
     let Ok(proxy_path) = store.proxy_path(proxy_rel) else {
@@ -1247,12 +1241,13 @@ fn video_fidelity_complete(store: &Store, video_id: &str) -> anyhow::Result<bool
         return Ok(false);
     };
     let proxy_intact = !metadata.proxy_required
-        || match (metadata.proxy_rel.as_deref(), metadata.proxy_sha256.as_deref()) {
-            (Some(relative), Some(expected)) => store
-                .proxy_path(relative)
-                .is_ok_and(|proxy| {
-                    proxy.is_file() && sha256_file(&proxy).is_ok_and(|hash| hash == expected)
-                }),
+        || match (
+            metadata.proxy_rel.as_deref(),
+            metadata.proxy_sha256.as_deref(),
+        ) {
+            (Some(relative), Some(expected)) => store.proxy_path(relative).is_ok_and(|proxy| {
+                proxy.is_file() && sha256_file(&proxy).is_ok_and(|hash| hash == expected)
+            }),
             _ => false,
         };
     if !proxy_intact {

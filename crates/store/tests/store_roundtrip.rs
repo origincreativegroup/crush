@@ -1092,7 +1092,11 @@ fn photos_for_analysis_returns_only_missing_or_stale_done_photos() {
     let current = photo("photo-current", "/photos/z-current.jpg", PhotoStatus::Done);
     let stale = photo("photo-stale", "/photos/a-stale.jpg", PhotoStatus::Done);
     let missing = photo("photo-missing", "/photos/m-missing.jpg", PhotoStatus::Done);
-    let pending = photo("photo-pending", "/photos/p-pending.jpg", PhotoStatus::Pending);
+    let pending = photo(
+        "photo-pending",
+        "/photos/p-pending.jpg",
+        PhotoStatus::Pending,
+    );
     for candidate in [&current, &stale, &missing, &pending] {
         store.upsert_photo(DEFAULT_OWNER_ID, candidate).unwrap();
     }

@@ -125,8 +125,7 @@ pub fn is_supported_photo_extension(path: &Path) -> bool {
 }
 
 pub fn photo_support_matrix() -> Vec<PhotoCapability> {
-    let image_io_formats =
-        macos_imageio_formats(&CancellationToken::default()).unwrap_or_default();
+    let image_io_formats = macos_imageio_formats(&CancellationToken::default()).unwrap_or_default();
     PHOTO_EXTENSIONS
         .iter()
         .map(|extension| {
@@ -159,10 +158,7 @@ pub fn photo_support_matrix() -> Vec<PhotoCapability> {
 /// Decode one photo through its enabled full decoder. The macOS ImageIO path spawns sips
 /// subprocesses, so the pipeline cancellation token is threaded through: cancelling ingest
 /// kills a running sips child instead of hanging on it.
-pub fn decode_photo(
-    path: &Path,
-    cancellation: &CancellationToken,
-) -> anyhow::Result<DecodedPhoto> {
+pub fn decode_photo(path: &Path, cancellation: &CancellationToken) -> anyhow::Result<DecodedPhoto> {
     let extension = extension(path)?;
     if IMAGE_RS_EXTENSIONS.contains(&extension.as_str()) {
         decode_with_image_rs(path, &extension)
@@ -517,14 +513,8 @@ fn run_sips_with_control(
     let mut child = command
         .spawn()
         .context("failed to start sips (macOS ImageIO)")?;
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .context("sips stdout pipe missing")?;
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .context("sips stderr pipe missing")?;
+    let mut stdout_pipe = child.stdout.take().context("sips stdout pipe missing")?;
+    let mut stderr_pipe = child.stderr.take().context("sips stderr pipe missing")?;
     let stdout_thread = thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = stdout_pipe.read_to_end(&mut bytes);

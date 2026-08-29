@@ -1165,8 +1165,8 @@ struct ProbeSideData {
 /// stays unknown so the direct-edit gate can require a proxy instead of guessing.
 const KNOWN_8BIT_PIXEL_FORMATS: &[&str] = &[
     "yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "yuv410p", "yuv411p",
-    "nv12", "nv21", "nv16", "yuyv422", "uyvy422", "gray", "gbrp", "rgb24", "bgr24", "rgba",
-    "bgra", "argb", "abgr", "rgb0", "bgr0", "pal8",
+    "nv12", "nv21", "nv16", "yuyv422", "uyvy422", "gray", "gbrp", "rgb24", "bgr24", "rgba", "bgra",
+    "argb", "abgr", "rgb0", "bgr0", "pal8",
 ];
 
 fn infer_bit_depth(stream: &ProbeStream) -> Option<u8> {
