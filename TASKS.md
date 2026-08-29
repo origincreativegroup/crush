@@ -22,9 +22,10 @@
 | TASK-015 | JPEG/PNG ingest, thumbnails, vectors, and mixed-media search | Codex (Mac) | done — real-model photo vertical slice |
 | TASK-016 | RAW/HEIF/TIFF photo ingest + production-video source support | Codex (Mac) | done — full-decode capability gates, source metadata, color-aware proxies |
 | TASK-017 | General strong-shot and explainable aesthetic analysis | Codex (Mac) | done — cold-start technical/design/moment evidence, calibrated and backfillable |
-| TASK-018 | Previous-work examples + personal-style learner/evaluation | OpenCode | 018a done (PR #25) — 018b UI in flight; held-out style proof awaits John's review |
+| TASK-018 | Previous-work examples + personal-style learner/evaluation | OpenCode | 018a/b merged (#25/#29); human style proof OPEN — fresh review found evaluation gaps; UI experimental |
 | TASK-019 | Mixed-media review and DAM organization | OpenCode | done — 019a PR #30, 019b PR #31 |
-| TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | OpenCode | 020a done (PR #33, + fix #34) — 020b UI next |
+| TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | OpenCode + Codex | 020a merged (#33/#34); 020b UI implemented; automatic sequence/repetition judgment remains open |
+| TASK-020b | Plans UI + selection provenance | Codex (Mac) | implemented — final PR/CI gate; see done/TASK-020b.md |
 | TASK-021 | Non-destructive recipes + photo/video render and export | Codex (Mac) | backlog — rendered derivatives only; originals stay immutable |
 | TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | backlog — import confirmed editorial evidence into the unified schema |
 | TASK-023 | DAM release packaging, UI CI, and clean-machine acceptance | Codex (Mac) | backlog — after end-to-end photo/video render workflow |
@@ -33,7 +34,9 @@
 | TASK-026 | Pipeline ops (analyze staleness, cancellable renders, photo jobs) | OpenCode | done — PR #23; schema v6 photo job lifecycle |
 | TASK-027 | App robustness + honest UI harness | OpenCode | done — PR #24 (+ integration fix #27); CSP, async feedback, iframe harness |
 
-## Team routing (2026-08-29)
-OpenCode runs the spec + implementation agent teams under Claude-as-PM; every task lands as its own
-squash PR gated by Linux + macOS CI. Hard stops stay human: 018 held-out style proof (eval output in
-PR #25), 021 render-golden review, 023 clean-machine acceptance.
+## Current continuation (2026-08-29)
+
+Codex reviewed the merged OpenCode work and is continuing in John's order: 020b, 021, 022, 023.
+See `docs/review-2026-08-29.md` for findings and reproduced style probes. Each task gets its own
+PR and current Linux/macOS verification. Hard stops stay human: 018 held-out style proof,
+021 render-golden review, 023 clean-machine acceptance. Synthetic probes are not style approval.

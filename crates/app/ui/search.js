@@ -14,10 +14,12 @@
     searchView: $("#search-view"),
     styleView: $("#style-view"),
     reviewView: $("#review-view"),
+    plansView: $("#plans-view"),
     navSearch: $("#nav-search"),
     navLibrary: $("#nav-library"),
     navStyle: $("#nav-style"),
     navReview: $("#nav-review"),
+    navPlans: $("#nav-plans"),
     input: $("#search-input"),
     top: $("#top-select"),
     count: $("#result-count"),
@@ -114,10 +116,12 @@
     el.searchView.hidden = view !== "search";
     el.styleView.hidden = view !== "style";
     el.reviewView.hidden = view !== "review";
+    el.plansView.hidden = view !== "plans";
     el.navSearch.classList.toggle("active", view === "search");
     el.navLibrary.classList.toggle("active", view === "library");
     el.navStyle.classList.toggle("active", view === "style");
     el.navReview.classList.toggle("active", view === "review");
+    el.navPlans.classList.toggle("active", view === "plans");
     if (view === "search") {
       el.input.focus();
       el.input.select();
@@ -133,6 +137,7 @@
       // style.js owns the panel contents; it refreshes on this event.
       document.dispatchEvent(new CustomEvent("crush:style-shown"));
     }
+    if (view === "plans") document.dispatchEvent(new CustomEvent("crush:plans-shown"));
   }
 
   // style.js renders the "Add to style set" control in the detail drawer and needs the
@@ -647,6 +652,7 @@
   el.navLibrary.addEventListener("click", () => showView("library"));
   el.navStyle.addEventListener("click", () => showView("style"));
   el.navReview.addEventListener("click", () => showView("review"));
+  el.navPlans.addEventListener("click", () => showView("plans"));
   el.goLibrary.addEventListener("click", () => showView("library"));
   // library.js (review grid) opens the shared detail drawer through this event; a plain DOM
   // event keeps the two modules decoupled (same pattern as the style panel).

@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Crush — local-first photo/video editorial intelligence (Node is used only for the browser-driven UI harness)",
   "scripts": {
-    "test:ui": "node scripts/ui-harness.mjs"
+    "test:ui": "node scripts/ui-harness.mjs",
+    "preview:ui": "node scripts/ui-preview.mjs"
   },
   "devDependencies": {
     "playwright-core": "1.49.1"

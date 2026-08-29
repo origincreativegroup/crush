@@ -55,6 +55,9 @@ jobs:
           cp "$CRUSH_TEST_SIDECARS/ffmpeg" sidecars/ffmpeg-aarch64-apple-darwin
           cp "$CRUSH_TEST_SIDECARS/ffprobe" sidecars/ffprobe-aarch64-apple-darwin
       - run: cargo check -p crush-app
+      - run: cargo clippy -p crush-app --all-targets -- -D warnings
+      - run: cargo test -p crush-app
+      - run: cargo test -p crush-pipeline --lib
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -62,8 +65,6 @@ jobs:
         run: npm ci --no-fund --no-audit
       - name: UI harness scenarios (system Chrome)
         run: npm run test:ui
-        # Non-blocking until proven on the Mac runner; system Chrome is preinstalled there.
-        continue-on-error: true
       - run: cargo test -p crush-stage-embed --test embedding_goldens clip_token_ids_match_all_text_goldens -- --nocapture
       - run: cargo test -p crush-stage-embed --test embedding_goldens cpu_image_and_text_embeddings_match_goldens -- --nocapture
       - run: cargo test -p crush-cli --test search_fixtures -- --nocapture

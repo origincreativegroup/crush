@@ -842,6 +842,7 @@ dependencies = [
  "chrono",
  "crush-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "tracing",
 ]

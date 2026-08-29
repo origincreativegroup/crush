@@ -39,7 +39,135 @@ async function mockCalls(page) {
   return frame.evaluate(() => window.__crushMock.calls);
 }
 
+async function createPlan(page, name = "Launch selects") {
+  const frame = page.frameLocator("#app-frame");
+  await frame.locator("#nav-plans").click();
+  await frame.locator("#plan-new-name").fill(name);
+  await frame.locator("#plan-new-context").fill("campaign");
+  await frame.locator("#plan-create-form button").click();
+  await frame.locator("#plan-editor").waitFor({ state: "visible" });
+  return frame;
+}
+
 const tests = {
+  async "plans-editor"(page) {
+    const frame = await createPlan(page);
+    await frame.locator("#plan-brief").fill("Quiet launch portraits");
+    await frame.locator('#plan-header-form button[type="submit"]').click();
+    await frame.locator("#plan-generate").click();
+    await poll(async () => await frame.locator("#plan-general .plans-candidate").count() === 2);
+    assert.match(await visibleText(frame.locator("#plan-personal-status")), /Experimental profile v3.*review pending/);
+    await frame.locator("#plan-general .plans-candidate").first().locator("button").click();
+    await frame.locator("#plan-personal .plans-candidate").first().locator("button").click();
+    const items = frame.locator("#plan-items .plans-item");
+    await poll(async () => await items.count() === 2);
+    assert.equal(await visibleText(items.nth(0).locator(".plans-pill")), "General");
+    assert.match(await visibleText(items.nth(1).locator(".plans-pill")), /Personalized · profile v3/);
+    assert.equal(await frame.locator("#plan-general .plans-candidate button:disabled").count(), 2);
+    const original = (await mockCalls(page)).filter((call) => call.command === "plan_add_item");
+    assert.equal(original[0].args.item.origin, "general");
+    assert.equal(original[0].args.item.profileVersion, null);
+    assert.equal(original[1].args.item.origin, "personal");
+    const frozen = JSON.parse(original[1].args.item.signalsJson);
+    assert.equal(frozen.profile.id, "profile-demo");
+    assert.equal(frozen.context, "campaign");
+    assert.equal(frozen.lane, "personalized");
+    assert.equal(frozen.ordinal, 1);
+
+    await items.nth(0).locator('[name="startS"]').fill("3.4");
+    await items.nth(0).locator('[name="endS"]').fill("5.2");
+    await items.nth(0).locator('[name="reason"]').fill("Hold the quiet moment");
+    await items.nth(0).locator('[name="pacing"]').fill("0.35");
+    await items.nth(0).locator('[name="cropX"]').fill("0.6");
+    await items.nth(0).locator('[name="gradeJson"]').fill('{"exposure":0.1}');
+    // An unsaved second item must survive saving the first.
+    await items.nth(1).locator('[name="reason"]').fill("A second draft");
+    await items.nth(0).locator('button[type="submit"]').click();
+    assert.equal(await items.nth(1).locator('[name="reason"]').inputValue(), "A second draft");
+    await items.nth(1).locator('button[type="submit"]').click();
+    await frame.locator("#plan-revision-label").fill("First selects");
+    await frame.locator("#plan-revision-form button").click();
+    await poll(async () => await frame.locator("#plan-revisions button").count() === 1);
+    await items.nth(1).getByRole("button", { name: "Move up", exact: true }).click();
+    assert.match(await visibleText(items.nth(0).locator(".plans-pill")), /Personalized/);
+    await items.nth(0).getByRole("button", { name: "Remove", exact: true }).click();
+    await poll(async () => await items.count() === 1);
+    assert.equal((await mockCalls(page)).filter((call) => call.command === "record_feedback").length, 0);
+    await frame.locator("#plan-revisions button").click();
+    await frame.locator('#plan-confirm button[value="confirm"]').click();
+    await poll(async () => await items.count() === 2);
+    assert.equal(await items.nth(0).locator('[name="startS"]').inputValue(), "3.4");
+    assert.equal(await items.nth(0).locator('[name="endS"]').inputValue(), "5.2");
+    assert.match(await visibleText(items.nth(1).locator(".plans-pill")), /Personalized · profile v3/);
+    await items.nth(0).getByRole("button", { name: "Pick for this context", exact: true }).click();
+    const feedback = (await mockCalls(page)).filter((call) => call.command === "record_feedback");
+    assert.equal(feedback.length, 1);
+    assert.equal(feedback[0].args.contextKey, "campaign");
+    assert.equal(feedback[0].args.context, "Quiet launch portraits");
+    await frame.locator("#plan-duplicate").click();
+    await poll(async () => await frame.locator("#plans-list button").count() === 2);
+    assert.equal(await frame.locator("#plan-name").inputValue(), "Launch selects copy");
+    await frame.locator("#plan-delete").click();
+    await frame.locator('#plan-confirm button[value="cancel"]').click();
+    assert.equal(await frame.locator("#plans-list button").count(), 2);
+    await frame.locator("#plan-delete").click();
+    await frame.locator('#plan-confirm button[value="confirm"]').click();
+    await poll(async () => await frame.locator("#plans-list button").count() === 1);
+    await frame.locator("#plans-list button").click();
+    assert.equal(await items.count(), 2);
+    assert.equal(await frame.locator("#plan-revisions button").count(), 1);
+  },
+
+  async "plans-general"(page) {
+    const frame = await createPlan(page, "Cold start");
+    await frame.locator("#plan-generate").click();
+    await poll(async () => await frame.locator("#plan-general .plans-candidate").count() === 2);
+    assert.equal(await frame.locator("#plan-personal .plans-candidate").count(), 0);
+    await frame.locator("#plan-brief").fill("Evening light");
+    await frame.locator('#plan-header-form button[type="submit"]').click();
+    await frame.locator("#plan-generate").click();
+    await poll(async () => await frame.locator("#plan-personal .plans-candidate").count() === 2);
+    assert.match(await visibleText(frame.locator("#plan-personal-status")), /General brief matching only/);
+    await frame.locator("#plan-personal .plans-candidate").first().locator("button").click();
+    const addition = (await mockCalls(page)).find((call) => call.command === "plan_add_item");
+    assert.equal(addition.args.item.origin, "general");
+    assert.equal(addition.args.item.profileVersion, null);
+    assert.equal(JSON.parse(addition.args.item.signalsJson).lane, "personalized");
+    await frame.locator("#nav-style").click();
+    assert.doesNotMatch(await visibleText(frame.locator("#style-status-line")), /^Learned/);
+  },
+
+  async "plans-errors"(page) {
+    const frame = await createPlan(page);
+    await frame.locator("#plan-generate").click();
+    assert.match(await visibleText(frame.locator("#plan-candidate-status")), /lookup failed/);
+    await frame.locator("#plan-generate").click();
+    await frame.locator("#plan-general .plans-candidate").first().locator("button").click();
+    const item = frame.locator("#plan-items .plans-item").first();
+    await item.locator('[name="reason"]').fill("Retain this draft");
+    await item.locator('button[type="submit"]').click();
+    assert.match(await visibleText(frame.locator("#plans-message")), /Disk full/);
+    assert.equal(await item.locator('[name="reason"]').inputValue(), "Retain this draft");
+    await frame.locator("#plan-revision-form button").click();
+    assert.match(await visibleText(frame.locator("#plans-message")), /Save your item/);
+    await frame.locator("#plan-duplicate").click();
+    await frame.locator('#plan-confirm button[value="cancel"]').click();
+    assert.equal(await item.locator('[name="reason"]').inputValue(), "Retain this draft");
+    await item.locator('button[type="submit"]').click();
+    assert.match(await visibleText(frame.locator("#plans-message")), /Item saved/);
+    const callsBefore = (await mockCalls(page)).filter((call) => call.command === "plan_update_item").length;
+    await item.locator('[name="gradeJson"]').fill("[]");
+    await item.locator('button[type="submit"]').click();
+    assert.match(await visibleText(frame.locator("#plans-message")), /JSON object/);
+    assert.equal((await mockCalls(page)).filter((call) => call.command === "plan_update_item").length, callsBefore);
+    await item.locator('[name="gradeJson"]').fill("{}");
+    await item.locator('[name="startS"]').fill("5.8");
+    await item.locator('[name="endS"]').fill("3.5");
+    await item.locator('button[type="submit"]').click();
+    assert.match(await visibleText(frame.locator("#plans-message")), /Out must be after In/);
+    assert.equal((await mockCalls(page)).filter((call) => call.command === "plan_update_item").length, callsBefore);
+  },
+
   async empty(page) {
     const frame = page.frameLocator("#app-frame");
     // Search is the launch view; the shipped empty-state copy must match index.html.
@@ -171,9 +299,9 @@ const tests = {
   async "style-panel"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-style").click();
-    // Profile status comes from real profile data: learned=1 with eval-gate metrics.
+    // Automated success is not human approval. Never claim learned at the open hard stop.
     await poll(async () =>
-      /Learned · held-out 0\.78 vs baseline 0\.61/.test(
+      /Experimental profile · human review pending/.test(
         await visibleText(frame.locator("#style-status-line")),
       ));
     const rows = frame.locator("#style-sets .style-set-row");

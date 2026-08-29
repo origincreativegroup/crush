@@ -34,6 +34,14 @@ render-golden review in Task 021, and clean-machine acceptance before release in
 
 ## Current implementation state (2026-08-29, agent-team session)
 
+**Fresh-eyes continuation:** see `docs/review-2026-08-29.md` and Task 020b. The missing
+`TASK-020-impl-plan.md` is now explicitly reconstructed. 018b was merged in #29; its automatic
+“Learned” claim is replaced with experimental/review-pending copy. Style proof remains OPEN
+(pair/asset leakage, residual-vs-composed evaluation, evidence withdrawal require follow-up).
+020b provides plans UI, frozen profile provenance and truly context-scoped explicit picks.
+Task 020 overall still lacks automatic sequence/repetition judgment; do not claim it exists.
+Historical statements below describe the incoming handoff, not fresh acceptance of those claims.
+
 Tasks 000–019 are COMPLETE and merged; TASK-020a is merged and TASK-020b is the next work item.
 Every task landed as its own squash PR gated by Linux + macOS CI: #14–#19 (original 012–017 work),
 #21 (025 store hardening), #22 (024 fidelity truthfulness + ranking breakdown), #23 (026 pipeline
@@ -50,7 +58,8 @@ opening the PR and run rustfmt (it is the local syntax referee when no toolchain
 Known caveats carried forward:
 - The `sips -s iccProfile` HEIC sub-case in `source_fidelity.rs` skips on some runners; the JPEG ICC
   round-trip is the enforced coverage.
-- The UI harness runs in macOS CI as continue-on-error until proven on a runner.
+- The UI harness passed on the #35 macOS runner; Task 020b makes it blocking and adds native
+  app tests/Clippy so Linux-only checks cannot hide macOS-gated bridge regressions.
 - HUMAN HARD STOPS still open: Task 018 held-out style proof (eval output in PR #25 — John reviews
   before any UI may claim "learned"), Task 021 render-golden review, Task 023 clean-machine
   acceptance. Plan files and per-task acceptance records live in `.tasks/done/`.

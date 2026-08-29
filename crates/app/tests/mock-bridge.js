@@ -533,9 +533,93 @@
     };
   };
 
+  // Stateful plan mocks mirror the real bridge DTOs and reject invalid boundaries. Calls
+  // remain observable so tests can prove edits never secretly append feedback.
+  const plans = new Map();
+  let nextPlan = 1;
+  let failPlanSave = scenario === "plans-errors";
+  let failCandidates = scenario === "plans-errors";
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const planFor = (id) => { const plan = plans.get(id); if (!plan) throw "Plan not found"; return plan; };
+  const planView = (plan) => {
+    const { items, revisions, ...view } = plan;
+    return { ...view, itemCount: items.length };
+  };
+  const planKind = (assetType) => assetType === "photo" ? "photo" : "shot";
+  const planItemFor = (plan, args) => {
+    const item = plan.items.find((item) => item.mediaId === args.mediaId && item.mediaKind === planKind(args.assetType));
+    if (!item) throw "Plan item not found";
+    return item;
+  };
+  const validatePlanItem = (item) => {
+    if (item.mediaKind === "shot" && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
+    if ((item.origin === "personal") !== (item.profileVersion != null)) throw "Invalid provenance";
+  };
+
   async function invoke(command, args = {}) {
     calls.push({ command, args });
     switch (command) {
+      case "selects_candidates": {
+        if (failCandidates) { failCandidates = false; throw "Candidate lookup unavailable"; }
+        const profile = args.brief && scenario !== "plans-general" ? { id: "profile-demo", version: 3, context_key: args.context, algorithm_version: "personal-residual-v1" } : null;
+        const general = searchResults("plans").map((asset) => ({ ...asset, aesthetic_score: asset.asset_type === "video" ? 0.93 : 0.89, score: asset.asset_type === "video" ? 0.93 : 0.89, score_breakdown: null }));
+        const personalized = args.brief ? searchResults("plans").reverse().map((asset) => {
+          const breakdown = { ...asset.score_breakdown, semantic: asset.asset_type === "photo" ? 0.44 : 0.29, personal_affinity: profile ? 0.05 : 0, context_fit: 0 };
+          breakdown.total = Object.entries(breakdown).filter(([key]) => key !== "total").reduce((total, [, value]) => total + value, 0);
+          return { ...asset, score: breakdown.total, score_breakdown: breakdown, personal_style_score: profile ? asset.personal_style_score : null };
+        }) : [];
+        return clone({ brief: args.brief || "", context_key: args.context, general, personalized, profile });
+      }
+      case "plan_list": return clone([...plans.values()].map(planView));
+      case "plan_create": {
+        if (!args.name?.trim() || !args.contextKey?.trim()) throw "Name and context required";
+        const plan = { id: `plan-${nextPlan++}`, name: args.name, contextKey: args.contextKey, description: args.description || "", brief: args.brief || "", items: [], revisions: [], createdAt: "2026-08-29T12:00:00Z", updatedAt: "2026-08-29T12:00:00Z" };
+        plans.set(plan.id, plan); return clone(planView(plan));
+      }
+      case "plan_get": return clone(planView(planFor(args.id)));
+      case "plan_items": return clone(planFor(args.id).items);
+      case "plan_revisions": return clone(planFor(args.id).revisions);
+      case "plan_update": {
+        const plan = planFor(args.id);
+        Object.assign(plan, { name: args.name, description: args.description, brief: args.brief }); return true;
+      }
+      case "plan_add_item": {
+        const plan = planFor(args.id), source = args.item;
+        if (plan.items.some((item) => item.mediaKind === planKind(source.assetType) && item.mediaId === source.mediaId)) throw "Duplicate plan item";
+        const item = { mediaKind: planKind(source.assetType), mediaId: source.mediaId, position: plan.items.length, startS: source.startS, endS: source.endS, pacing: null, cropX: null, gradeJson: null, reason: source.reason, signalsJson: source.signalsJson, origin: source.origin, rank: source.rank, profileVersion: source.profileVersion, addedAt: "2026-08-29T12:00:00Z" };
+        validatePlanItem(item); plan.items.push(item); return clone(item);
+      }
+      case "plan_update_item": {
+        if (failPlanSave) { failPlanSave = false; throw "Disk full — plan not saved"; }
+        const item = planItemFor(planFor(args.id), args);
+        const updated = { ...item, ...args.patch }; validatePlanItem(updated);
+        Object.assign(item, updated); return clone(item);
+      }
+      case "plan_remove_item": {
+        const plan = planFor(args.id), item = planItemFor(plan, args);
+        plan.items = plan.items.filter((value) => value !== item);
+        plan.items.forEach((value, position) => value.position = position); return true;
+      }
+      case "plan_reorder_items": {
+        const plan = planFor(args.id);
+        plan.items = args.items.map((ref) => planItemFor(plan, ref));
+        plan.items.forEach((value, position) => value.position = position); return clone(plan.items);
+      }
+      case "plan_save_revision": {
+        const plan = planFor(args.id);
+        const revision = { revision: plan.revisions.length + 1, label: args.label, snapshotJson: JSON.stringify({ items: plan.items, description: plan.description, brief: plan.brief, contextKey: plan.contextKey }), createdAt: "2026-08-29T12:00:00Z" };
+        plan.revisions.push(revision); return clone(revision);
+      }
+      case "plan_restore_revision": {
+        const plan = planFor(args.id), revision = plan.revisions.find((value) => value.revision === args.revision);
+        Object.assign(plan, JSON.parse(revision.snapshotJson)); return clone(plan.items);
+      }
+      case "plan_duplicate": {
+        const plan = clone(planFor(args.id));
+        Object.assign(plan, { id: `plan-${nextPlan++}`, name: args.name, revisions: [] });
+        plans.set(plan.id, plan); return clone(planView(plan));
+      }
+      case "plan_delete": return plans.delete(args.id);
       case "models_status":
         return modelsStatus();
       case "models_download":
