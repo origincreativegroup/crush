@@ -73,10 +73,11 @@ impl Pipeline {
 
     pub fn ingest(&self, input: &Path, debug: bool) -> anyhow::Result<IngestSummary> {
         lower_priority();
-        let videos = collect_video_files(input)?;
-        let photos = collect_photo_files(input)?;
+        let media = collect_media_files(input)?;
         ensure!(
-            !videos.is_empty() || !photos.is_empty(),
+            !media.videos.is_empty()
+                || !media.photos.is_empty()
+                || !media.unsupported.is_empty(),
             "no supported photo or video files found at {}",
             input.display()
         );
@@ -84,13 +85,17 @@ impl Pipeline {
         let recovered_jobs = store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
         ensure_embedding_metadata(&store)?;
         let mut summary = IngestSummary {
-            discovered: videos.len() + photos.len(),
-            discovered_photos: photos.len(),
+            discovered: media.videos.len() + media.photos.len(),
+            discovered_photos: media.photos.len(),
             recovered_jobs,
             ..IngestSummary::default()
         };
+        for (path, reason) in media.unsupported {
+            tracing::warn!(path = %path.display(), reason = %reason, "known-unsupported media format found");
+            summary.errors.push((path, reason));
+        }
 
-        for path in videos {
+        for path in media.videos {
             if self.cancellation.is_cancelled() {
                 anyhow::bail!("ingest cancelled");
             }
@@ -108,11 +113,11 @@ impl Pipeline {
             }
         }
 
-        if !photos.is_empty() {
+        if !media.photos.is_empty() {
             let preference = ProviderPreference::parse(&self.config.embed.provider)?;
             let mut embedder =
                 Embedder::new(self.paths.models(), preference, self.config.limits.threads)?;
-            for path in photos {
+            for path in media.photos {
                 if self.cancellation.is_cancelled() {
                     anyhow::bail!("ingest cancelled");
                 }
@@ -126,7 +131,6 @@ impl Pipeline {
                         return Err(error).context("ingest cancelled");
                     }
                     Err(error) => {
-                        tracing::error!(path = %path.display(), error = %error, "photo ingest failed");
                         summary.failed += 1;
                         summary.errors.push((path, format!("{error:#}")));
                     }
@@ -155,17 +159,7 @@ impl Pipeline {
         if let Some(existing) = &existing {
             let fidelity_complete = store
                 .photo_source_metadata(DEFAULT_OWNER_ID, &existing.id)?
-                .and_then(|metadata| {
-                    let relative = metadata.proxy_rel?;
-                    let expected_hash = metadata.proxy_sha256?;
-                    let proxy = store.proxy_path(&relative).ok()?;
-                    proxy
-                        .is_file()
-                        .then(|| sha256_file(&proxy).ok())
-                        .flatten()
-                        .filter(|hash| hash == &expected_hash)
-                })
-                .is_some();
+                .is_some_and(|metadata| photo_fidelity_complete(store, existing, &metadata));
             if existing.status == PhotoStatus::Done && fidelity_complete {
                 if existing.path != path.to_string_lossy() {
                     let mut updated = existing.clone();
@@ -179,56 +173,101 @@ impl Pipeline {
         let photo_id = existing
             .map(|photo| photo.id)
             .unwrap_or_else(|| format!("photo-{}", &sha256[..32]));
+        // The jobs-table FK points at photos(id, owner_id), so the photo row must exist
+        // before its job starts. Failures before that point leave nothing to resume: the
+        // next ingest retries the deterministic photo id from scratch.
+        self.index_photo(store, path, &photo_id, &sha256, embedder)?;
+        Ok(IngestOne::Indexed)
+    }
+
+    fn index_photo(
+        &self,
+        store: &Store,
+        path: &Path,
+        photo_id: &str,
+        sha256: &str,
+        embedder: &mut Embedder,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            !self.cancellation.is_cancelled(),
+            "photo embedding cancelled"
+        );
+        let decoded = source::decode_photo(path, &self.cancellation)?;
+        let (width, height) = decoded.image.dimensions();
+        let thumb_rel = format!("photos/{photo_id}.jpg");
+        let proxy_rel = format!("photos/{photo_id}.jpg");
+        store.upsert_photo(
+            DEFAULT_OWNER_ID,
+            &Photo {
+                id: photo_id.to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                path: path.to_string_lossy().into_owned(),
+                sha256: sha256.to_owned(),
+                width: i64::from(width),
+                height: i64::from(height),
+                format: decoded.source_format.clone(),
+                orientation: decoded.orientation,
+                captured_at: decoded.captured_at,
+                camera_make: decoded.camera_make.clone(),
+                camera_model: decoded.camera_model.clone(),
+                lens: decoded.lens.clone(),
+                thumb_rel: Some(thumb_rel.clone()),
+                status: PhotoStatus::Pending,
+                indexed_at: None,
+            },
+        )?;
+        let job = self.start_photo_job(store, photo_id, Stage::PhotoIngest)?;
+        tracing::info!(
+            job_id = %job.id,
+            stage = %Stage::PhotoIngest,
+            photo_id = %photo_id,
+            path = %path.display(),
+            "photo ingest started"
+        );
         let result = (|| {
-            ensure!(
-                !self.cancellation.is_cancelled(),
-                "photo embedding cancelled"
-            );
-            let decoded = source::decode_photo(path)?;
-            let (width, height) = decoded.image.dimensions();
-            let thumb_rel = format!("photos/{photo_id}.jpg");
-            let proxy_rel = format!("photos/{photo_id}.jpg");
-            store.upsert_photo(
-                DEFAULT_OWNER_ID,
-                &Photo {
-                    id: photo_id.clone(),
-                    owner_id: DEFAULT_OWNER_ID.to_owned(),
-                    path: path.to_string_lossy().into_owned(),
-                    sha256: sha256.clone(),
-                    width: i64::from(width),
-                    height: i64::from(height),
-                    format: decoded.source_format.clone(),
-                    orientation: decoded.orientation,
-                    captured_at: decoded.captured_at,
-                    camera_make: decoded.camera_make.clone(),
-                    camera_model: decoded.camera_model.clone(),
-                    lens: decoded.lens.clone(),
-                    thumb_rel: Some(thumb_rel.clone()),
-                    status: PhotoStatus::Pending,
-                    indexed_at: None,
-                },
-            )?;
             let proxy = source::write_jpeg_derivative(
                 &decoded.image,
                 &store.proxy_path(&proxy_rel)?,
-                2560,
-                92,
+                PHOTO_PROXY_MAX_DIMENSION_PX,
+                PHOTO_PROXY_QUALITY,
                 decoded.icc_profile.as_deref(),
             )?;
             let thumbnail_path = store.thumbnail_path(&thumb_rel)?;
-            source::write_jpeg_derivative(
+            let thumbnail = source::write_jpeg_derivative(
                 &decoded.image,
                 &thumbnail_path,
-                960,
-                85,
+                PHOTO_THUMBNAIL_MAX_DIMENSION_PX,
+                PHOTO_THUMBNAIL_QUALITY,
                 decoded.icc_profile.as_deref(),
             )?;
             let original_size_bytes = i64::try_from(std::fs::metadata(path)?.len())
                 .context("photo size exceeds SQLite integer range")?;
+            let mut metadata: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&decoded.metadata_json)
+                    .context("decoded photo metadata_json must be a JSON object")?;
+            metadata.insert(
+                "proxy_recipe".to_owned(),
+                serde_json::json!({
+                    "proxy": {
+                        "format": "jpeg",
+                        "max_dimension_px": PHOTO_PROXY_MAX_DIMENSION_PX,
+                        "quality": PHOTO_PROXY_QUALITY,
+                    },
+                    "thumbnail": {
+                        "format": "jpeg",
+                        "max_dimension_px": PHOTO_THUMBNAIL_MAX_DIMENSION_PX,
+                        "quality": PHOTO_THUMBNAIL_QUALITY,
+                    },
+                }),
+            );
+            metadata.insert(
+                "thumbnail_sha256".to_owned(),
+                serde_json::json!(thumbnail.sha256),
+            );
             store.upsert_photo_source_metadata(
                 DEFAULT_OWNER_ID,
                 &PhotoSourceMetadata {
-                    photo_id: photo_id.clone(),
+                    photo_id: photo_id.to_owned(),
                     owner_id: DEFAULT_OWNER_ID.to_owned(),
                     source_format: decoded.source_format,
                     decoder: decoded.decoder,
@@ -244,75 +283,148 @@ impl Pipeline {
                     icc_profile_sha256: decoded.icc_profile_sha256,
                     exposure_json: decoded.exposure_json,
                     gps_present: decoded.gps_present,
-                    metadata_json: decoded.metadata_json,
+                    metadata_json: serde_json::Value::Object(metadata).to_string(),
                     original_size_bytes,
                     extracted_at: Utc::now(),
                 },
             )?;
             let vector = embedder.embed_image(&preprocess(&decoded.image))?;
-            store.put_photo_vector(DEFAULT_OWNER_ID, &photo_id, &vector)?;
-            store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Embedded)?;
+            store.put_photo_vector(DEFAULT_OWNER_ID, photo_id, &vector)?;
+            store.set_photo_status(DEFAULT_OWNER_ID, photo_id, PhotoStatus::Embedded)?;
             ensure!(
                 sha256_file(path)? == sha256,
                 "photo source changed while it was being indexed; no source writes were attempted"
             );
-            store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Done)?;
-            Ok(IngestOne::Indexed)
+            store.set_photo_status(DEFAULT_OWNER_ID, photo_id, PhotoStatus::Done)?;
+            Ok(())
         })();
-        if result.is_err() && store.photo_by_id(DEFAULT_OWNER_ID, &photo_id)?.is_some() {
-            store.set_photo_status(DEFAULT_OWNER_ID, &photo_id, PhotoStatus::Failed)?;
+        match result {
+            Ok(()) => store.job_finish(DEFAULT_OWNER_ID, &job.id, Utc::now()),
+            Err(error) => {
+                tracing::error!(
+                    job_id = %job.id,
+                    stage = %Stage::PhotoIngest,
+                    photo_id = %photo_id,
+                    path = %path.display(),
+                    error = %error,
+                    "photo ingest failed"
+                );
+                if self.cancellation.is_cancelled() {
+                    store.job_cancel(DEFAULT_OWNER_ID, &job.id, Utc::now())?;
+                } else {
+                    store.job_fail(
+                        DEFAULT_OWNER_ID,
+                        &job.id,
+                        Utc::now(),
+                        &format!("{error:#}"),
+                    )?;
+                }
+                if store.photo_by_id(DEFAULT_OWNER_ID, photo_id)?.is_some() {
+                    store.set_photo_status(DEFAULT_OWNER_ID, photo_id, PhotoStatus::Failed)?;
+                }
+                Err(error)
+            }
         }
-        result
     }
 
+    /// Backfill aesthetic analysis for photos that are Done but have no current-model
+    /// assessment. Thumbnails are decoded in bounded windows (with a one-photo seam overlap
+    /// so adjacent-neighbor evidence survives window boundaries), while `AnalysisContext`
+    /// keeps the global index/sequence_len semantics of the whole ordered library.
     fn analyze_photos(&self, store: &Store) -> anyhow::Result<usize> {
+        let stale = store.photos_for_analysis(DEFAULT_OWNER_ID, AESTHETIC_MODEL_VERSION)?;
+        if stale.is_empty() {
+            return Ok(0);
+        }
         let semantic_model = self.semantic_model()?;
         let photos = store.photos(DEFAULT_OWNER_ID)?;
-        let mut decoded = Vec::with_capacity(photos.len());
-        for photo in &photos {
-            if photo.status != PhotoStatus::Done {
-                decoded.push(None);
-                continue;
+        // Both lists share the (path, id) ordering, so a merge walk locates each stale
+        // photo's global position without re-reading assessments per row.
+        let mut targets = Vec::with_capacity(stale.len());
+        let mut stale_cursor = 0;
+        for (index, photo) in photos.iter().enumerate() {
+            if stale_cursor < stale.len() && stale[stale_cursor].id == photo.id {
+                targets.push(index);
+                stale_cursor += 1;
             }
-            let path = photo
-                .thumb_rel
-                .as_deref()
-                .map(|relative| store.thumbnail_path(relative))
-                .transpose()?;
-            decoded.push(
-                path.filter(|path| path.is_file())
-                    .map(image::open)
-                    .transpose()?,
-            );
         }
         let mut assessed = 0;
-        for (index, photo) in photos.iter().enumerate() {
-            let Some(image) = &decoded[index] else {
-                continue;
-            };
-            let vector = store
-                .vector_for_photo(DEFAULT_OWNER_ID, &photo.id)?
-                .with_context(|| format!("photo {} has no visual vector", photo.id))?;
-            let semantic = semantic_model.signals(&vector);
-            let neighbors = adjacent_images(&decoded, index);
-            let scores = analyze(
-                image,
-                AnalysisContext {
-                    source_width: u32::try_from(photo.width).unwrap_or(u32::MAX),
-                    source_height: u32::try_from(photo.height).unwrap_or(u32::MAX),
-                    duration_s: None,
-                    index: Some(index),
-                    sequence_len: Some(photos.len()),
-                },
-                semantic,
-                &[],
-                &neighbors,
-            );
-            store.upsert_aesthetic_assessment(
-                DEFAULT_OWNER_ID,
-                &persisted_assessment(MediaKind::Photo, &photo.id, scores),
-            )?;
-            assessed += 1;
+        let mut target_cursor = 0;
+        while target_cursor < targets.len() {
+            let window_start = targets[target_cursor].saturating_sub(1);
+            let window_end = (window_start + PHOTO_ANALYSIS_WINDOW).min(photos.len());
+            let decode_start = window_start.saturating_sub(1);
+            let decode_end = window_end.min(photos.len() - 1);
+            let decoded = decode_photo_thumbnails(store, &photos[decode_start..=decode_end])?;
+            while target_cursor < targets.len() && targets[target_cursor] < window_end {
+                let index = targets[target_cursor];
+                let photo = &photos[index];
+                let local = index - decode_start;
+                target_cursor += 1;
+                let Some(image) = &decoded[local] else {
+                    continue;
+                };
+                ensure!(
+                    !self.cancellation.is_cancelled(),
+                    "photo analysis cancelled"
+                );
+                let job = self.start_photo_job(store, &photo.id, Stage::Analyze)?;
+                tracing::info!(
+                    job_id = %job.id,
+                    stage = %Stage::Analyze,
+                    photo_id = %photo.id,
+                    "photo analysis started"
+                );
+                let result = (|| {
+                    let vector = store
+                        .vector_for_photo(DEFAULT_OWNER_ID, &photo.id)?
+                        .with_context(|| format!("photo {} has no visual vector", photo.id))?;
+                    let semantic = semantic_model.signals(&vector);
+                    let neighbors = adjacent_images(&decoded, local);
+                    let scores = analyze(
+                        image,
+                        AnalysisContext {
+                            source_width: u32::try_from(photo.width).unwrap_or(u32::MAX),
+                            source_height: u32::try_from(photo.height).unwrap_or(u32::MAX),
+                            duration_s: None,
+                            index: Some(index),
+                            sequence_len: Some(photos.len()),
+                        },
+                        semantic,
+                        &[],
+                        &neighbors,
+                    );
+                    store.upsert_aesthetic_assessment(
+                        DEFAULT_OWNER_ID,
+                        &persisted_assessment(MediaKind::Photo, &photo.id, scores),
+                    )?;
+                    Ok(())
+                })();
+                match result {
+                    Ok(()) => store.job_finish(DEFAULT_OWNER_ID, &job.id, Utc::now())?,
+                    Err(error) if self.cancellation.is_cancelled() => {
+                        store.job_cancel(DEFAULT_OWNER_ID, &job.id, Utc::now())?;
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            job_id = %job.id,
+                            stage = %Stage::Analyze,
+                            photo_id = %photo.id,
+                            error = %error,
+                            "photo analysis failed"
+                        );
+                        store.job_fail(
+                            DEFAULT_OWNER_ID,
+                            &job.id,
+                            Utc::now(),
+                            &format!("{error:#}"),
+                        )?;
+                        return Err(error);
+                    }
+                }
+                assessed += 1;
+            }
         }
         Ok(assessed)
     }
@@ -401,24 +513,7 @@ impl Pipeline {
     fn ingest_one(&self, store: &mut Store, path: &Path, debug: bool) -> anyhow::Result<IngestOne> {
         let sha256 = sha256_file(path)?;
         if let Some(existing) = store.video_by_sha(DEFAULT_OWNER_ID, &sha256)? {
-            let fidelity_complete = store
-                .video_source_metadata(DEFAULT_OWNER_ID, &existing.id)?
-                .map(|metadata| {
-                    if !metadata.proxy_required {
-                        return true;
-                    }
-                    let Some(relative) = metadata.proxy_rel else {
-                        return false;
-                    };
-                    let Some(expected_hash) = metadata.proxy_sha256 else {
-                        return false;
-                    };
-                    store.proxy_path(&relative).is_ok_and(|proxy| {
-                        proxy.is_file()
-                            && sha256_file(&proxy).is_ok_and(|hash| hash == expected_hash)
-                    })
-                })
-                .unwrap_or(false);
+            let fidelity_complete = video_fidelity_complete(store, &existing.id)?;
             let mut existing = existing;
             if existing.path != path.to_string_lossy() {
                 existing.path = path.to_string_lossy().into_owned();
@@ -517,7 +612,7 @@ impl Pipeline {
             probed.status = VideoStatus::Pending;
             store.upsert_video(DEFAULT_OWNER_ID, &probed)?;
 
-            let (processing_path, proxy_rel, proxy_sha256) = if proxy_policy.required {
+            let (processing_path, proxy_rel, proxy_sha256, proxy_color) = if proxy_policy.required {
                 let relative = format!("videos/{}.mp4", video.id);
                 let proxy_path = store.proxy_path(&relative)?;
                 let reusable = store
@@ -541,9 +636,18 @@ impl Pipeline {
                     )?;
                     sha256_file(&proxy_path)?
                 };
-                (proxy_path, Some(relative), Some(hash))
+                // The proxy is never trusted blindly: re-probe it and record its color tags
+                // so derivative color is auditable in metadata_json.
+                let proxy_probe = runner.probe(&proxy_path)?.value;
+                let proxy_color = serde_json::json!({
+                    "color_space": proxy_probe.color_space,
+                    "color_primaries": proxy_probe.color_primaries,
+                    "color_transfer": proxy_probe.color_transfer,
+                    "color_range": proxy_probe.color_range,
+                });
+                (proxy_path, Some(relative), Some(hash), Some(proxy_color))
             } else {
-                (source_path.to_path_buf(), None, None)
+                (source_path.to_path_buf(), None, None, None)
             };
             let original_size_bytes = i64::try_from(std::fs::metadata(source_path)?.len())
                 .context("video size exceeds SQLite integer range")?;
@@ -573,12 +677,18 @@ impl Pipeline {
                     proxy_required: proxy_policy.required,
                     proxy_reason: proxy_policy.reason,
                     original_size_bytes,
-                    metadata_json: serde_json::json!({
-                        "decoder": "bundled_ffmpeg",
-                        "codec_tag": probe.codec_tag,
-                        "proxy_policy_version": 1,
-                    })
-                    .to_string(),
+                    metadata_json: {
+                        let mut metadata = serde_json::json!({
+                            "decoder": "bundled_ffmpeg",
+                            "codec_tag": probe.codec_tag,
+                            "proxy_policy_version": 1,
+                            "proxy_recipe": ffmpeg::edit_proxy_recipe(),
+                        });
+                        if let Some(proxy_color) = proxy_color {
+                            metadata["proxy_color"] = proxy_color;
+                        }
+                        metadata.to_string()
+                    },
                     probed_at: Utc::now(),
                 },
             )?;
@@ -815,17 +925,51 @@ impl Pipeline {
         if let Some(directory) = &directory {
             std::fs::create_dir_all(directory)?;
         }
+        tracing::info!(
+            job_id = %id,
+            stage = %stage,
+            video_id = %video.id,
+            "video job started"
+        );
         store.job_start(
             DEFAULT_OWNER_ID,
             &NewJob {
                 id: id.clone(),
-                video_id: video.id.clone(),
+                video_id: Some(video.id.clone()),
+                photo_id: None,
                 stage,
                 started_at: Utc::now(),
                 debug_dir: directory.as_ref().map(|path| path.display().to_string()),
             },
         )?;
         Ok(ActiveJob { id, directory })
+    }
+
+    /// Photo jobs carry the photo id instead of a video id; the jobs-table CHECK enforces
+    /// exactly-one-of and the composite FK keeps photo jobs owner-safe and cascading.
+    fn start_photo_job(
+        &self,
+        store: &Store,
+        photo_id: &str,
+        stage: Stage,
+    ) -> anyhow::Result<ActiveJob> {
+        let id = Uuid::new_v4().to_string();
+        tracing::info!(job_id = %id, stage = %stage, photo_id = %photo_id, "photo job started");
+        store.job_start(
+            DEFAULT_OWNER_ID,
+            &NewJob {
+                id: id.clone(),
+                video_id: None,
+                photo_id: Some(photo_id.to_owned()),
+                stage,
+                started_at: Utc::now(),
+                debug_dir: None,
+            },
+        )?;
+        Ok(ActiveJob {
+            id,
+            directory: None,
+        })
     }
 
     fn finish_job(
@@ -1028,6 +1172,103 @@ fn video_assessments_current(store: &Store, video_id: &str) -> anyhow::Result<bo
     Ok(true)
 }
 
+const PHOTO_ANALYSIS_WINDOW: usize = 64;
+const PHOTO_PROXY_MAX_DIMENSION_PX: u32 = 2560;
+const PHOTO_PROXY_QUALITY: u8 = 92;
+const PHOTO_THUMBNAIL_MAX_DIMENSION_PX: u32 = 960;
+const PHOTO_THUMBNAIL_QUALITY: u8 = 85;
+
+/// Decode thumbnails for a bounded slice of the ordered photo list. Photos that are not Done
+/// or have no thumbnail on disk decode to `None`, matching the whole-library decode behavior
+/// this replaces; only the memory footprint is bounded now.
+fn decode_photo_thumbnails(
+    store: &Store,
+    photos: &[Photo],
+) -> anyhow::Result<Vec<Option<DynamicImage>>> {
+    photos
+        .iter()
+        .map(|photo| {
+            if photo.status != PhotoStatus::Done {
+                return Ok(None);
+            }
+            let path = photo
+                .thumb_rel
+                .as_deref()
+                .map(|relative| store.thumbnail_path(relative))
+                .transpose()?;
+            path.filter(|path| path.is_file())
+                .map(image::open)
+                .transpose()
+        })
+        .collect()
+}
+
+/// A Done photo may only be skipped when both derivatives exist and still match the hashes
+/// recorded at index time. Rows without a recorded thumbnail hash are treated as incomplete
+/// so the next ingest re-indexes them and backfills the hash.
+fn photo_fidelity_complete(store: &Store, photo: &Photo, metadata: &PhotoSourceMetadata) -> bool {
+    let (Some(proxy_rel), Some(proxy_sha256)) =
+        (metadata.proxy_rel.as_deref(), metadata.proxy_sha256.as_deref())
+    else {
+        return false;
+    };
+    let Ok(proxy_path) = store.proxy_path(proxy_rel) else {
+        return false;
+    };
+    let proxy_intact =
+        proxy_path.is_file() && sha256_file(&proxy_path).is_ok_and(|hash| hash == proxy_sha256);
+    if !proxy_intact {
+        return false;
+    }
+    let Some(thumb_rel) = photo.thumb_rel.as_deref() else {
+        return false;
+    };
+    let Some(thumbnail_sha256) = recorded_thumbnail_sha256(metadata) else {
+        return false;
+    };
+    let Ok(thumbnail_path) = store.thumbnail_path(thumb_rel) else {
+        return false;
+    };
+    thumbnail_path.is_file()
+        && sha256_file(&thumbnail_path).is_ok_and(|hash| hash == thumbnail_sha256)
+}
+
+fn recorded_thumbnail_sha256(metadata: &PhotoSourceMetadata) -> Option<&str> {
+    serde_json::from_str::<serde_json::Value>(&metadata.metadata_json)
+        .ok()?
+        .get("thumbnail_sha256")?
+        .as_str()
+}
+
+/// A Done video may only be skipped when its working proxy (if one is required) and every
+/// shot thumbnail still exist with matching recorded content.
+fn video_fidelity_complete(store: &Store, video_id: &str) -> anyhow::Result<bool> {
+    let Some(metadata) = store.video_source_metadata(DEFAULT_OWNER_ID, video_id)? else {
+        return Ok(false);
+    };
+    let proxy_intact = !metadata.proxy_required
+        || match (metadata.proxy_rel.as_deref(), metadata.proxy_sha256.as_deref()) {
+            (Some(relative), Some(expected)) => store
+                .proxy_path(relative)
+                .is_ok_and(|proxy| {
+                    proxy.is_file() && sha256_file(&proxy).is_ok_and(|hash| hash == expected)
+                }),
+            _ => false,
+        };
+    if !proxy_intact {
+        return Ok(false);
+    }
+    for shot in store.shots_for_video(DEFAULT_OWNER_ID, video_id)? {
+        let Some(relative) = shot.thumb_rel.as_deref() else {
+            return Ok(false);
+        };
+        if !store.thumbnail_path(relative)?.is_file() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn expected_embedding_metadata() -> anyhow::Result<EmbeddingMeta> {
     let manifest = models::bundled_manifest()?;
     Ok(EmbeddingMeta {
@@ -1046,37 +1287,32 @@ fn resolve_video(store: &Store, target: &str) -> anyhow::Result<Video> {
         .with_context(|| format!("video {target:?} was not found by id or stored path"))
 }
 
-fn collect_video_files(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
+fn collect_media_files(input: &Path) -> anyhow::Result<DiscoveredMedia> {
     ensure!(input.exists(), "input does not exist: {}", input.display());
-    let mut files = Vec::new();
-    collect_video_files_inner(input, &mut files)?;
-    files.sort();
-    files.dedup();
-    Ok(files)
+    let mut media = DiscoveredMedia::default();
+    collect_media_files_inner(input, &mut media)?;
+    media.videos.sort();
+    media.videos.dedup();
+    media.photos.sort();
+    media.photos.dedup();
+    media.unsupported.sort();
+    media.unsupported.dedup();
+    Ok(media)
 }
 
-fn collect_photo_files(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    collect_files(input, is_photo)
+#[derive(Debug, Default)]
+struct DiscoveredMedia {
+    videos: Vec<PathBuf>,
+    photos: Vec<PathBuf>,
+    /// Known-unsupported media files with their precise capability reasons. Arbitrary
+    /// non-media files are never flagged.
+    unsupported: Vec<(PathBuf, String)>,
 }
 
-fn collect_files(input: &Path, predicate: fn(&Path) -> bool) -> anyhow::Result<Vec<PathBuf>> {
-    ensure!(input.exists(), "input does not exist: {}", input.display());
-    let mut files = Vec::new();
-    collect_files_inner(input, predicate, &mut files)?;
-    files.sort();
-    files.dedup();
-    Ok(files)
-}
-
-fn collect_files_inner(
-    input: &Path,
-    predicate: fn(&Path) -> bool,
-    files: &mut Vec<PathBuf>,
-) -> anyhow::Result<()> {
+fn collect_media_files_inner(input: &Path, media: &mut DiscoveredMedia) -> anyhow::Result<()> {
     if input.is_file() {
-        if predicate(input) {
-            files.push(input.canonicalize().unwrap_or_else(|_| input.to_path_buf()));
-        }
+        let canonical = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
+        classify_media_file(&canonical, media);
         return Ok(());
     }
     for entry in std::fs::read_dir(input)
@@ -1088,36 +1324,80 @@ fn collect_files_inner(
             continue;
         }
         if file_type.is_dir() {
-            collect_files_inner(&entry.path(), predicate, files)?;
-        } else if file_type.is_file() && predicate(&entry.path()) {
-            files.push(entry.path().canonicalize().unwrap_or_else(|_| entry.path()));
+            collect_media_files_inner(&entry.path(), media)?;
+        } else if file_type.is_file() {
+            classify_media_file(&entry.path(), media);
         }
     }
     Ok(())
 }
 
-fn collect_video_files_inner(input: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    if input.is_file() {
-        if is_video(input) {
-            files.push(input.canonicalize().unwrap_or_else(|_| input.to_path_buf()));
-        }
-        return Ok(());
+fn classify_media_file(path: &Path, media: &mut DiscoveredMedia) {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if is_video(&canonical) {
+        media.videos.push(canonical);
+    } else if is_photo(&canonical) {
+        media.photos.push(canonical);
+    } else if let Some(reason) = known_unsupported_reason(&canonical) {
+        media.unsupported.push((canonical, reason.to_owned()));
     }
-    for entry in std::fs::read_dir(input)
-        .with_context(|| format!("failed to read directory {}", input.display()))?
-    {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_video_files_inner(&entry.path(), files)?;
-        } else if file_type.is_file() && is_video(&entry.path()) {
-            files.push(entry.path().canonicalize().unwrap_or_else(|_| entry.path()));
-        }
-    }
-    Ok(())
+}
+
+/// Curated registry of media extensions Crush recognizes but deliberately does not decode.
+/// Discovery records the precise capability reason for each so files never vanish silently,
+/// while arbitrary non-media files (".txt", ".DS_Store", ...) stay unflagged.
+pub const KNOWN_UNSUPPORTED_EXTENSIONS: &[(&str, &str)] = &[
+    (
+        "avif",
+        "AVIF decode is disabled: no approved full decoder is bundled; embedded-preview extraction is not full media support",
+    ),
+    (
+        "jxl",
+        "JPEG XL decode is disabled: no approved full decoder is bundled; embedded-preview extraction is not full media support",
+    ),
+    (
+        "erf",
+        "ERF (Phase One) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+    (
+        "iiq",
+        "IIQ (Phase One) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+    (
+        "3fr",
+        "3FR (Hasselblad) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+    (
+        "x3f",
+        "X3F (Sigma Foveon) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+    (
+        "gpr",
+        "GPR (GoPro RAW) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+    (
+        "mrw",
+        "MRW (Minolta) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+    (
+        "pef",
+        "PEF (Pentax) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+    (
+        "srw",
+        "SRW (Samsung) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support",
+    ),
+];
+
+fn known_unsupported_reason(path: &Path) -> Option<&'static str> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase();
+    KNOWN_UNSUPPORTED_EXTENSIONS
+        .iter()
+        .find(|(known, _)| *known == extension)
+        .map(|(_, reason)| *reason)
 }
 
 fn is_video(path: &Path) -> bool {

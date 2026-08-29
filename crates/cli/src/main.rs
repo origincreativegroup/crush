@@ -215,7 +215,7 @@ fn jobs(paths: &AppPaths, failed: bool, video: Option<&str>) -> anyhow::Result<(
         },
     )?;
     println!(
-        "{:<36} {:<10} {:<10} {:>10}  VIDEO / ERROR",
+        "{:<36} {:<10} {:<10} {:>10}  TARGET / ERROR",
         "JOB", "STAGE", "STATUS", "MS"
     );
     for job in rows {
@@ -226,7 +226,10 @@ fn jobs(paths: &AppPaths, failed: bool, video: Option<&str>) -> anyhow::Result<(
             format!("{:?}", job.status).to_ascii_lowercase(),
             job.duration_ms
                 .map_or_else(|| "—".to_owned(), |value| value.to_string()),
-            job.video_id,
+            job.video_id
+                .as_deref()
+                .or(job.photo_id.as_deref())
+                .unwrap_or("—"),
             job.error
                 .as_deref()
                 .map_or_else(String::new, |error| format!(" — {error}"))

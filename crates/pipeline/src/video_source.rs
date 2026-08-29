@@ -25,6 +25,9 @@ pub fn is_video_extension(path: &Path) -> bool {
         })
 }
 
+const BRAW_DECODE_REASON: &str = "BRAW decode is disabled: the Blackmagic RAW SDK has proprietary distribution and licensing requirements; embedded-preview extraction is not full media support";
+const R3D_DECODE_REASON: &str = "R3D decode is disabled: RED SDK integration and redistribution licensing have not been approved; embedded-preview extraction is not full media support";
+
 pub fn validate_decoder_policy(path: &Path) -> anyhow::Result<()> {
     let extension = path
         .extension()
@@ -32,12 +35,8 @@ pub fn validate_decoder_policy(path: &Path) -> anyhow::Result<()> {
         .map(str::to_ascii_lowercase)
         .with_context(|| format!("video has no UTF-8 extension: {}", path.display()))?;
     match extension.as_str() {
-        "braw" => bail!(
-            "BRAW decode is disabled: the Blackmagic RAW SDK has proprietary distribution and licensing requirements; embedded-preview extraction is not full media support"
-        ),
-        "r3d" => bail!(
-            "R3D decode is disabled: RED SDK integration and redistribution licensing have not been approved; embedded-preview extraction is not full media support"
-        ),
+        "braw" => bail!("{BRAW_DECODE_REASON}"),
+        "r3d" => bail!("{R3D_DECODE_REASON}"),
         _ => Ok(()),
     }
 }
@@ -67,6 +66,21 @@ pub fn proxy_policy(probe: &Probe) -> anyhow::Result<ProxyPolicy> {
         );
     }
 
+    // Extension-only gating is not enough: BRAW/R3D payloads inside allowed containers such
+    // as .mov must fail with the named licensing messages instead of a generic ffmpeg error.
+    if [codec.as_str(), profile.as_str(), codec_tag.as_str()]
+        .iter()
+        .any(|value| value.contains("braw"))
+    {
+        bail!("{BRAW_DECODE_REASON}");
+    }
+    if [codec.as_str(), profile.as_str(), codec_tag.as_str()]
+        .iter()
+        .any(|value| value.contains("r3d"))
+    {
+        bail!("{R3D_DECODE_REASON}");
+    }
+
     if codec.contains("prores") || codec == "dnxhd" || codec == "dnxhr" {
         return Ok(ProxyPolicy {
             required: false,
@@ -74,8 +88,21 @@ pub fn proxy_policy(probe: &Probe) -> anyhow::Result<ProxyPolicy> {
         });
     }
     if codec == "h264" || codec == "avc1" {
-        let bit_depth = probe.bit_depth.unwrap_or(8);
-        if probe.width <= 3840 && probe.height <= 2160 && probe.fps <= 60.0 && bit_depth <= 8 {
+        // fps 0.0 (unparseable frame rate) and unknown bit depth are proxy-required, never
+        // silently treated as cheap 8-bit/60 fps sources.
+        let Some(bit_depth) = probe.bit_depth else {
+            return required(format!(
+                "H.264 source has an unknown bit depth (pixel format {:?}); generate a seek-friendly H.264 working proxy",
+                probe.pixel_format.as_deref().unwrap_or("unknown")
+            ));
+        };
+        if probe.fps.is_finite()
+            && probe.fps > 0.0
+            && probe.width <= 3840
+            && probe.height <= 2160
+            && probe.fps <= 60.0
+            && bit_depth <= 8
+        {
             return Ok(ProxyPolicy {
                 required: false,
                 reason: None,
@@ -162,6 +189,37 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("ProRes RAW"));
+    }
+
+    #[test]
+    fn braw_and_r3d_inside_allowed_containers_fail_with_named_licensing_messages() {
+        let mut mov_braw = probe("prores", Some("HQ"), 10);
+        mov_braw.video_codec = Some("braw".to_owned());
+        mov_braw.codec_tag = Some("BRAW".to_owned());
+        assert!(proxy_policy(&mov_braw)
+            .unwrap_err()
+            .to_string()
+            .contains("Blackmagic RAW SDK"));
+        let mut mov_r3d = probe("prores", Some("HQ"), 10);
+        mov_r3d.video_codec = Some("r3d".to_owned());
+        mov_r3d.codec_profile = Some("REDCODE".to_owned());
+        assert!(proxy_policy(&mov_r3d)
+            .unwrap_err()
+            .to_string()
+            .contains("RED SDK"));
+    }
+
+    #[test]
+    fn zero_fps_or_unknown_bit_depth_requires_a_proxy() {
+        let mut zero_fps = probe("h264", Some("High"), 8);
+        zero_fps.fps = 0.0;
+        assert!(proxy_policy(&zero_fps).unwrap().required);
+        let mut negative_fps = probe("h264", Some("High"), 8);
+        negative_fps.fps = -1.0;
+        assert!(proxy_policy(&negative_fps).unwrap().required);
+        let mut unknown_bit_depth = probe("h264", Some("High"), 8);
+        unknown_bit_depth.bit_depth = None;
+        assert!(proxy_policy(&unknown_bit_depth).unwrap().required);
     }
 
     #[test]

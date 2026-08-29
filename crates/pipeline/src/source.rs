@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 
 use anyhow::{bail, ensure, Context};
 use chrono::{DateTime, NaiveDateTime, Utc};
+use crush_core::cancellation::CancellationToken;
 use crush_store::PhotoProxyProvenance;
 use exif::{In, Reader as ExifReader, Tag, Value};
 use image::codecs::jpeg::JpegEncoder;
@@ -19,6 +20,23 @@ use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageReader};
 use serde_json::{json, Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
+
+#[cfg(target_os = "macos")]
+use std::io::Read;
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+#[cfg(target_os = "macos")]
+use std::thread;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
+
+/// Hard per-invocation ceiling for every sips (macOS ImageIO) subprocess.
+#[cfg(target_os = "macos")]
+const SIPS_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(target_os = "macos")]
+const SIPS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 pub const PHOTO_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "tif", "tiff", "heic", "heif", "dng", "cr2", "cr3", "nef", "arw", "orf",
@@ -107,7 +125,8 @@ pub fn is_supported_photo_extension(path: &Path) -> bool {
 }
 
 pub fn photo_support_matrix() -> Vec<PhotoCapability> {
-    let image_io_formats = macos_imageio_formats().unwrap_or_default();
+    let image_io_formats =
+        macos_imageio_formats(&CancellationToken::default()).unwrap_or_default();
     PHOTO_EXTENSIONS
         .iter()
         .map(|extension| {
@@ -137,12 +156,18 @@ pub fn photo_support_matrix() -> Vec<PhotoCapability> {
         .collect()
 }
 
-pub fn decode_photo(path: &Path) -> anyhow::Result<DecodedPhoto> {
+/// Decode one photo through its enabled full decoder. The macOS ImageIO path spawns sips
+/// subprocesses, so the pipeline cancellation token is threaded through: cancelling ingest
+/// kills a running sips child instead of hanging on it.
+pub fn decode_photo(
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<DecodedPhoto> {
     let extension = extension(path)?;
     if IMAGE_RS_EXTENSIONS.contains(&extension.as_str()) {
         decode_with_image_rs(path, &extension)
     } else if IMAGE_IO_EXTENSIONS.contains(&extension.as_str()) {
-        decode_with_macos_imageio(path, &extension)
+        decode_with_macos_imageio(path, &extension, cancellation)
     } else {
         bail!("unsupported photo extension .{extension}")
     }
@@ -240,14 +265,18 @@ fn decode_with_image_rs(path: &Path, extension: &str) -> anyhow::Result<DecodedP
 }
 
 #[cfg(target_os = "macos")]
-fn decode_with_macos_imageio(path: &Path, extension: &str) -> anyhow::Result<DecodedPhoto> {
-    let formats = macos_imageio_formats()?;
+fn decode_with_macos_imageio(
+    path: &Path,
+    extension: &str,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<DecodedPhoto> {
+    let formats = macos_imageio_formats(cancellation)?;
     ensure!(
         formats.contains(extension),
         "installed macOS ImageIO does not advertise a full decoder for .{extension}"
     );
     let mut extracted = read_container_exif(path).unwrap_or_default();
-    let properties = sips_properties(path)?;
+    let properties = sips_properties(path, cancellation)?;
     extracted.camera_make = extracted
         .camera_make
         .or_else(|| properties.get("make").cloned());
@@ -264,12 +293,13 @@ fn decode_with_macos_imageio(path: &Path, extension: &str) -> anyhow::Result<Dec
     }
     let temporary = tempfile::tempdir().context("failed to create ImageIO render directory")?;
     let rendered = temporary.path().join("rendered.jpg");
-    let output = Command::new("/usr/bin/sips")
+    let mut command = Command::new("/usr/bin/sips");
+    command
         .args(["-s", "format", "jpeg", "-s", "formatOptions", "best"])
         .arg(path)
         .arg("--out")
-        .arg(&rendered)
-        .output()
+        .arg(&rendered);
+    let output = run_sips_with_control(&mut command, cancellation)
         .context("failed to run macOS ImageIO through sips")?;
     ensure!(
         output.status.success(),
@@ -308,7 +338,11 @@ fn decode_with_macos_imageio(path: &Path, extension: &str) -> anyhow::Result<Dec
 }
 
 #[cfg(not(target_os = "macos"))]
-fn decode_with_macos_imageio(_path: &Path, extension: &str) -> anyhow::Result<DecodedPhoto> {
+fn decode_with_macos_imageio(
+    _path: &Path,
+    extension: &str,
+    _cancellation: &CancellationToken,
+) -> anyhow::Result<DecodedPhoto> {
     bail!(
         ".{extension} requires the macOS ImageIO decoder; this platform has no enabled full decoder"
     )
@@ -465,14 +499,95 @@ fn sha256_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Run one sips subprocess with pipeline cancellation and a hard 120 s timeout, mirroring the
+/// ffmpeg `run_progress` pattern: spawn in its own process group, drain pipes on side threads,
+/// poll `try_wait`, and kill the group on cancellation or timeout. Non-Unix builds kill the
+/// child directly.
 #[cfg(target_os = "macos")]
-fn macos_imageio_formats() -> anyhow::Result<BTreeSet<String>> {
+fn run_sips_with_control(
+    command: &mut Command,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<std::process::Output> {
+    ensure!(
+        !cancellation.is_cancelled(),
+        "sips was cancelled before it started"
+    );
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .context("failed to start sips (macOS ImageIO)")?;
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .context("sips stdout pipe missing")?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .context("sips stderr pipe missing")?;
+    let stdout_thread = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_thread = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut bytes);
+        bytes
+    });
+    let started = Instant::now();
+    let status = loop {
+        if cancellation.is_cancelled() {
+            kill_sips(&mut child);
+            child.wait()?;
+            bail!("sips invocation was cancelled");
+        }
+        if started.elapsed() >= SIPS_TIMEOUT {
+            kill_sips(&mut child);
+            child.wait()?;
+            bail!(
+                "sips invocation timed out after {} s",
+                SIPS_TIMEOUT.as_secs()
+            );
+        }
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => thread::sleep(SIPS_POLL_INTERVAL),
+        }
+    };
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Kill the sips child's whole process group (the child was spawned with `process_group(0)`);
+/// the non-Unix branch kills the child directly.
+#[cfg(target_os = "macos")]
+fn kill_sips(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as libc::pid_t);
+        // SAFETY: `kill` targets the process group created immediately before spawn.
+        let _ = unsafe { libc::kill(process_group, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_imageio_formats(cancellation: &CancellationToken) -> anyhow::Result<BTreeSet<String>> {
     if let Some(formats) = MACOS_IMAGEIO_FORMATS.get() {
         return Ok(formats.clone());
     }
-    let output = Command::new("/usr/bin/sips")
-        .arg("--formats")
-        .output()
+    let mut command = Command::new("/usr/bin/sips");
+    command.arg("--formats");
+    let output = run_sips_with_control(&mut command, cancellation)
         .context("failed to query macOS ImageIO formats")?;
     ensure!(
         output.status.success(),
@@ -485,7 +600,7 @@ fn macos_imageio_formats() -> anyhow::Result<BTreeSet<String>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn macos_imageio_formats() -> anyhow::Result<BTreeSet<String>> {
+fn macos_imageio_formats(_cancellation: &CancellationToken) -> anyhow::Result<BTreeSet<String>> {
     Ok(BTreeSet::new())
 }
 
@@ -500,24 +615,27 @@ fn parse_sips_formats(output: &str) -> BTreeSet<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn sips_properties(path: &Path) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
-    let output = Command::new("/usr/bin/sips")
-        .args([
-            "-g",
-            "bitsPerSample",
-            "-g",
-            "space",
-            "-g",
-            "profile",
-            "-g",
-            "make",
-            "-g",
-            "model",
-            "-g",
-            "creation",
-        ])
-        .arg(path)
-        .output()
+fn sips_properties(
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut command = Command::new("/usr/bin/sips");
+    command.args([
+        "-g",
+        "bitsPerSample",
+        "-g",
+        "space",
+        "-g",
+        "profile",
+        "-g",
+        "make",
+        "-g",
+        "model",
+        "-g",
+        "creation",
+    ]);
+    command.arg(path);
+    let output = run_sips_with_control(&mut command, cancellation)
         .context("failed to read macOS ImageIO properties")?;
     ensure!(
         output.status.success(),
@@ -619,7 +737,7 @@ mod tests {
     #[test]
     fn applies_all_exif_orientations_to_derivative_pixels() {
         let original = DynamicImage::ImageRgb8(ImageBuffer::from_fn(3, 2, |x, y| {
-            Rgb([(x * 60) as u8, (y * 120) as u8, (x + y) as u8])
+            Rgb([(x * 60) as u8, (y * 120) as u8, ((x + y) * 3) as u8])
         }));
         for value in 1..=8 {
             let orientation = Orientation::from_exif(value).unwrap();
@@ -631,5 +749,32 @@ mod tests {
                 assert_eq!(image.dimensions(), (3, 2));
             }
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sips_helper_times_out_long_running_children() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let started = Instant::now();
+        let result = run_sips_with_control(&mut command, &CancellationToken::default());
+        let elapsed = started.elapsed();
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(elapsed >= Duration::from_secs(1));
+        assert!(elapsed < Duration::from_secs(30), "sleep was not killed");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sips_helper_cancelled_before_spawn_never_starts_a_child() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let error = run_sips_with_control(&mut command, &cancellation)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cancelled"), "unexpected error: {error}");
     }
 }

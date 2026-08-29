@@ -19,7 +19,55 @@ use std::os::unix::process::CommandExt;
 
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const EDIT_PROXY_FILTER: &str = "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p";
 static BUNDLE_RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The exact edit-proxy encoding recipe, recorded in video source metadata_json so
+/// derivatives are auditable and reproducible without reading stage code.
+pub fn edit_proxy_recipe() -> serde_json::Value {
+    serde_json::json!({
+        "filter": EDIT_PROXY_FILTER,
+        "max_dimensions_px": { "width": 1920, "height": 1080 },
+        "video_encoder": "h264_videotoolbox",
+        "video_bitrate": "12M",
+        "video_maxrate": "16M",
+        "video_bufsize": "24M",
+        "audio_encoder": "aac",
+        "audio_bitrate": "192k",
+        "movflags": "+faststart",
+        "color_policy": "pass_through_probed_source_tags_otherwise_explicit_bt709_no_tonemap",
+    })
+}
+
+/// Explicit output color tags for the edit proxy. Probed source tags pass through unchanged;
+/// when the source reports nothing, the proxy is explicitly tagged as SDR BT.709 instead of
+/// inheriting encoder defaults silently.
+fn edit_proxy_color_args(probe: &Probe) -> Vec<String> {
+    let mut arguments = Vec::new();
+    for (flag, value) in [
+        ("-color_primaries", probe.color_primaries.as_deref()),
+        ("-color_trc", probe.color_transfer.as_deref()),
+        ("-colorspace", probe.color_space.as_deref()),
+    ] {
+        let passed_through = value
+            .filter(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("unknown"));
+        arguments.push(flag.to_owned());
+        arguments.push(
+            passed_through
+                .map(str::to_owned)
+                .unwrap_or_else(|| "bt709".to_owned()),
+        );
+    }
+    if let Some(range) = probe
+        .color_range
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        arguments.push("-color_range".to_owned());
+        arguments.push(range.to_owned());
+    }
+    arguments
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -358,6 +406,9 @@ impl Runner {
 
     /// Generate a lightweight edit proxy for acquisition codecs that are expensive to seek.
     /// The LGPL sidecar intentionally uses Apple's native H.264 encoder instead of libx264.
+    /// Output color tags are explicit: probed source tags pass through, otherwise the proxy
+    /// is tagged SDR BT.709. Tonemapping is deliberately not applied; the recorded recipe
+    /// (`edit_proxy_recipe`) states this decision so derivatives stay auditable.
     pub fn generate_edit_proxy_with_control<F>(
         &self,
         input: &Path,
@@ -369,7 +420,9 @@ impl Runner {
         F: FnMut(Progress),
     {
         ensure_parent(output)?;
-        let duration = self.probe(input)?.value.duration_s;
+        let probed = self.probe(input)?.value;
+        let duration = probed.duration_s;
+        let color_args = edit_proxy_color_args(&probed);
         let file_name = output
             .file_name()
             .ok_or_else(|| Error::InvalidArgument("proxy output needs a file name".into()))?
@@ -378,13 +431,13 @@ impl Runner {
         if temporary.exists() {
             fs::remove_file(&temporary)?;
         }
-        let filter = "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p";
         let spec = CommandSpec::new(&self.resolved.path)
             .args(["-y", "-threads"])
             .arg(self.threads.to_string())
             .arg("-i")
             .arg(input)
-            .args(["-map", "0:v:0", "-map", "0:a?", "-vf", filter])
+            .args(["-map", "0:v:0", "-map", "0:a?", "-vf", EDIT_PROXY_FILTER])
+            .args(&color_args)
             .args([
                 "-c:v",
                 "h264_videotoolbox",
@@ -1075,7 +1128,7 @@ struct ProbeFormat {
     format_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ProbeStream {
     codec_type: Option<String>,
     codec_name: Option<String>,
@@ -1108,6 +1161,14 @@ struct ProbeSideData {
     rotation: Option<i32>,
 }
 
+/// Pixel formats whose 8-bit depth is known. Anything else without an explicit depth marker
+/// stays unknown so the direct-edit gate can require a proxy instead of guessing.
+const KNOWN_8BIT_PIXEL_FORMATS: &[&str] = &[
+    "yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "yuv410p", "yuv411p",
+    "nv12", "nv21", "nv16", "yuyv422", "uyvy422", "gray", "gbrp", "rgb24", "bgr24", "rgba",
+    "bgra", "argb", "abgr", "rgb0", "bgr0", "pal8",
+];
+
 fn infer_bit_depth(stream: &ProbeStream) -> Option<u8> {
     stream
         .bits_per_raw_sample
@@ -1117,11 +1178,16 @@ fn infer_bit_depth(stream: &ProbeStream) -> Option<u8> {
         .or_else(|| {
             let pixel_format = stream.pix_fmt.as_deref()?;
             for depth in [16, 14, 12, 10, 9] {
-                if pixel_format.contains(&depth.to_string()) {
+                let marker = depth.to_string();
+                if pixel_format.contains(&format!("{marker}le"))
+                    || pixel_format.contains(&format!("{marker}be"))
+                {
                     return Some(depth);
                 }
             }
-            Some(8)
+            KNOWN_8BIT_PIXEL_FORMATS
+                .contains(&pixel_format)
+                .then_some(8)
         })
 }
 
@@ -1214,6 +1280,107 @@ mod tests {
     fn progress_uses_microseconds_and_is_bounded() {
         assert_eq!(parse_out_time_us("out_time_us=2500000"), Some(2_500_000));
         assert_eq!(parse_out_time_us("frame=12"), None);
+    }
+
+    fn color_probe(
+        primaries: Option<&str>,
+        transfer: Option<&str>,
+        space: Option<&str>,
+        range: Option<&str>,
+    ) -> Probe {
+        Probe {
+            duration_s: 1.0,
+            fps: 24.0,
+            width: 640,
+            height: 360,
+            has_audio: false,
+            container: None,
+            video_codec: Some("hevc".to_owned()),
+            codec_profile: None,
+            codec_tag: None,
+            pixel_format: None,
+            bit_depth: None,
+            color_space: space.map(str::to_owned),
+            color_primaries: primaries.map(str::to_owned),
+            color_transfer: transfer.map(str::to_owned),
+            color_range: range.map(str::to_owned),
+            rotation: None,
+        }
+    }
+
+    #[test]
+    fn edit_proxy_color_args_pass_source_tags_through_or_default_to_bt709() {
+        let hdr = color_probe(
+            Some("bt2020"),
+            Some("smpte2084"),
+            Some("bt2020nc"),
+            Some("tv"),
+        );
+        assert_eq!(
+            edit_proxy_color_args(&hdr),
+            vec![
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-color_range",
+                "tv",
+            ]
+        );
+        let untagged = color_probe(None, None, None, None);
+        assert_eq!(
+            edit_proxy_color_args(&untagged),
+            vec![
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+            ]
+        );
+        let unknown_tagged = color_probe(Some("unknown"), Some("unknown"), None, None);
+        assert_eq!(
+            edit_proxy_color_args(&unknown_tagged),
+            vec![
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+            ]
+        );
+    }
+
+    #[test]
+    fn edit_proxy_recipe_records_the_encode_settings() {
+        let recipe = edit_proxy_recipe();
+        assert_eq!(recipe["video_encoder"], "h264_videotoolbox");
+        assert_eq!(recipe["video_bitrate"], "12M");
+        assert_eq!(recipe["audio_bitrate"], "192k");
+        assert_eq!(recipe["movflags"], "+faststart");
+        assert!(recipe["filter"]
+            .as_str()
+            .unwrap()
+            .contains("force_divisible_by=2"));
+    }
+
+    #[test]
+    fn bit_depth_inference_treats_unrecognized_pixel_formats_as_unknown() {
+        let stream = |pix_fmt: Option<&str>| ProbeStream {
+            pix_fmt: pix_fmt.map(str::to_owned),
+            ..ProbeStream::default()
+        };
+        assert_eq!(infer_bit_depth(&stream(Some("yuv420p"))), Some(8));
+        assert_eq!(infer_bit_depth(&stream(Some("yuv420p10le"))), Some(10));
+        assert_eq!(infer_bit_depth(&stream(Some("yuv420p16be"))), Some(16));
+        assert_eq!(infer_bit_depth(&stream(Some("p016le"))), Some(16));
+        assert_eq!(infer_bit_depth(&stream(Some("yuv410p"))), Some(8));
+        assert_eq!(infer_bit_depth(&stream(Some("made_up_fmt"))), None);
+        assert_eq!(infer_bit_depth(&stream(None)), None);
     }
 
     #[test]

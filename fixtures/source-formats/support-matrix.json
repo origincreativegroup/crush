@@ -22,5 +22,17 @@
     {"format":"BRAW","decoder":"none","support":"disabled_proprietary_sdk_licensing"},
     {"format":"R3D","decoder":"none","support":"disabled_proprietary_sdk_licensing"},
     {"format":"ProRes RAW","decoder":"none","support":"disabled_no_approved_full_decoder"}
+  ],
+  "known_unsupported": [
+    {"extension":"avif","reason":"AVIF decode is disabled: no approved full decoder is bundled; embedded-preview extraction is not full media support"},
+    {"extension":"jxl","reason":"JPEG XL decode is disabled: no approved full decoder is bundled; embedded-preview extraction is not full media support"},
+    {"extension":"erf","reason":"ERF (Phase One) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"},
+    {"extension":"iiq","reason":"IIQ (Phase One) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"},
+    {"extension":"3fr","reason":"3FR (Hasselblad) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"},
+    {"extension":"x3f","reason":"X3F (Sigma Foveon) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"},
+    {"extension":"gpr","reason":"GPR (GoPro RAW) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"},
+    {"extension":"mrw","reason":"MRW (Minolta) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"},
+    {"extension":"pef","reason":"PEF (Pentax) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"},
+    {"extension":"srw","reason":"SRW (Samsung) decode is disabled: no approved full decoder exists for this acquisition format; embedded-preview extraction is not full media support"}
   ]
 }
