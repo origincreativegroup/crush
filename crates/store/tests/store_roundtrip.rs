@@ -1470,6 +1470,7 @@ fn embedded_preview_provenance_is_rejected_structurally() {
     );
 }
 
+#[test]
 fn feedback_is_append_only_and_enforces_signal_rules_at_the_api() {
     let directory = TestDir::new("feedback-hardening");
     let store = Store::open(directory.path()).unwrap();
