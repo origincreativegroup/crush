@@ -719,7 +719,8 @@ mod macos {
                 // permanent: validate the value and the asset before writing.
                 let value = match signal {
                     FeedbackSignal::Rating => {
-                        let value = value.context("rating feedback requires a value from 1 to 5")?;
+                        let value =
+                            value.context("rating feedback requires a value from 1 to 5")?;
                         ensure!(
                             (1.0..=5.0).contains(&value),
                             "rating feedback must be between 1 and 5, got {value}"
@@ -1079,7 +1080,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=5"));
+            assert!(report.contains("schema=6"));
         }
     }
 }
