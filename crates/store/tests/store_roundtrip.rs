@@ -1089,7 +1089,10 @@ fn deep_integrity_reports_missing_vectors_and_thumbnail_files() {
         .unwrap();
 
     // Raw-SQL corruption the typed API cannot produce: an orphan photo vector and a
-    // truncated shot vector blob.
+    // truncated shot vector blob. The orphan insert needs foreign keys off on the audit
+    // connection because photo_vectors carries a composite FK — the row models a
+    // pre-existing corrupted database, which is exactly what integrity() must catch.
+    audit.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
     audit
         .execute(
             "INSERT INTO photo_vectors (photo_id, owner_id, dim, vec)
@@ -1097,6 +1100,7 @@ fn deep_integrity_reports_missing_vectors_and_thumbnail_files() {
             [],
         )
         .unwrap();
+    audit.execute_batch("PRAGMA foreign_keys = ON").unwrap();
     audit
         .execute(
             "UPDATE shot_vectors SET vec = X'00' WHERE shot_id = 'shot-vector'",
