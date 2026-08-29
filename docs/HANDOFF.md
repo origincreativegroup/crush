@@ -32,7 +32,33 @@ render-golden review in Task 021, and clean-machine acceptance before release in
 
 **Branch:** `task/NN-short-name`. One task per PR.
 
-## Current implementation state (2026-08-28)
+## Current implementation state (2026-08-29, agent-team session)
+
+Tasks 000–019 are COMPLETE and merged; TASK-020a is merged and TASK-020b is the next work item.
+Every task landed as its own squash PR gated by Linux + macOS CI: #14–#19 (original 012–017 work),
+#21 (025 store hardening), #22 (024 fidelity truthfulness + ranking breakdown), #23 (026 pipeline
+ops), #24+#27 (027 app robustness + integration repair), #25 (018a style learner), #29 (018b style
+UI), #30 (019a DAM organization), #31 (019b review UI), #33+#34 (020a editorial plans core).
+
+Schema is at v9 (0009_plans.sql: plans / plan_items / plan_revisions with boundary-safe shot clamps,
+append-only revisions, and a provenance invariant recording origin/rank/profile_version so baseline
+and personalized results stay distinguishable in data). App command surface is 63 registered commands.
+Branching note for future agents: the app `generate_handler!` list and the big command block in
+`crates/app/src-tauri/src/lib.rs` conflict-prone across parallel branches — rebase onto main before
+opening the PR and run rustfmt (it is the local syntax referee when no toolchain compiles).
+
+Known caveats carried forward:
+- The `sips -s iccProfile` HEIC sub-case in `source_fidelity.rs` skips on some runners; the JPEG ICC
+  round-trip is the enforced coverage.
+- The UI harness runs in macOS CI as continue-on-error until proven on a runner.
+- HUMAN HARD STOPS still open: Task 018 held-out style proof (eval output in PR #25 — John reviews
+  before any UI may claim "learned"), Task 021 render-golden review, Task 023 clean-machine
+  acceptance. Plan files and per-task acceptance records live in `.tasks/done/`.
+
+Next: **TASK-020b** (plans UI: two-column General/Personalized candidates, plan editor, provenance
+pills) per `.tasks/done/TASK-020-impl-plan.md`, then Tasks 021–023.
+
+## Previous implementation state (2026-08-28)
 
 - TASK-001 is complete: workspace build, all tests, Clippy with warnings denied, and rustfmt pass
   locally on macOS and in GitHub Actions/Linux CI run 33123337534.
