@@ -111,6 +111,29 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Strong-shot selects with an optional brief-driven personalized ordering (Task 20a).
+    Selects {
+        /// Creative brief for the personalized ordering; omit for the general list only.
+        #[arg(long)]
+        brief: Option<String>,
+        /// Context key the personalized ranking is scoped to.
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(long, default_value_t = 12)]
+        top: usize,
+        /// Print JSON rows instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List editorial plans and their items (Task 20a).
+    Plans {
+        /// Show the items of one plan id.
+        #[arg(long)]
+        items: Option<String>,
+        /// Print JSON rows instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -218,6 +241,13 @@ fn main() -> anyhow::Result<()> {
             search,
             json,
         } => library(&paths, kind, collection, stack, context, search, json),
+        Cmd::Selects {
+            brief,
+            context,
+            top,
+            json,
+        } => selects(&cfg, &paths, brief, context, top, json),
+        Cmd::Plans { items, json } => plans(&paths, items, json),
     }
 }
 
@@ -669,6 +699,176 @@ fn metric_text(metric: Option<f64>) -> String {
     metric.map_or_else(|| "—".to_owned(), |value| format!("{value:.3}"))
 }
 
+fn selects(
+    cfg: &Config,
+    paths: &AppPaths,
+    brief: Option<String>,
+    context: Option<String>,
+    top: usize,
+    json: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(top > 0, "--top must be greater than zero");
+    let store = Store::open(&paths.root)?;
+    let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, cfg.search.transcript_hit_boost)?;
+    let preference = ProviderPreference::parse(&cfg.embed.provider)?;
+    eprintln!(
+        "selects: loading text encoder and {} indexed vectors...",
+        engine.len()
+    );
+    let mut embedder = Embedder::new(paths.models(), preference, cfg.limits.threads)?;
+    let mut text_embedder = |text: &str| embedder.embed_text(text);
+    let selection = crush_search::selects_candidates(
+        &store,
+        DEFAULT_OWNER_ID,
+        &engine,
+        &mut text_embedder,
+        brief.as_deref(),
+        top,
+        context.as_deref(),
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&selection)?);
+        return Ok(());
+    }
+    if !selection.brief.is_empty() {
+        println!(
+            "brief: {} (context: {})",
+            selection.brief,
+            selection.context_key.as_deref().unwrap_or("none")
+        );
+    }
+    println!("\ngeneral strong shots ({}):", selection.general.len());
+    for (rank, result) in selection.general.iter().enumerate() {
+        println!(
+            "{:<4} {:<6} {:>8}  {}",
+            rank + 1,
+            result.asset_type,
+            format!("{:.3}", result.score),
+            result.path
+        );
+    }
+    if selection.personalized.is_empty() {
+        println!("\npersonalized: (no brief supplied)");
+        return Ok(());
+    }
+    println!(
+        "\npersonalized for the brief ({}):",
+        selection.personalized.len()
+    );
+    for (rank, result) in selection.personalized.iter().enumerate() {
+        let breakdown = result.score_breakdown;
+        println!(
+            "{:<4} {:<6} {:>8}  style={:<8}  {}",
+            rank + 1,
+            result.asset_type,
+            format!("{:.3}", result.score),
+            result
+                .personal_style_score
+                .map_or_else(|| "-".to_owned(), |value| format!("{value:.3}")),
+            result.path
+        );
+        if let Some(breakdown) = breakdown {
+            println!(
+                "     semantic{:+.3} general{:+.3} style{:+.3} context{:+.3} penalty{:+.3} total{:+.3}",
+                breakdown.semantic,
+                breakdown.general_aesthetic,
+                breakdown.personal_affinity,
+                breakdown.context_fit,
+                breakdown.penalties,
+                breakdown.total,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn plans(paths: &AppPaths, items: Option<String>, json: bool) -> anyhow::Result<()> {
+    let store = Store::open(&paths.root)?;
+    if let Some(plan_id) = items {
+        let plan = store
+            .plan_get(DEFAULT_OWNER_ID, &plan_id)?
+            .with_context(|| format!("plan {plan_id:?} was not found"))?;
+        let rows = store.plan_items(DEFAULT_OWNER_ID, &plan_id)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "plan": {
+                        "id": plan.id,
+                        "name": plan.name,
+                        "context_key": plan.context_key,
+                        "brief": plan.brief,
+                        "updated_at": plan.updated_at.to_rfc3339(),
+                    },
+                    "items": rows,
+                }))?
+            );
+            return Ok(());
+        }
+        println!(
+            "plan {} ({}) context={} items={}",
+            plan.name,
+            plan.id,
+            plan.context_key,
+            rows.len()
+        );
+        println!(
+            "{:<4} {:<6} {:<24} {:>8} {:>8}  {:<10} MEDIA",
+            "#", "KIND", "ID", "START", "END", "ORIGIN"
+        );
+        for item in &rows {
+            println!(
+                "{:<4} {:<6} {:<24} {:>8} {:>8}  {:<10} {}",
+                item.position,
+                match item.media_kind {
+                    crush_store::MediaKind::Photo => "photo",
+                    crush_store::MediaKind::Shot => "shot",
+                },
+                item.media_id,
+                item.start_s
+                    .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}")),
+                item.end_s
+                    .map_or_else(|| "—".to_owned(), |v| format!("{v:.2}")),
+                crush_store::plan_origin_to_str(item.origin),
+                item.reason,
+            );
+        }
+        return Ok(());
+    }
+    let plans = store.plan_list(DEFAULT_OWNER_ID)?;
+    if plans.is_empty() {
+        println!("No editorial plans.");
+        return Ok(());
+    }
+    if json {
+        let rows = plans
+            .iter()
+            .map(|plan| {
+                Ok(serde_json::json!({
+                    "id": plan.id,
+                    "name": plan.name,
+                    "context_key": plan.context_key,
+                    "brief": plan.brief,
+                    "created_at": plan.created_at.to_rfc3339(),
+                    "updated_at": plan.updated_at.to_rfc3339(),
+                    "items": store.plan_items(DEFAULT_OWNER_ID, &plan.id)?.len(),
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    println!("{:<36} {:<24} {:<16} ITEMS", "PLAN", "NAME", "CONTEXT");
+    for plan in &plans {
+        let count = store.plan_items(DEFAULT_OWNER_ID, &plan.id)?.len();
+        println!(
+            "{:<36} {:<24} {:<16} {}",
+            plan.id, plan.name, plan.context_key, count
+        );
+    }
+    Ok(())
+}
+
 fn ensure_models(paths: &AppPaths, manifest_url: &str) -> anyhow::Result<()> {
     let manifest = models::ensure(&paths.models(), manifest_url, |progress| {
         let percent = if progress.total == 0 {
@@ -980,6 +1180,62 @@ mod tests {
         assert!(matches!(
             cli.cmd,
             Cmd::Search { query, top: 3, json: true } if query == "a rocket launching"
+        ));
+    }
+
+    #[test]
+    fn selects_cli_shape_is_stable() {
+        let with_brief = Cli::try_parse_from([
+            "crushctl",
+            "selects",
+            "--brief",
+            "a quiet travel film",
+            "--context",
+            "homepage-hero",
+            "--top",
+            "5",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            with_brief.cmd,
+            Cmd::Selects {
+                brief: Some(brief),
+                context: Some(context),
+                top: 5,
+                json: true,
+            } if brief == "a quiet travel film" && context == "homepage-hero"
+        ));
+        let general_only = Cli::try_parse_from(["crushctl", "selects", "--top", "3"]).unwrap();
+        assert!(matches!(
+            general_only.cmd,
+            Cmd::Selects {
+                brief: None,
+                context: None,
+                top: 3,
+                json: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn plans_cli_shape_is_stable() {
+        let list = Cli::try_parse_from(["crushctl", "plans"]).unwrap();
+        assert!(matches!(
+            list.cmd,
+            Cmd::Plans {
+                items: None,
+                json: false
+            }
+        ));
+        let items =
+            Cli::try_parse_from(["crushctl", "plans", "--items", "plan-1", "--json"]).unwrap();
+        assert!(matches!(
+            items.cmd,
+            Cmd::Plans {
+                items: Some(items),
+                json: true,
+            } if items == "plan-1"
         ));
     }
 

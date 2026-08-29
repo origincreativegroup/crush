@@ -11,10 +11,11 @@ use crush_core::{
 use crush_store::{
     AestheticAssessment, AssetFilter, Collection, CollectionItem, EditorialAnnotation,
     EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, Photo,
-    PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, ProblemKind, ReferenceItemRole,
-    ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, ReviewOp, SafetyFlags,
-    SavedSearch, Shot, StackItem, StackItemRole, StackMediaKind, Store, StyleProfile,
-    TranscriptSegment, VersionStack, Video, VideoSourceMetadata, VideoStatus,
+    PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, Plan, PlanItem, PlanItemPatch,
+    PlanOrigin, ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
+    ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch, Shot, StackItem, StackItemRole,
+    StackMediaKind, Store, StyleProfile, TranscriptSegment, VersionStack, Video,
+    VideoSourceMetadata, VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -138,7 +139,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 8);
+    assert_eq!(store.schema_version().unwrap(), 9);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -149,7 +150,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 8);
+    assert_eq!(reopened.schema_version().unwrap(), 9);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -206,7 +207,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 8);
+    assert_eq!(store.schema_version().unwrap(), 9);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -269,7 +270,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 8);
+    assert_eq!(store.schema_version().unwrap(), 9);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -1699,7 +1700,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 8);
+    assert_eq!(store.schema_version().unwrap(), 9);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -2232,6 +2233,41 @@ fn collection(id: &str, name: &str) -> Collection {
         name: name.to_owned(),
         description: "editorial selects".to_owned(),
         created_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+fn plan(id: &str, name: &str) -> Plan {
+    Plan {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        name: name.to_owned(),
+        description: "hero selects".to_owned(),
+        context_key: "default".to_owned(),
+        brief: "warm family film".to_owned(),
+        created_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+        updated_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
+    }
+}
+
+fn plan_item(plan_id: &str, media_kind: MediaKind, media_id: &str) -> PlanItem {
+    PlanItem {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        plan_id: plan_id.to_owned(),
+        media_kind,
+        media_id: media_id.to_owned(),
+        // plan_add_item assigns the next dense position.
+        position: 0,
+        start_s: (media_kind == MediaKind::Shot).then_some(0.0),
+        end_s: (media_kind == MediaKind::Shot).then_some(1.0),
+        pacing: None,
+        crop_x: None,
+        grade_json: None,
+        reason: String::new(),
+        signals_json: "{}".to_owned(),
+        origin: PlanOrigin::General,
+        rank: None,
+        profile_version: None,
+        added_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
     }
 }
 
@@ -3320,7 +3356,7 @@ fn schema_v7_upgrades_to_collections_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 8);
+    assert_eq!(store.schema_version().unwrap(), 9);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(
         store
@@ -3361,4 +3397,601 @@ fn schema_v7_upgrades_to_collections_without_losing_rows() {
             .len(),
         1
     );
+}
+
+#[test]
+fn plans_round_trip_with_owner_isolation_and_cascades() {
+    const OWNER_B: &str = "planner-b";
+    let directory = TestDir::new("plans");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at)
+             VALUES ('planner-b', 'Planner B', '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-plan-a", "plan-sha-a"),
+        )
+        .unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-plan", "plan-video-sha"))
+        .unwrap();
+    store
+        .insert_shots(
+            DEFAULT_OWNER_ID,
+            std::slice::from_ref(&shot("shot-plan", "video-plan", 0)),
+        )
+        .unwrap();
+
+    let hero = plan("plan-a", "hero reel");
+    store.plan_create(DEFAULT_OWNER_ID, &hero).unwrap();
+    assert_eq!(
+        store.plan_get(DEFAULT_OWNER_ID, "plan-a").unwrap(),
+        Some(hero.clone())
+    );
+    // Owner isolation: another owner neither sees the plan nor may add items to it.
+    let mut other_owner = plan("plan-b", "hero reel");
+    other_owner.owner_id = OWNER_B.to_owned();
+    store.plan_create(OWNER_B, &other_owner).unwrap();
+    assert_eq!(store.plan_list(OWNER_B).unwrap().len(), 1);
+    assert!(store.plan_get(OWNER_B, "plan-a").unwrap().is_none());
+    let mut crossed = plan_item("plan-a", MediaKind::Photo, "photo-plan-a");
+    crossed.owner_id = OWNER_B.to_owned();
+    assert!(store.plan_add_item(OWNER_B, &crossed).is_err());
+    // Duplicate names stay per-owner.
+    assert!(store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-c", "hero reel"))
+        .is_err());
+    // Plans never append feedback events.
+    assert!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().is_empty());
+
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-a", MediaKind::Photo, "photo-plan-a"),
+        )
+        .unwrap();
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-a", MediaKind::Shot, "shot-plan"),
+        )
+        .unwrap();
+    // Duplicate membership is refused by the primary key.
+    assert!(store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-a", MediaKind::Photo, "photo-plan-a"),
+        )
+        .is_err());
+    // Missing media is refused by the target-existence trigger.
+    assert!(store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-a", MediaKind::Photo, "photo-missing"),
+        )
+        .is_err());
+    // Items are appended in dense positions.
+    let items = store.plan_items(DEFAULT_OWNER_ID, "plan-a").unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| (item.position, item.media_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "photo-plan-a"), (1, "shot-plan")]
+    );
+
+    // Header updates round-trip and touch updated_at.
+    let before = store.plan_get(DEFAULT_OWNER_ID, "plan-a").unwrap().unwrap();
+    assert!(store
+        .plan_update(
+            DEFAULT_OWNER_ID,
+            "plan-a",
+            "renamed reel",
+            "new",
+            "quiet film"
+        )
+        .unwrap());
+    let after = store.plan_get(DEFAULT_OWNER_ID, "plan-a").unwrap().unwrap();
+    assert_eq!(after.name, "renamed reel");
+    assert_eq!(after.brief, "quiet film");
+    assert!(after.updated_at > before.updated_at);
+    // Cross-owner renames and deletes touch nothing.
+    assert!(!store
+        .plan_update(OWNER_B, "plan-a", "stolen", "", "")
+        .unwrap());
+    assert!(!store.plan_delete(OWNER_B, "plan-a").unwrap());
+    assert!(store
+        .plan_get(DEFAULT_OWNER_ID, "plan-a")
+        .unwrap()
+        .is_some());
+
+    // Duplicating copies header and items in order, under a new id.
+    let copy = store
+        .plan_duplicate(DEFAULT_OWNER_ID, "plan-a", "hero reel copy")
+        .unwrap();
+    assert_ne!(copy.id, "plan-a");
+    let copied_items = store.plan_items(DEFAULT_OWNER_ID, &copy.id).unwrap();
+    assert_eq!(copied_items.len(), items.len());
+    assert_eq!(copied_items[1].media_id, "shot-plan");
+
+    // Deleting media scrubs dangling plan items through the 0009 cleanup trigger.
+    audit
+        .execute("DELETE FROM shots WHERE id = 'shot-plan'", [])
+        .unwrap();
+    assert!(store
+        .plan_items(DEFAULT_OWNER_ID, "plan-a")
+        .unwrap()
+        .iter()
+        .all(|item| item.media_kind == MediaKind::Photo));
+
+    // Deleting a plan cascades its items and revisions; a second delete reports false.
+    store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-a", "checkpoint")
+        .unwrap();
+    assert!(store.plan_delete(DEFAULT_OWNER_ID, "plan-a").unwrap());
+    assert!(store
+        .plan_get(DEFAULT_OWNER_ID, "plan-a")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .plan_items(DEFAULT_OWNER_ID, "plan-a")
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .plan_revisions(DEFAULT_OWNER_ID, "plan-a")
+        .unwrap()
+        .is_empty());
+    assert!(!store.plan_delete(DEFAULT_OWNER_ID, "plan-a").unwrap());
+}
+
+#[test]
+fn plan_items_validate_shot_boundaries_and_reorder() {
+    let directory = TestDir::new("plan-boundaries");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_photo(
+            DEFAULT_OWNER_ID,
+            &reference_photo("photo-bound", "bound-sha"),
+        )
+        .unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-bound", "bound-video-sha"))
+        .unwrap();
+    let shots = vec![
+        shot("shot-bound-0", "video-bound", 0),
+        shot("shot-bound-1", "video-bound", 1),
+    ];
+    store.insert_shots(DEFAULT_OWNER_ID, &shots).unwrap();
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-bound", "boundaries"))
+        .unwrap();
+
+    // A shot item clipped inside the source shot's interval is accepted.
+    let mut clipped = plan_item("plan-bound", MediaKind::Shot, "shot-bound-1");
+    clipped.start_s = Some(1.0);
+    clipped.end_s = Some(2.0);
+    store.plan_add_item(DEFAULT_OWNER_ID, &clipped).unwrap();
+
+    // Out-of-bounds or degenerate clip boundaries are refused before SQL runs.
+    let mut early = plan_item("plan-bound", MediaKind::Shot, "shot-bound-1");
+    early.start_s = Some(0.5);
+    early.end_s = Some(2.0);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &early).is_err());
+    let mut late = plan_item("plan-bound", MediaKind::Shot, "shot-bound-1");
+    late.start_s = Some(1.0);
+    late.end_s = Some(2.5);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &late).is_err());
+    let mut degenerate = plan_item("plan-bound", MediaKind::Shot, "shot-bound-1");
+    degenerate.start_s = Some(1.5);
+    degenerate.end_s = Some(1.5);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &degenerate).is_err());
+    // Shots require boundaries; photos must not carry any.
+    let mut no_bounds = plan_item("plan-bound", MediaKind::Shot, "shot-bound-0");
+    no_bounds.start_s = None;
+    no_bounds.end_s = None;
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &no_bounds).is_err());
+    // A photo item carrying clip boundaries violates the photos-carry-none rule.
+    let mut photo_with_bounds = plan_item("plan-bound", MediaKind::Photo, "photo-bound");
+    photo_with_bounds.start_s = Some(0.0);
+    photo_with_bounds.end_s = Some(1.0);
+    assert!(store
+        .plan_add_item(DEFAULT_OWNER_ID, &photo_with_bounds)
+        .is_err());
+    // A plain photo item (no boundaries) is accepted.
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-bound", MediaKind::Photo, "photo-bound"),
+        )
+        .unwrap();
+
+    // In-bounds edits are accepted and persisted; out-of-bounds edits are refused.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            MediaKind::Shot,
+            "shot-bound-1",
+            &PlanItemPatch {
+                start_s: Some(1.25),
+                end_s: Some(1.75),
+                pacing: Some(0.4),
+                crop_x: Some(0.5),
+                grade_json: Some(r#"{"lift":[0,0,0.02]}"#.to_owned()),
+                reason: Some("tighter on the gesture".to_owned()),
+            },
+        )
+        .unwrap();
+    let edited = &store.plan_items(DEFAULT_OWNER_ID, "plan-bound").unwrap()[0];
+    assert_eq!(edited.start_s, Some(1.25));
+    assert_eq!(edited.end_s, Some(1.75));
+    assert_eq!(edited.pacing, Some(0.4));
+    assert_eq!(edited.reason, "tighter on the gesture");
+    assert!(store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            MediaKind::Shot,
+            "shot-bound-1",
+            &PlanItemPatch {
+                start_s: Some(0.25),
+                ..PlanItemPatch::default()
+            },
+        )
+        .is_err());
+    // Photo items refuse treatment fields that imply clip boundaries.
+    assert!(store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            MediaKind::Photo,
+            "photo-bound",
+            &PlanItemPatch {
+                start_s: Some(0.0),
+                end_s: Some(1.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .is_err());
+    // Unknown items are refused.
+    assert!(store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            MediaKind::Shot,
+            "shot-missing",
+            &PlanItemPatch::default(),
+        )
+        .is_err());
+
+    // Reordering reassigns dense positions and accepts only full permutations.
+    store
+        .plan_reorder_items(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            &[
+                (MediaKind::Shot, "shot-bound-1".to_owned()),
+                (MediaKind::Photo, "photo-bound".to_owned()),
+            ],
+        )
+        .unwrap();
+    let ordered = store.plan_items(DEFAULT_OWNER_ID, "plan-bound").unwrap();
+    assert_eq!(ordered[0].media_id, "shot-bound-1");
+    assert_eq!(ordered[1].media_id, "photo-bound");
+    assert!(store
+        .plan_reorder_items(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            &[(MediaKind::Photo, "photo-bound".to_owned())],
+        )
+        .is_err());
+    assert!(store
+        .plan_reorder_items(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            &[
+                (MediaKind::Photo, "photo-bound".to_owned()),
+                (MediaKind::Photo, "photo-bound".to_owned()),
+            ],
+        )
+        .is_err());
+    assert!(store
+        .plan_reorder_items(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            &[
+                (MediaKind::Photo, "photo-bound".to_owned()),
+                (MediaKind::Photo, "photo-missing".to_owned()),
+            ],
+        )
+        .is_err());
+
+    // Removing an item compacts the remaining positions.
+    assert!(store
+        .plan_remove_item(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            MediaKind::Shot,
+            "shot-bound-1"
+        )
+        .unwrap());
+    let remaining = store.plan_items(DEFAULT_OWNER_ID, "plan-bound").unwrap();
+    assert_eq!(
+        remaining
+            .iter()
+            .map(|item| (item.position, item.media_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "photo-bound")]
+    );
+    assert!(!store
+        .plan_remove_item(
+            DEFAULT_OWNER_ID,
+            "plan-bound",
+            MediaKind::Shot,
+            "shot-bound-1"
+        )
+        .unwrap());
+}
+
+#[test]
+fn plan_revisions_are_append_only_and_restore_revalidates() {
+    let directory = TestDir::new("plan-revisions");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &reference_photo("photo-rev", "rev-sha"))
+        .unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-rev", "rev-video-sha"))
+        .unwrap();
+    store
+        .insert_shots(
+            DEFAULT_OWNER_ID,
+            std::slice::from_ref(&shot("shot-rev", "video-rev", 0)),
+        )
+        .unwrap();
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-rev", "revisions"))
+        .unwrap();
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-rev", MediaKind::Photo, "photo-rev"),
+        )
+        .unwrap();
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-rev", MediaKind::Shot, "shot-rev"),
+        )
+        .unwrap();
+
+    let first = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-rev", "v1")
+        .unwrap();
+    assert_eq!(first.revision, 1);
+
+    // Mutate: swap the order, then drop the photo item entirely.
+    store
+        .plan_reorder_items(
+            DEFAULT_OWNER_ID,
+            "plan-rev",
+            &[
+                (MediaKind::Shot, "shot-rev".to_owned()),
+                (MediaKind::Photo, "photo-rev".to_owned()),
+            ],
+        )
+        .unwrap();
+    store
+        .plan_remove_item(DEFAULT_OWNER_ID, "plan-rev", MediaKind::Photo, "photo-rev")
+        .unwrap();
+
+    let second = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-rev", "v2")
+        .unwrap();
+    assert_eq!(second.revision, 2);
+    let revisions = store.plan_revisions(DEFAULT_OWNER_ID, "plan-rev").unwrap();
+    assert_eq!(revisions.len(), 2);
+    assert_eq!(revisions[0].label, "v1");
+
+    // Snapshots are append-only at the schema level while the plan exists.
+    assert!(audit
+        .execute(
+            "UPDATE plan_revisions SET label = 'rewritten' WHERE revision = 1",
+            [],
+        )
+        .is_err());
+    assert!(audit
+        .execute("DELETE FROM plan_revisions WHERE revision = 1", [])
+        .is_err());
+
+    // Restore v1: both items come back in their original order.
+    let restored_count = store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-rev", 1)
+        .unwrap();
+    assert_eq!(restored_count, 2);
+    let restored = store.plan_items(DEFAULT_OWNER_ID, "plan-rev").unwrap();
+    assert_eq!(restored[0].media_id, "photo-rev");
+    assert_eq!(restored[1].media_id, "shot-rev");
+    // Restoring preserves provenance and frozen signals.
+    assert_eq!(restored[0].position, 0);
+    assert!(restored
+        .iter()
+        .all(|item| item.origin == PlanOrigin::General));
+    // Unknown revisions are refused.
+    assert!(store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-rev", 99)
+        .is_err());
+
+    // Restore revalidates against current media: shrink the source shot, then restoring the
+    // snapshot that still clips the old full interval must fail loudly.
+    store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-rev", "v3")
+        .unwrap();
+    audit
+        .execute(
+            "UPDATE shots SET start_s = 0.5, end_s = 0.9, rep_frame_s = 0.7
+             WHERE id = 'shot-rev'",
+            [],
+        )
+        .unwrap();
+    assert!(store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-rev", 1)
+        .is_err());
+}
+
+#[test]
+fn plan_item_provenance_invariant_and_no_feedback_writes() {
+    let directory = TestDir::new("plan-provenance");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &reference_photo("photo-prov", "prov-sha"))
+        .unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-prov", "prov-video-sha"))
+        .unwrap();
+    store
+        .insert_shots(
+            DEFAULT_OWNER_ID,
+            std::slice::from_ref(&shot("shot-prov", "video-prov", 0)),
+        )
+        .unwrap();
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-prov", "provenance"))
+        .unwrap();
+
+    // A personalized item must carry the style-profile version that ranked it...
+    let mut personal = plan_item("plan-prov", MediaKind::Shot, "shot-prov");
+    personal.origin = PlanOrigin::Personal;
+    personal.rank = Some(0.82);
+    personal.profile_version = Some(3);
+    personal.signals_json = r#"{"personal_affinity":0.12,"general_aesthetic":0.08}"#.to_owned();
+    store.plan_add_item(DEFAULT_OWNER_ID, &personal).unwrap();
+    // ...and a general item must not carry one.
+    let mut forged = plan_item("plan-prov", MediaKind::Photo, "photo-prov");
+    forged.origin = PlanOrigin::General;
+    forged.profile_version = Some(3);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &forged).is_err());
+    let mut anonymous = plan_item("plan-prov", MediaKind::Photo, "photo-prov");
+    anonymous.origin = PlanOrigin::Personal;
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &anonymous).is_err());
+
+    let items = store.plan_items(DEFAULT_OWNER_ID, "plan-prov").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].origin, PlanOrigin::Personal);
+    assert_eq!(items[0].profile_version, Some(3));
+    assert_eq!(items[0].rank, Some(0.82));
+    assert!(items[0].signals_json.contains("general_aesthetic"));
+
+    // Plan writes are document state: nothing above appended feedback.
+    assert!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().is_empty());
+    store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-prov", "checkpoint")
+        .unwrap();
+    store
+        .plan_duplicate(DEFAULT_OWNER_ID, "plan-prov", "copy")
+        .unwrap();
+    store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-prov", 1)
+        .unwrap();
+    assert!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().is_empty());
+}
+
+#[test]
+fn schema_v8_upgrades_to_plans_without_losing_rows() {
+    let directory = TestDir::new("migration-v8-v9");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+        (4, include_str!("../migrations/0004_strong_shot.sql")),
+        (5, include_str!("../migrations/0005_feedback_hardening.sql")),
+        (6, include_str!("../migrations/0006_photo_jobs.sql")),
+        (7, include_str!("../migrations/0007_reference_sets.sql")),
+        (8, include_str!("../migrations/0008_collections.sql")),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('legacy-video', 'local', '/legacy.mov', 'legacy-sha', 1.0, 24.0,
+                       1920, 1080, 1, 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO shots (
+                id, video_id, owner_id, idx, start_s, end_s, rep_frame_s
+             ) VALUES ('legacy-shot', 'legacy-video', 'local', 0, 0.0, 1.0, 0.5)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO photos (
+                id, owner_id, path, sha256, width, height, format, status
+             ) VALUES ('legacy-photo', 'local', '/legacy.jpg', 'legacy-photo-sha',
+                       100, 100, 'jpeg', 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO feedback_events (
+                id, owner_id, media_kind, media_id, signal, value, created_at
+             ) VALUES ('legacy-event', 'local', 'photo', 'legacy-photo', 'pick', 1.0,
+                       '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    // The v9 plan surfaces are live on the upgraded database.
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-upgrade", "upgraded"))
+        .unwrap();
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("plan-upgrade", MediaKind::Shot, "legacy-shot"),
+        )
+        .unwrap();
+    let items = store.plan_items(DEFAULT_OWNER_ID, "plan-upgrade").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].start_s, Some(0.0));
+    let revision = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-upgrade", "after upgrade")
+        .unwrap();
+    assert_eq!(revision.revision, 1);
 }

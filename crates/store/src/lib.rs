@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 8;
+const CURRENT_SCHEMA_VERSION: i64 = 9;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
@@ -25,6 +25,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, include_str!("../migrations/0006_photo_jobs.sql")),
     (7, include_str!("../migrations/0007_reference_sets.sql")),
     (8, include_str!("../migrations/0008_collections.sql")),
+    (9, include_str!("../migrations/0009_plans.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +139,7 @@ pub struct VideoSourceMetadata {
     pub probed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub enum MediaKind {
     Photo,
     Shot,
@@ -369,6 +370,87 @@ pub struct SavedSearch {
     pub context_key: String,
     pub filters_json: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// Where a plan item's rank came from. `General` is the cold-start strong-shot model;
+/// `Personal` carries the exact style-profile version that produced the rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum PlanOrigin {
+    General,
+    Personal,
+}
+
+/// An owner-scoped editorial document: an ordered, editable selection of photos and video
+/// clips for a deliverable. Plans are mutable state — writing one never appends a feedback
+/// event ([`Store::plan_create`] and friends write `plans`/`plan_items` only).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plan {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub description: String,
+    pub context_key: String,
+    pub brief: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One entry in a plan. Video items carry boundary-safe `start_s`/`end_s` points that must
+/// stay inside the source shot, plus pacing, crop, and grade treatment. Every item records
+/// its provenance (origin, rank, and profile version) and freezes the explainability signals
+/// observed when it was chosen in `signals_json`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct PlanItem {
+    pub owner_id: String,
+    pub plan_id: String,
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    /// Dense 0-based sequence position within the plan; the store APIs keep positions 0..n.
+    pub position: i64,
+    pub start_s: Option<f64>,
+    pub end_s: Option<f64>,
+    pub pacing: Option<f64>,
+    pub crop_x: Option<f64>,
+    pub grade_json: Option<String>,
+    pub reason: String,
+    pub signals_json: String,
+    pub origin: PlanOrigin,
+    pub rank: Option<f64>,
+    pub profile_version: Option<i64>,
+    pub added_at: DateTime<Utc>,
+}
+
+/// Field-wise edit for [`Store::plan_update_item`]; `None` leaves the field unchanged.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlanItemPatch {
+    pub start_s: Option<f64>,
+    pub end_s: Option<f64>,
+    pub pacing: Option<f64>,
+    pub crop_x: Option<f64>,
+    pub grade_json: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// One append-only revision snapshot of a plan (header plus items) saved through
+/// [`Store::plan_save_revision`] and restorable through [`Store::plan_restore_revision`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanRevision {
+    pub owner_id: String,
+    pub plan_id: String,
+    pub revision: i64,
+    pub label: String,
+    pub snapshot_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A strong-shot row read through the `aesthetic_assessments_strongest` index: the general
+/// cold-start ranking of candidate assets before any personalization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrongAsset {
+    pub media_kind: MediaKind,
+    pub media_id: String,
+    pub overall: f64,
+    pub confidence: f64,
 }
 
 /// The safety columns of an editorial annotation. Writable only through
@@ -1921,6 +2003,634 @@ impl Store {
             )
             .context("failed to delete saved search")?;
         Ok(changed == 1)
+    }
+
+    // ---- Editorial plans (Task 020a) ----
+    //
+    // Plans are documents (mutable state): none of these APIs appends a feedback event.
+    // feedback_events stays the only training evidence and remains append-only.
+
+    pub fn plan_create(&self, owner_id: &str, plan: &Plan) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &plan.owner_id, "plan")?;
+        ensure!(!plan.name.trim().is_empty(), "plan name must not be empty");
+        ensure!(
+            !plan.context_key.trim().is_empty(),
+            "plan context key must not be empty"
+        );
+        self.connection
+            .execute(
+                "INSERT INTO plans (id, owner_id, name, description, context_key, brief,
+                                    created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    plan.id,
+                    owner_id,
+                    plan.name,
+                    plan.description,
+                    plan.context_key,
+                    plan.brief,
+                    plan.created_at.to_rfc3339(),
+                    plan.updated_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to create plan")?;
+        Ok(())
+    }
+
+    pub fn plan_list(&self, owner_id: &str) -> anyhow::Result<Vec<Plan>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, name, description, context_key, brief, created_at, updated_at
+             FROM plans WHERE owner_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], plan_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list plans")
+    }
+
+    pub fn plan_get(&self, owner_id: &str, plan_id: &str) -> anyhow::Result<Option<Plan>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, name, description, context_key, brief, created_at, updated_at
+                 FROM plans WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, plan_id],
+                plan_from_row,
+            )
+            .optional()
+            .context("failed to read plan")
+    }
+
+    /// Update a plan's editable header. `UNIQUE(owner_id, name)` still applies.
+    pub fn plan_update(
+        &mut self,
+        owner_id: &str,
+        plan_id: &str,
+        name: &str,
+        description: &str,
+        brief: &str,
+    ) -> anyhow::Result<bool> {
+        ensure!(!name.trim().is_empty(), "plan name must not be empty");
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE plans SET name = ?3, description = ?4, brief = ?5, updated_at = ?6
+                 WHERE owner_id = ?1 AND id = ?2",
+                params![
+                    owner_id,
+                    plan_id,
+                    name,
+                    description,
+                    brief,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .context("failed to update plan")?;
+        Ok(changed == 1)
+    }
+
+    /// Delete a plan; its items and revision snapshots cascade with it.
+    pub fn plan_delete(&mut self, owner_id: &str, plan_id: &str) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM plans WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, plan_id],
+            )
+            .context("failed to delete plan")?;
+        Ok(changed == 1)
+    }
+
+    /// Append an item at the end of the plan (`item.position` is ignored; the next dense
+    /// position is assigned). Shot boundaries are validated against the source shot here and
+    /// again by the 0009 triggers, so raw SQL cannot smuggle an out-of-bounds clip in.
+    pub fn plan_add_item(&mut self, owner_id: &str, item: &PlanItem) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &item.owner_id, "plan item")?;
+        ensure!(
+            self.plan_get(owner_id, &item.plan_id)?.is_some(),
+            "plan {} does not exist for this owner",
+            item.plan_id
+        );
+        self.validate_plan_item_against_media(owner_id, item)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let next: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM plan_items
+                 WHERE owner_id = ?1 AND plan_id = ?2",
+                params![owner_id, item.plan_id],
+                |row| row.get(0),
+            )
+            .context("failed to read the next plan position")?;
+        transaction
+            .execute(
+                "INSERT INTO plan_items (
+                    owner_id, plan_id, media_kind, media_id, position, start_s, end_s, pacing,
+                    crop_x, grade_json, reason, signals_json, origin, rank, profile_version,
+                    added_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                params![
+                    owner_id,
+                    item.plan_id,
+                    media_kind_to_str(item.media_kind),
+                    item.media_id,
+                    next,
+                    item.start_s,
+                    item.end_s,
+                    item.pacing,
+                    item.crop_x,
+                    item.grade_json,
+                    item.reason,
+                    item.signals_json,
+                    plan_origin_to_str(item.origin),
+                    item.rank,
+                    item.profile_version,
+                    item.added_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to add plan item")?;
+        transaction
+            .execute(
+                "UPDATE plans SET updated_at = ?3 WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, item.plan_id, Utc::now().to_rfc3339()],
+            )
+            .context("failed to touch plan")?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Apply a field patch to one plan item. `None` fields are left unchanged. New shot
+    /// boundaries are validated against the source shot; the position never changes here
+    /// (use [`Store::plan_reorder_items`]).
+    pub fn plan_update_item(
+        &mut self,
+        owner_id: &str,
+        plan_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+        patch: &PlanItemPatch,
+    ) -> anyhow::Result<()> {
+        let mut current = self
+            .plan_items(owner_id, plan_id)?
+            .into_iter()
+            .find(|item| item.media_kind == media_kind && item.media_id == media_id)
+            .with_context(|| format!("plan item {media_id} was not found in plan {plan_id}"))?;
+        if let Some(start_s) = patch.start_s {
+            current.start_s = Some(start_s);
+        }
+        if let Some(end_s) = patch.end_s {
+            current.end_s = Some(end_s);
+        }
+        if let Some(pacing) = patch.pacing {
+            current.pacing = Some(pacing);
+        }
+        if let Some(crop_x) = patch.crop_x {
+            current.crop_x = Some(crop_x);
+        }
+        if let Some(grade_json) = &patch.grade_json {
+            current.grade_json = Some(grade_json.clone());
+        }
+        if let Some(reason) = &patch.reason {
+            current.reason = reason.clone();
+        }
+        self.validate_plan_item_against_media(owner_id, &current)?;
+        self.connection
+            .execute(
+                "UPDATE plan_items SET start_s = ?4, end_s = ?5, pacing = ?6, crop_x = ?7,
+                        grade_json = ?8, reason = ?9
+                 WHERE owner_id = ?1 AND plan_id = ?2 AND media_kind = ?3 AND media_id = ?10",
+                params![
+                    owner_id,
+                    plan_id,
+                    media_kind_to_str(media_kind),
+                    current.start_s,
+                    current.end_s,
+                    current.pacing,
+                    current.crop_x,
+                    current.grade_json,
+                    current.reason,
+                    media_id,
+                ],
+            )
+            .context("failed to update plan item")?;
+        self.connection
+            .execute(
+                "UPDATE plans SET updated_at = ?3 WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, plan_id, Utc::now().to_rfc3339()],
+            )
+            .context("failed to touch plan")?;
+        Ok(())
+    }
+
+    /// Remove one item and re-compact the remaining positions to 0..n.
+    pub fn plan_remove_item(
+        &mut self,
+        owner_id: &str,
+        plan_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+    ) -> anyhow::Result<bool> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM plan_items
+                 WHERE owner_id = ?1 AND plan_id = ?2 AND media_kind = ?3 AND media_id = ?4",
+                params![owner_id, plan_id, media_kind_to_str(media_kind), media_id],
+            )
+            .context("failed to remove plan item")?;
+        if changed == 1 {
+            compact_plan_positions(&transaction, owner_id, plan_id)?;
+            transaction.execute(
+                "UPDATE plans SET updated_at = ?3 WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, plan_id, Utc::now().to_rfc3339()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(changed == 1)
+    }
+
+    pub fn plan_items(&self, owner_id: &str, plan_id: &str) -> anyhow::Result<Vec<PlanItem>> {
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, plan_id, media_kind, media_id, position, start_s, end_s, pacing,
+                    crop_x, grade_json, reason, signals_json, origin, rank, profile_version,
+                    added_at
+             FROM plan_items WHERE owner_id = ?1 AND plan_id = ?2
+             ORDER BY position, media_kind, media_id",
+        )?;
+        let rows = statement.query_map(params![owner_id, plan_id], plan_item_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list plan items")
+    }
+
+    /// Assign dense sequence positions 0..n exactly in the given order. The ordered list must
+    /// contain every current plan item exactly once; boundaries and treatment fields do not
+    /// move with a reorder.
+    pub fn plan_reorder_items(
+        &mut self,
+        owner_id: &str,
+        plan_id: &str,
+        ordered: &[(MediaKind, String)],
+    ) -> anyhow::Result<()> {
+        let current = self.plan_items(owner_id, plan_id)?;
+        ensure!(
+            current.len() == ordered.len(),
+            "reorder lists {} item(s) but the plan holds {}",
+            ordered.len(),
+            current.len()
+        );
+        let mut wanted = HashSet::new();
+        for (kind, id) in ordered {
+            ensure!(
+                wanted.insert((media_kind_to_str(*kind), id.clone())),
+                "reorder lists media {id:?} more than once"
+            );
+            ensure!(
+                current
+                    .iter()
+                    .any(|item| item.media_kind == *kind && item.media_id == *id),
+                "reorder lists media {id:?} that is not in the plan"
+            );
+        }
+        for item in &current {
+            ensure!(
+                wanted.contains(&(media_kind_to_str(item.media_kind), item.media_id.clone())),
+                "reorder omits plan item {:?}",
+                item.media_id
+            );
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Pass 1 moves every row above the dense range so pass 2 never trips the unique
+        // position index while values are being swapped.
+        transaction.execute(
+            "UPDATE plan_items SET position = position + 1000000000
+             WHERE owner_id = ?1 AND plan_id = ?2",
+            params![owner_id, plan_id],
+        )?;
+        for (index, (kind, id)) in ordered.iter().enumerate() {
+            let index = i64::try_from(index).context("plan position overflowed i64")?;
+            transaction
+                .execute(
+                    "UPDATE plan_items SET position = ?5
+                     WHERE owner_id = ?1 AND plan_id = ?2 AND media_kind = ?3 AND media_id = ?4",
+                    params![owner_id, plan_id, media_kind_to_str(*kind), id, index,],
+                )
+                .context("failed to reorder plan item")?;
+        }
+        transaction.execute(
+            "UPDATE plans SET updated_at = ?3 WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, plan_id, Utc::now().to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Freeze the plan header plus its items into one append-only revision snapshot and
+    /// return it. Revisions number from 1 and never rewrite (0009 triggers refuse
+    /// UPDATE/DELETE while the plan exists).
+    pub fn plan_save_revision(
+        &mut self,
+        owner_id: &str,
+        plan_id: &str,
+        label: &str,
+    ) -> anyhow::Result<PlanRevision> {
+        let plan = self
+            .plan_get(owner_id, plan_id)?
+            .with_context(|| format!("plan {plan_id} was not found for this owner"))?;
+        let items = self.plan_items(owner_id, plan_id)?;
+        let now = Utc::now();
+        let snapshot = serde_json::json!({
+            "description": plan.description,
+            "context_key": plan.context_key,
+            "brief": plan.brief,
+            "items": items
+                .iter()
+                .map(plan_item_snapshot_value)
+                .collect::<Vec<_>>(),
+        });
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let next: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(revision) + 1, 1) FROM plan_revisions
+                 WHERE owner_id = ?1 AND plan_id = ?2",
+                params![owner_id, plan_id],
+                |row| row.get(0),
+            )
+            .context("failed to read the next plan revision number")?;
+        let revision = PlanRevision {
+            owner_id: owner_id.to_owned(),
+            plan_id: plan_id.to_owned(),
+            revision: next,
+            label: label.to_owned(),
+            snapshot_json: snapshot.to_string(),
+            created_at: now,
+        };
+        transaction
+            .execute(
+                "INSERT INTO plan_revisions (owner_id, plan_id, revision, label, snapshot_json,
+                                             created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    owner_id,
+                    plan_id,
+                    revision.revision,
+                    revision.label,
+                    revision.snapshot_json,
+                    revision.created_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to save plan revision")?;
+        transaction.commit()?;
+        Ok(revision)
+    }
+
+    pub fn plan_revisions(
+        &self,
+        owner_id: &str,
+        plan_id: &str,
+    ) -> anyhow::Result<Vec<PlanRevision>> {
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, plan_id, revision, label, snapshot_json, created_at
+             FROM plan_revisions WHERE owner_id = ?1 AND plan_id = ?2 ORDER BY revision",
+        )?;
+        let rows = statement.query_map(params![owner_id, plan_id], plan_revision_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list plan revisions")
+    }
+
+    /// Replace the plan's editable state with a saved revision snapshot: header fields
+    /// (description, context_key, brief) and the item list, re-validated against the current
+    /// media so a snapshot whose shot no longer covers its boundaries fails loudly instead of
+    /// restoring something unrenderable. Returns the restored item count.
+    pub fn plan_restore_revision(
+        &mut self,
+        owner_id: &str,
+        plan_id: &str,
+        revision: i64,
+    ) -> anyhow::Result<usize> {
+        let saved = self
+            .plan_revisions(owner_id, plan_id)?
+            .into_iter()
+            .find(|saved| saved.revision == revision)
+            .with_context(|| format!("revision {revision} of plan {plan_id} was not found"))?;
+        let snapshot: serde_json::Value = serde_json::from_str(&saved.snapshot_json)
+            .context("plan revision snapshot is not valid JSON")?;
+        let items = snapshot
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .context("plan revision snapshot has no items array")?;
+        let mut restored = Vec::with_capacity(items.len());
+        for (index, value) in items.iter().enumerate() {
+            let item = plan_item_from_snapshot(owner_id, plan_id, value)
+                .with_context(|| format!("snapshot item {index} is invalid"))?;
+            self.validate_plan_item_against_media(owner_id, &item)?;
+            restored.push(item);
+        }
+        let description = snapshot
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let context_key = snapshot
+            .get("context_key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default")
+            .to_owned();
+        ensure!(
+            !context_key.trim().is_empty(),
+            "snapshot context key must not be empty"
+        );
+        let brief = snapshot
+            .get("brief")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction
+            .execute(
+                "DELETE FROM plan_items WHERE owner_id = ?1 AND plan_id = ?2",
+                params![owner_id, plan_id],
+            )
+            .context("failed to clear plan items for restore")?;
+        for item in &restored {
+            transaction
+                .execute(
+                    "INSERT INTO plan_items (
+                        owner_id, plan_id, media_kind, media_id, position, start_s, end_s,
+                        pacing, crop_x, grade_json, reason, signals_json, origin, rank,
+                        profile_version, added_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    params![
+                        owner_id,
+                        plan_id,
+                        media_kind_to_str(item.media_kind),
+                        item.media_id,
+                        item.position,
+                        item.start_s,
+                        item.end_s,
+                        item.pacing,
+                        item.crop_x,
+                        item.grade_json,
+                        item.reason,
+                        item.signals_json,
+                        plan_origin_to_str(item.origin),
+                        item.rank,
+                        item.profile_version,
+                        item.added_at.to_rfc3339(),
+                    ],
+                )
+                .context("failed to restore plan item")?;
+        }
+        transaction
+            .execute(
+                "UPDATE plans SET description = ?3, context_key = ?4, brief = ?5, updated_at = ?6
+                 WHERE owner_id = ?1 AND id = ?2",
+                params![
+                    owner_id,
+                    plan_id,
+                    description,
+                    context_key,
+                    brief,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .context("failed to restore plan header")?;
+        transaction.commit()?;
+        Ok(restored.len())
+    }
+
+    /// Copy a plan (header plus items, same order and provenance) into a new plan with the
+    /// given name. Revision history is not copied.
+    pub fn plan_duplicate(
+        &mut self,
+        owner_id: &str,
+        plan_id: &str,
+        new_name: &str,
+    ) -> anyhow::Result<Plan> {
+        ensure!(!new_name.trim().is_empty(), "plan name must not be empty");
+        let source = self
+            .plan_get(owner_id, plan_id)?
+            .with_context(|| format!("plan {plan_id} was not found for this owner"))?;
+        let now = Utc::now();
+        let copy = Plan {
+            id: generated_id("plan", 0),
+            owner_id: owner_id.to_owned(),
+            name: new_name.to_owned(),
+            description: source.description.clone(),
+            context_key: source.context_key.clone(),
+            brief: source.brief.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction
+            .execute(
+                "INSERT INTO plans (id, owner_id, name, description, context_key, brief,
+                                    created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    copy.id,
+                    owner_id,
+                    copy.name,
+                    copy.description,
+                    copy.context_key,
+                    copy.brief,
+                    copy.created_at.to_rfc3339(),
+                    copy.updated_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to duplicate plan")?;
+        transaction
+            .execute(
+                "INSERT INTO plan_items (
+                    owner_id, plan_id, media_kind, media_id, position, start_s, end_s, pacing,
+                    crop_x, grade_json, reason, signals_json, origin, rank, profile_version,
+                    added_at
+                 ) SELECT owner_id, ?3, media_kind, media_id, position, start_s, end_s, pacing,
+                          crop_x, grade_json, reason, signals_json, origin, rank,
+                          profile_version, ?4
+                 FROM plan_items WHERE owner_id = ?1 AND plan_id = ?2",
+                params![owner_id, plan_id, copy.id, now.to_rfc3339()],
+            )
+            .context("failed to duplicate plan items")?;
+        transaction.commit()?;
+        Ok(copy)
+    }
+
+    /// The general cold-start strong-shot list, read through the
+    /// `aesthetic_assessments_strongest` index (overall DESC, confidence DESC). Assets the
+    /// owner marked unusable or blur-required never surface as candidates: machine scores
+    /// never clear a privacy flag.
+    pub fn strongest_assets(
+        &self,
+        owner_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<StrongAsset>> {
+        let limit = i64::try_from(limit).context("strongest-asset limit overflowed i64")?;
+        let mut statement = self.connection.prepare(
+            "SELECT a.media_kind, a.media_id, a.overall, a.confidence
+             FROM aesthetic_assessments AS a
+             WHERE a.owner_id = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM editorial_annotations AS e
+                 WHERE e.owner_id = a.owner_id AND e.media_kind = a.media_kind
+                   AND e.media_id = a.media_id AND (e.usable = 0 OR e.blur_required = 1)
+               )
+             ORDER BY a.overall DESC, a.confidence DESC, a.media_kind, a.media_id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![owner_id, limit], |row| {
+            let media_kind: String = row.get(0)?;
+            Ok(StrongAsset {
+                media_kind: media_kind_from_str(&media_kind)
+                    .map_err(|error| conversion_message(0, error.to_string()))?,
+                media_id: row.get(1)?,
+                overall: row.get(2)?,
+                confidence: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to read strongest assets")
+    }
+
+    /// Shared validation for plan items: field shapes, treatment ranges, JSON payloads, the
+    /// provenance invariant, and — for shots — the boundary check against the source shot.
+    /// Returns the referenced shot when `item` is one, so callers can reuse the read.
+    fn validate_plan_item_against_media(
+        &self,
+        owner_id: &str,
+        item: &PlanItem,
+    ) -> anyhow::Result<Option<Shot>> {
+        validate_plan_item_fields(item)?;
+        match item.media_kind {
+            MediaKind::Photo => Ok(None),
+            MediaKind::Shot => {
+                let shot = self
+                    .shot_by_id(owner_id, &item.media_id)?
+                    .with_context(|| {
+                        format!("shot {} does not exist for this owner", item.media_id)
+                    })?;
+                let start_s = item.start_s.context("plan item shot start is required")?;
+                let end_s = item.end_s.context("plan item shot end is required")?;
+                ensure!(
+                    start_s >= shot.start_s && end_s <= shot.end_s && end_s > start_s,
+                    "plan item boundaries {start_s}..{end_s} must stay inside shot {} \
+                     ({:.3}..{:.3})",
+                    item.media_id,
+                    shot.start_s,
+                    shot.end_s
+                );
+                Ok(Some(shot))
+            }
+        }
     }
 
     /// Overwrites only the safety columns of the editorial annotation. This is the single
@@ -3891,6 +4601,59 @@ fn saved_search_from_row(row: &Row<'_>) -> rusqlite::Result<SavedSearch> {
     })
 }
 
+fn plan_from_row(row: &Row<'_>) -> rusqlite::Result<Plan> {
+    let created_at: String = row.get(6)?;
+    let updated_at: String = row.get(7)?;
+    Ok(Plan {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        context_key: row.get(4)?,
+        brief: row.get(5)?,
+        created_at: timestamp_from_str(&created_at, 6)?,
+        updated_at: timestamp_from_str(&updated_at, 7)?,
+    })
+}
+
+fn plan_item_from_row(row: &Row<'_>) -> rusqlite::Result<PlanItem> {
+    let media_kind: String = row.get(2)?;
+    let origin: String = row.get(12)?;
+    let added_at: String = row.get(15)?;
+    Ok(PlanItem {
+        owner_id: row.get(0)?,
+        plan_id: row.get(1)?,
+        media_kind: media_kind_from_str(&media_kind)
+            .map_err(|error| conversion_message(2, error.to_string()))?,
+        media_id: row.get(3)?,
+        position: row.get(4)?,
+        start_s: row.get(5)?,
+        end_s: row.get(6)?,
+        pacing: row.get(7)?,
+        crop_x: row.get(8)?,
+        grade_json: row.get(9)?,
+        reason: row.get(10)?,
+        signals_json: row.get(11)?,
+        origin: plan_origin_from_str(&origin)
+            .map_err(|error| conversion_message(12, error.to_string()))?,
+        rank: row.get(13)?,
+        profile_version: row.get(14)?,
+        added_at: timestamp_from_str(&added_at, 15)?,
+    })
+}
+
+fn plan_revision_from_row(row: &Row<'_>) -> rusqlite::Result<PlanRevision> {
+    let created_at: String = row.get(5)?;
+    Ok(PlanRevision {
+        owner_id: row.get(0)?,
+        plan_id: row.get(1)?,
+        revision: row.get(2)?,
+        label: row.get(3)?,
+        snapshot_json: row.get(4)?,
+        created_at: timestamp_from_str(&created_at, 5)?,
+    })
+}
+
 fn library_asset_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryAsset> {
     let media_kind: String = row.get(0)?;
     let indexed_at: Option<String> = row.get(6)?;
@@ -4036,6 +4799,21 @@ fn media_kind_from_str(value: &str) -> anyhow::Result<MediaKind> {
         "photo" => Ok(MediaKind::Photo),
         "shot" => Ok(MediaKind::Shot),
         _ => bail!("unknown media kind {value:?}"),
+    }
+}
+
+pub fn plan_origin_to_str(origin: PlanOrigin) -> &'static str {
+    match origin {
+        PlanOrigin::General => "general",
+        PlanOrigin::Personal => "personal",
+    }
+}
+
+pub fn plan_origin_from_str(value: &str) -> anyhow::Result<PlanOrigin> {
+    match value {
+        "general" => Ok(PlanOrigin::General),
+        "personal" => Ok(PlanOrigin::Personal),
+        _ => bail!("unknown plan item origin {value:?}"),
     }
 }
 
@@ -4574,6 +5352,180 @@ fn ensure_unit_score(value: f64, name: &str) -> anyhow::Result<()> {
         value.is_finite() && (0.0..=1.0).contains(&value),
         "{name} must be finite and between 0 and 1"
     );
+    Ok(())
+}
+
+/// Field-level validation shared by every plan-item write path (add, patch, restore). The
+/// provenance invariant lives here and in the 0009 CHECK constraints: a `personal` item must
+/// carry the style-profile version that ranked it, and a `general` item must carry none.
+fn validate_plan_item_fields(item: &PlanItem) -> anyhow::Result<()> {
+    ensure!(
+        !item.media_id.trim().is_empty(),
+        "plan item media id must not be empty"
+    );
+    ensure!(
+        item.position >= 0,
+        "plan item position must be non-negative"
+    );
+    match item.media_kind {
+        MediaKind::Photo => {
+            ensure!(
+                item.start_s.is_none() && item.end_s.is_none(),
+                "photo plan items carry no clip boundaries"
+            );
+        }
+        MediaKind::Shot => {
+            let start_s = item.start_s.context("plan item shot start is required")?;
+            let end_s = item.end_s.context("plan item shot end is required")?;
+            ensure!(
+                start_s.is_finite() && end_s.is_finite() && end_s > start_s,
+                "plan item clip end must exceed its start"
+            );
+        }
+    }
+    if let Some(pacing) = item.pacing {
+        ensure_unit_score(pacing, "plan item pacing")?;
+    }
+    if let Some(crop_x) = item.crop_x {
+        ensure_unit_score(crop_x, "plan item crop_x")?;
+    }
+    if let Some(grade_json) = &item.grade_json {
+        validate_json_object(grade_json, "plan item grade_json")?;
+    }
+    validate_json_object(&item.signals_json, "plan item signals_json")?;
+    ensure!(
+        (item.origin == PlanOrigin::Personal) == item.profile_version.is_some(),
+        "personal plan items must record the style profile version; general items must not"
+    );
+    if let Some(rank) = item.rank {
+        ensure!(rank.is_finite(), "plan item rank must be finite");
+    }
+    if let Some(profile_version) = item.profile_version {
+        ensure!(
+            profile_version > 0,
+            "plan item profile version must be positive"
+        );
+    }
+    Ok(())
+}
+
+/// One plan item serialized into a revision snapshot.
+fn plan_item_snapshot_value(item: &PlanItem) -> serde_json::Value {
+    serde_json::json!({
+        "media_kind": media_kind_to_str(item.media_kind),
+        "media_id": item.media_id,
+        "position": item.position,
+        "start_s": item.start_s,
+        "end_s": item.end_s,
+        "pacing": item.pacing,
+        "crop_x": item.crop_x,
+        "grade_json": item.grade_json,
+        "reason": item.reason,
+        "signals_json": item.signals_json,
+        "origin": plan_origin_to_str(item.origin),
+        "rank": item.rank,
+        "profile_version": item.profile_version,
+        "added_at": item.added_at.to_rfc3339(),
+    })
+}
+
+/// One plan item deserialized from a revision snapshot value.
+fn plan_item_from_snapshot(
+    owner_id: &str,
+    plan_id: &str,
+    value: &serde_json::Value,
+) -> anyhow::Result<PlanItem> {
+    let media_kind = media_kind_from_str(
+        value
+            .get("media_kind")
+            .and_then(serde_json::Value::as_str)
+            .context("snapshot item has no media_kind")?,
+    )?;
+    let added_at = value
+        .get("added_at")
+        .and_then(serde_json::Value::as_str)
+        .map(DateTime::parse_from_rfc3339)
+        .transpose()?
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+    let item = PlanItem {
+        owner_id: owner_id.to_owned(),
+        plan_id: plan_id.to_owned(),
+        media_kind,
+        media_id: value
+            .get("media_id")
+            .and_then(serde_json::Value::as_str)
+            .context("snapshot item has no media_id")?
+            .to_owned(),
+        position: value
+            .get("position")
+            .and_then(serde_json::Value::as_i64)
+            .context("snapshot item has no position")?,
+        start_s: value.get("start_s").and_then(serde_json::Value::as_f64),
+        end_s: value.get("end_s").and_then(serde_json::Value::as_f64),
+        pacing: value.get("pacing").and_then(serde_json::Value::as_f64),
+        crop_x: value.get("crop_x").and_then(serde_json::Value::as_f64),
+        grade_json: value
+            .get("grade_json")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        reason: value
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        signals_json: value
+            .get("signals_json")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("{}")
+            .to_owned(),
+        origin: plan_origin_from_str(
+            value
+                .get("origin")
+                .and_then(serde_json::Value::as_str)
+                .context("snapshot item has no origin")?,
+        )?,
+        rank: value.get("rank").and_then(serde_json::Value::as_f64),
+        profile_version: value
+            .get("profile_version")
+            .and_then(serde_json::Value::as_i64),
+        added_at,
+    };
+    validate_plan_item_fields(&item)?;
+    Ok(item)
+}
+
+/// Re-assign dense 0..n positions to the remaining items of a plan, ordered by their current
+/// position. Runs inside the caller's transaction; the offset pass keeps the unique
+/// position index satisfied while values shift down.
+fn compact_plan_positions(
+    transaction: &rusqlite::Transaction<'_>,
+    owner_id: &str,
+    plan_id: &str,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        "UPDATE plan_items SET position = position + 1000000000
+         WHERE owner_id = ?1 AND plan_id = ?2",
+        params![owner_id, plan_id],
+    )?;
+    let ordered = transaction
+        .prepare(
+            "SELECT media_kind, media_id FROM plan_items
+             WHERE owner_id = ?1 AND plan_id = ?2
+             ORDER BY position - 1000000000, media_kind, media_id",
+        )?
+        .query_map(params![owner_id, plan_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, (kind, id)) in ordered.iter().enumerate() {
+        let index = i64::try_from(index).context("plan position overflowed i64")?;
+        transaction.execute(
+            "UPDATE plan_items SET position = ?4
+             WHERE owner_id = ?1 AND plan_id = ?2 AND media_kind = ?3 AND media_id = ?5",
+            params![owner_id, plan_id, kind, index, id],
+        )?;
+    }
     Ok(())
 }
 

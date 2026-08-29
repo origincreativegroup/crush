@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{ensure, Context};
-use crush_store::{MediaKind, Store, StyleProfile};
+use crush_store::{MediaKind, Store, StrongAsset, StyleProfile};
 use serde::Serialize;
 
 pub mod style;
@@ -808,6 +808,131 @@ pub fn personal_style_score(
     Ok(personal.exported_affinity(Some(&vector), &aesthetic_features))
 }
 
+/// The Task 020a selects surface: one response carrying BOTH orderings.
+///
+/// `general` is the cold-start strong-shot list straight from the
+/// `aesthetic_assessments_strongest` index — no brief, no profile, privacy flags respected by
+/// the store query. In that list `AssetSearchResult::score` is the general `overall` judgment
+/// and `cosine` is `0.0` because no semantic query is involved. `personalized` is the
+/// brief-driven ordering from [`SearchEngine::search_assets_in_context`], which composes the
+/// general ranker with the gated personal adaptor and exports every term in its breakdown.
+/// The general assessment is never hidden by the personalization: both lists are returned
+/// together, per docs/dam-feedback-blueprint.md §5.
+#[derive(Debug, Clone, Serialize)]
+pub struct SelectsCandidates {
+    /// The brief that drove the personalized ordering (empty when only the general list was
+    /// requested).
+    pub brief: String,
+    /// Context key the personalized ranking was scoped to, when one was requested.
+    pub context_key: Option<String>,
+    /// Strong-shot ordering from the general model.
+    pub general: Vec<AssetSearchResult>,
+    /// Brief-driven personalized ordering; empty when no brief was supplied.
+    pub personalized: Vec<AssetSearchResult>,
+}
+
+/// Produce both selects orderings in one response. With a `brief`, the personalized list is
+/// ranked through the same composed score as mixed-media search (so its breakdown is
+/// directly explainable); without one, only the general strong-shot list is produced.
+pub fn selects_candidates<E: TextEmbedder>(
+    store: &Store,
+    owner_id: &str,
+    engine: &SearchEngine,
+    embedder: &mut E,
+    brief: Option<&str>,
+    top_k: usize,
+    context_key: Option<&str>,
+) -> anyhow::Result<SelectsCandidates> {
+    ensure!(top_k > 0, "top must be greater than zero");
+    let personalized = match brief {
+        Some(brief) => {
+            ensure!(!brief.trim().is_empty(), "brief must not be empty");
+            engine.search_assets_in_context(store, embedder, brief, top_k, context_key)?
+        }
+        None => Vec::new(),
+    };
+    let mut general = Vec::new();
+    for strong in store.strongest_assets(owner_id, top_k)? {
+        general.push(hydrate_strong_asset(store, owner_id, &strong)?);
+    }
+    Ok(SelectsCandidates {
+        brief: brief.unwrap_or_default().to_owned(),
+        context_key: context_key.map(str::to_owned),
+        general,
+        personalized,
+    })
+}
+
+/// Hydrate one general strong-shot row into the same result shape search returns, so the UI
+/// renders both lists with one component. The score is the general aesthetic `overall`; the
+/// personal affinity (when a gated profile exists) is exported separately, never mixed in.
+fn hydrate_strong_asset(
+    store: &Store,
+    owner_id: &str,
+    strong: &StrongAsset,
+) -> anyhow::Result<AssetSearchResult> {
+    let editorial_quality = store
+        .editorial_annotation(owner_id, strong.media_kind, &strong.media_id)?
+        .and_then(|annotation| annotation.quality);
+    let style = personal_style_score(store, owner_id, strong.media_kind, &strong.media_id)?;
+    match strong.media_kind {
+        MediaKind::Shot => {
+            let context = store
+                .search_shot_context(owner_id, &strong.media_id)?
+                .with_context(|| format!("assessed shot {} no longer exists", strong.media_id))?;
+            let transcript_snippet = store
+                .segments_overlapping(owner_id, &context.video_id, context.start_s, context.end_s)?
+                .first()
+                .map(|segment| snippet(&segment.text));
+            Ok(AssetSearchResult {
+                asset_type: "video".to_owned(),
+                asset_id: strong.media_id.clone(),
+                path: context.video_path,
+                start_s: Some(context.start_s),
+                end_s: Some(context.end_s),
+                thumb_path: context
+                    .thumb_rel
+                    .as_deref()
+                    .map(|relative| store.thumbnail_path(relative))
+                    .transpose()?
+                    .map(|path| path.display().to_string()),
+                score: strong.overall as f32,
+                cosine: 0.0,
+                transcript_snippet,
+                editorial_quality,
+                aesthetic_score: Some(strong.overall),
+                personal_style_score: style,
+                score_breakdown: None,
+            })
+        }
+        MediaKind::Photo => {
+            let photo = store
+                .photo_by_id(owner_id, &strong.media_id)?
+                .with_context(|| format!("assessed photo {} no longer exists", strong.media_id))?;
+            Ok(AssetSearchResult {
+                asset_type: "photo".to_owned(),
+                asset_id: strong.media_id.clone(),
+                path: photo.path,
+                start_s: None,
+                end_s: None,
+                thumb_path: photo
+                    .thumb_rel
+                    .as_deref()
+                    .map(|relative| store.thumbnail_path(relative))
+                    .transpose()?
+                    .map(|path| path.display().to_string()),
+                score: strong.overall as f32,
+                cosine: 0.0,
+                transcript_snippet: None,
+                editorial_quality,
+                aesthetic_score: Some(strong.overall),
+                personal_style_score: style,
+                score_breakdown: None,
+            })
+        }
+    }
+}
+
 fn validate_embedding_metadata(store: &Store, owner_id: &str) -> anyhow::Result<()> {
     let manifest = crush_core::models::bundled_manifest()?;
     let metadata = store.embedding_meta_get(owner_id)?.context(
@@ -901,8 +1026,8 @@ mod tests {
 
     use crush_core::DEFAULT_OWNER_ID;
     use crush_store::{
-        AestheticAssessment, EmbeddingMeta, FeedbackEvent, FeedbackSignal, MediaKind, Shot,
-        TranscriptSegment, Video, VideoStatus,
+        AestheticAssessment, EditorialAnnotation, EmbeddingMeta, FeedbackEvent, FeedbackSignal,
+        MediaKind, Photo, PhotoStatus, Shot, TranscriptSegment, Video, VideoStatus,
     };
     use tempfile::TempDir;
 
@@ -1549,6 +1674,144 @@ mod tests {
             .unwrap();
         assert_eq!(results[0].asset_id, "shot-b");
         assert_eq!(results[1].asset_id, "shot-a");
+    }
+
+    #[test]
+    fn selects_candidates_return_both_orderings_in_one_response() {
+        let (_directory, store) = populated_store();
+        store
+            .upsert_photo(
+                DEFAULT_OWNER_ID,
+                &Photo {
+                    id: "photo-a".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: "/photos/photo-a.jpg".to_owned(),
+                    sha256: "photo-a-sha".to_owned(),
+                    width: 6000,
+                    height: 4000,
+                    format: "jpeg".to_owned(),
+                    orientation: None,
+                    captured_at: None,
+                    camera_make: None,
+                    camera_model: None,
+                    lens: None,
+                    thumb_rel: None,
+                    status: PhotoStatus::Done,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        let mut vector = [0.0_f32; EMBEDDING_DIM];
+        vector[0] = 1.0;
+        store
+            .put_photo_vector(DEFAULT_OWNER_ID, "photo-a", &vector)
+            .unwrap();
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-a", 0.9))
+            .unwrap();
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-b", 0.7))
+            .unwrap();
+        store
+            .upsert_aesthetic_assessment(
+                DEFAULT_OWNER_ID,
+                &AestheticAssessment {
+                    media_kind: MediaKind::Photo,
+                    media_id: "photo-a".to_owned(),
+                    ..aesthetic_assessment("photo-a", 0.8)
+                },
+            )
+            .unwrap();
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| {
+            let mut query = [0.0_f32; EMBEDDING_DIM];
+            query[0] = 1.0;
+            Ok(query)
+        };
+
+        let selection = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            Some("a quiet travel film"),
+            3,
+            None,
+        )
+        .unwrap();
+
+        // The general list is the cold-start strong-shot ordering, brief-independent.
+        let general_ids = selection
+            .general
+            .iter()
+            .map(|result| result.asset_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(general_ids, vec!["shot-a", "photo-a", "shot-b"]);
+        assert_eq!(selection.general[0].asset_type, "video");
+        assert_eq!(selection.general[0].score_breakdown, None);
+        assert!((selection.general[0].score - 0.9).abs() < 1e-6);
+        // Photo hydration carries no clip boundaries.
+        assert_eq!(selection.general[1].asset_type, "photo");
+        assert_eq!(selection.general[1].start_s, None);
+        // The personalized ordering rides in the same response with full breakdowns.
+        assert_eq!(selection.personalized.len(), 3);
+        for result in &selection.personalized {
+            assert!(result.score_breakdown.is_some());
+        }
+
+        // Without a brief only the general list is produced.
+        let general_only = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            None,
+            3,
+            None,
+        )
+        .unwrap();
+        assert_eq!(general_only.general.len(), 3);
+        assert!(general_only.personalized.is_empty());
+
+        // Privacy: a not-usable annotation removes the asset from the general list.
+        store
+            .upsert_editorial_annotation(
+                DEFAULT_OWNER_ID,
+                &EditorialAnnotation {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    media_kind: MediaKind::Shot,
+                    media_id: "shot-a".to_owned(),
+                    description: String::new(),
+                    subjects: String::new(),
+                    action: String::new(),
+                    tags: String::new(),
+                    quality: None,
+                    standout: false,
+                    usable: false,
+                    faces_visible: false,
+                    nametags_visible: false,
+                    blur_required: false,
+                    crop_x: None,
+                    grade_json: None,
+                    notes: String::new(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
+        let filtered = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            None,
+            3,
+            None,
+        )
+        .unwrap();
+        assert!(filtered
+            .general
+            .iter()
+            .all(|result| result.asset_id != "shot-a"));
     }
 
     fn aesthetic_assessment(media_id: &str, overall: f64) -> AestheticAssessment {
