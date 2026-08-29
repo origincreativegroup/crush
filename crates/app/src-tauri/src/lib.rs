@@ -1490,7 +1490,7 @@ mod macos {
                 signals.push((FeedbackSignal::Grade, None));
             }
             if let Some(rating) = patch.quality {
-                signals.push((FeedbackSignal::Rating, Some(f64::from(rating))));
+                signals.push((FeedbackSignal::Rating, Some(rating as f64)));
             }
             for (signal, value) in signals {
                 store.append_feedback(
