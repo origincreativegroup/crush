@@ -6,6 +6,7 @@ pub mod video_source;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{ensure, Context};
 use chrono::Utc;
@@ -53,6 +54,7 @@ pub struct Pipeline {
     config: Config,
     paths: AppPaths,
     cancellation: CancellationToken,
+    semantic_model: OnceLock<MomentSemanticModel>,
 }
 
 impl Pipeline {
@@ -61,6 +63,7 @@ impl Pipeline {
             config,
             paths,
             cancellation,
+            semantic_model: OnceLock::new(),
         }
     }
 
@@ -129,7 +132,7 @@ impl Pipeline {
                     }
                 }
             }
-            self.analyze_photos(&store, &mut embedder)?;
+            self.analyze_photos(&store)?;
         }
 
         let index = SearchEngine::load(
@@ -262,8 +265,8 @@ impl Pipeline {
         result
     }
 
-    fn analyze_photos(&self, store: &Store, embedder: &mut Embedder) -> anyhow::Result<usize> {
-        let semantic_model = MomentSemanticModel::new(embedder)?;
+    fn analyze_photos(&self, store: &Store) -> anyhow::Result<usize> {
+        let semantic_model = self.semantic_model()?;
         let photos = store.photos(DEFAULT_OWNER_ID)?;
         let mut decoded = Vec::with_capacity(photos.len());
         for photo in &photos {
@@ -655,14 +658,26 @@ impl Pipeline {
         let job = self.start_job(store, video, Stage::Analyze, debug)?;
         let result = (|| {
             ensure!(!self.cancellation.is_cancelled(), "analysis cancelled");
-            let preference = ProviderPreference::parse(&self.config.embed.provider)?;
-            let mut embedder =
-                Embedder::new(self.paths.models(), preference, self.config.limits.threads)?;
-            let semantic_model = MomentSemanticModel::new(&mut embedder)?;
-            self.analyze_video_shots(store, video, &semantic_model, &job)?;
+            let semantic_model = self.semantic_model()?;
+            self.analyze_video_shots(store, video, semantic_model, &job)?;
             Ok(())
         })();
         self.finish_job(store, video, &job.id, result)
+    }
+
+    fn semantic_model(&self) -> anyhow::Result<&MomentSemanticModel> {
+        if let Some(model) = self.semantic_model.get() {
+            return Ok(model);
+        }
+        let preference = ProviderPreference::parse(&self.config.embed.provider)?;
+        let mut embedder =
+            Embedder::new(self.paths.models(), preference, self.config.limits.threads)?;
+        let built = MomentSemanticModel::new(&mut embedder)?;
+        let _ = self.semantic_model.set(built);
+        Ok(self
+            .semantic_model
+            .get()
+            .expect("semantic model was set by this call or another thread"))
     }
 
     fn analyze_video_shots(

@@ -33,6 +33,10 @@ Pixel measurements remain available without the CLIP model. When semantic eviden
 or inconclusive, the scorer stores neutral moment components and says that semantic evidence was
 unavailable instead of claiming to recognize an expression or story.
 
+The identity-free concept prompts are embedded once per pipeline session and reused across photo
+and video analysis. This keeps cold-start reasoning deterministic while avoiding repeated model
+initialization for every video.
+
 ## Video sampling and recovery
 
 Representative thumbnails drive design scoring. Two boundary-safe frames inside each shot provide
