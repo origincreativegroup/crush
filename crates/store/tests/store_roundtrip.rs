@@ -1991,7 +1991,7 @@ fn reference_sets_round_trip_with_owner_isolation_and_cascade() {
     store.reference_set_create(OWNER_B, &other_owner).unwrap();
     assert_eq!(store.reference_set_list(OWNER_B).unwrap().len(), 1);
     assert!(store.reference_set_get(OWNER_B, "set-a").unwrap().is_none());
-    let mut crossed = ReferenceSetItem {
+    let crossed = ReferenceSetItem {
         owner_id: OWNER_B.to_owned(),
         set_id: "set-a".to_owned(),
         media_kind: MediaKind::Photo,
