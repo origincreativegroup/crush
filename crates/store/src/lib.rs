@@ -2025,7 +2025,7 @@ impl Store {
                             media_kind: *media_kind,
                             media_id: media_id.clone(),
                             signal: FeedbackSignal::Rating,
-                            value: Some(f64::from(*rating)),
+                            value: Some(*rating as f64),
                             compared_media_kind: None,
                             compared_media_id: None,
                             context_json: "{}".to_owned(),
