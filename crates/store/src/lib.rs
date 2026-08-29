@@ -14,13 +14,14 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
     (3, include_str!("../migrations/0003_source_fidelity.sql")),
     (4, include_str!("../migrations/0004_strong_shot.sql")),
     (5, include_str!("../migrations/0005_feedback_hardening.sql")),
+    (6, include_str!("../migrations/0006_photo_jobs.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,7 +302,10 @@ pub struct EmbeddingMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJob {
     pub id: String,
-    pub video_id: String,
+    /// Exactly one of `video_id` and `photo_id` must be set.
+    pub video_id: Option<String>,
+    /// Exactly one of `video_id` and `photo_id` must be set.
+    pub photo_id: Option<String>,
     pub stage: Stage,
     pub started_at: DateTime<Utc>,
     pub debug_dir: Option<String>,
@@ -1684,14 +1688,42 @@ impl Store {
     }
 
     pub fn job_start(&self, owner_id: &str, job: &NewJob) -> anyhow::Result<JobRecord> {
+        ensure!(
+            job.video_id.is_some() ^ job.photo_id.is_some(),
+            "job {} must reference exactly one of video_id or photo_id",
+            job.id
+        );
+        if let Some(photo_id) = &job.photo_id {
+            ensure!(
+                job.stage == Stage::PhotoIngest || job.stage == Stage::Analyze,
+                "photo job {} stage must be photo_ingest or analyze",
+                job.id
+            );
+            ensure!(
+                self.photo_by_id(owner_id, photo_id)?.is_some(),
+                "job photo {photo_id} does not exist"
+            );
+        }
+        if let Some(video_id) = &job.video_id {
+            ensure!(
+                job.stage != Stage::PhotoIngest,
+                "video job {} cannot use the photo_ingest stage",
+                job.id
+            );
+            ensure!(
+                self.video_by_id(owner_id, video_id)?.is_some(),
+                "job video {video_id} does not exist"
+            );
+        }
         self.connection.execute(
             "INSERT INTO jobs (
-                id, owner_id, video_id, stage, status, started_at, debug_dir
-             ) VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6)",
+                id, owner_id, video_id, photo_id, stage, status, started_at, debug_dir
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
             params![
                 job.id,
                 owner_id,
                 job.video_id,
+                job.photo_id,
                 stage_to_str(job.stage),
                 job.started_at.to_rfc3339(),
                 job.debug_dir,
@@ -1740,8 +1772,8 @@ impl Store {
         let stage = filter.stage.map(stage_to_str);
         let status = filter.status.map(job_status_to_str);
         let mut statement = self.connection.prepare(
-            "SELECT id, owner_id, video_id, stage, status, started_at, finished_at, duration_ms,
-                    error, debug_dir
+            "SELECT id, owner_id, video_id, photo_id, stage, status, started_at, finished_at,
+                    duration_ms, error, debug_dir
              FROM jobs
              WHERE owner_id = ?1
                AND (?2 IS NULL OR video_id = ?2)
@@ -1766,9 +1798,10 @@ impl Store {
                 ..JobFilter::default()
             },
         )?;
-        // The whole pass is atomic: either every running job and its video end up failed, or
-        // nothing changes. `transaction_with_behavior` requires `&mut self` and this API stays
-        // shared-access, so the Immediate transaction is driven directly on the connection.
+        // The whole pass is atomic: either every running job and its video/photo end up
+        // failed, or nothing changes. `transaction_with_behavior` requires `&mut self` and
+        // this API stays shared-access, so the Immediate transaction is driven directly on
+        // the connection.
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
         let marked = mark_jobs_interrupted(&self.connection, owner_id, now, &jobs);
         if let Err(error) = marked {
@@ -1805,10 +1838,40 @@ impl Store {
         let status = match failed.first().map(|job| job.stage) {
             Some(Stage::Split) | None => VideoStatus::Pending,
             Some(Stage::Embed) => VideoStatus::Split,
-            Some(Stage::Analyze) | Some(Stage::Transcribe) => VideoStatus::Embedded,
+            Some(Stage::PhotoIngest) | Some(Stage::Analyze) | Some(Stage::Transcribe) => {
+                VideoStatus::Embedded
+            }
         };
         self.set_video_status(owner_id, video_id, status)?;
         Ok(status)
+    }
+
+    /// Done photos that have no aesthetic assessment for `model_version`, or whose stored
+    /// assessment was produced by a different model version, ordered like `photos()`
+    /// (path, id) so backfill analysis order is stable across runs.
+    pub fn photos_for_analysis(
+        &self,
+        owner_id: &str,
+        model_version: &str,
+    ) -> anyhow::Result<Vec<Photo>> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.owner_id, p.path, p.sha256, p.width, p.height, p.format,
+                    p.orientation, p.captured_at, p.camera_make, p.camera_model, p.lens,
+                    p.thumb_rel, p.status, p.indexed_at
+             FROM photos AS p
+             LEFT JOIN aesthetic_assessments AS a
+               ON a.owner_id = p.owner_id
+              AND a.media_kind = 'photo'
+              AND a.media_id = p.id
+              AND a.model_version = ?2
+             WHERE p.owner_id = ?1
+               AND p.status = 'done'
+               AND a.owner_id IS NULL
+             ORDER BY p.path, p.id",
+        )?;
+        let rows = statement.query_map(params![owner_id, model_version], photo_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list photos needing analysis")
     }
 
     pub fn embedding_meta_get(&self, owner_id: &str) -> anyhow::Result<Option<EmbeddingMeta>> {
@@ -2127,7 +2190,7 @@ impl Store {
     fn job_by_id(&self, owner_id: &str, job_id: &str) -> anyhow::Result<Option<JobRecord>> {
         self.connection
             .query_row(
-                "SELECT id, owner_id, video_id, stage, status, started_at, finished_at,
+                "SELECT id, owner_id, video_id, photo_id, stage, status, started_at, finished_at,
                         duration_ms, error, debug_dir
                  FROM jobs
                  WHERE owner_id = ?1 AND id = ?2",
@@ -2485,24 +2548,25 @@ fn transcript_from_row(row: &Row<'_>) -> rusqlite::Result<TranscriptSegment> {
 }
 
 fn job_from_row(row: &Row<'_>) -> rusqlite::Result<JobRecord> {
-    let stage: String = row.get(3)?;
-    let status: String = row.get(4)?;
-    let started_at: String = row.get(5)?;
-    let finished_at: Option<String> = row.get(6)?;
+    let stage: String = row.get(4)?;
+    let status: String = row.get(5)?;
+    let started_at: String = row.get(6)?;
+    let finished_at: Option<String> = row.get(7)?;
     Ok(JobRecord {
         id: row.get(0)?,
         owner_id: row.get(1)?,
         video_id: row.get(2)?,
-        stage: stage_from_str(&stage).map_err(|error| conversion_message(3, error.to_string()))?,
+        photo_id: row.get(3)?,
+        stage: stage_from_str(&stage).map_err(|error| conversion_message(4, error.to_string()))?,
         status: job_status_from_str(&status)
-            .map_err(|error| conversion_message(4, error.to_string()))?,
-        started_at: timestamp_from_str(&started_at, 5)?,
+            .map_err(|error| conversion_message(5, error.to_string()))?,
+        started_at: timestamp_from_str(&started_at, 6)?,
         finished_at: finished_at
-            .map(|value| timestamp_from_str(&value, 6))
+            .map(|value| timestamp_from_str(&value, 7))
             .transpose()?,
-        duration_ms: row.get(7)?,
-        error: row.get(8)?,
-        debug_dir: row.get(9)?,
+        duration_ms: row.get(8)?,
+        error: row.get(9)?,
+        debug_dir: row.get(10)?,
     })
 }
 
@@ -2617,6 +2681,7 @@ fn stage_to_str(stage: Stage) -> &'static str {
         Stage::Embed => "embed",
         Stage::Analyze => "analyze",
         Stage::Transcribe => "transcribe",
+        Stage::PhotoIngest => "photo_ingest",
     }
 }
 
@@ -2626,6 +2691,7 @@ fn stage_from_str(value: &str) -> anyhow::Result<Stage> {
         "embed" => Ok(Stage::Embed),
         "analyze" => Ok(Stage::Analyze),
         "transcribe" => Ok(Stage::Transcribe),
+        "photo_ingest" => Ok(Stage::PhotoIngest),
         _ => bail!("unknown job stage {value:?}"),
     }
 }
@@ -2684,8 +2750,9 @@ fn ensure_changed(changed: usize, kind: &str, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Inlines the `job_fail` and `set_video_status` writes for one interrupted pass so they can
-/// share a single transaction; statuses, error text, and counts match the standalone APIs.
+/// Inlines the `job_fail` and `set_video_status`/`set_photo_status` writes for one
+/// interrupted pass so they can share a single transaction; statuses, error text, and counts
+/// match the standalone APIs.
 fn mark_jobs_interrupted(
     connection: &Connection,
     owner_id: &str,
@@ -2713,6 +2780,10 @@ fn mark_jobs_interrupted(
         connection.execute(
             "UPDATE videos SET status = 'failed' WHERE owner_id = ?1 AND id = ?2",
             params![owner_id, job.video_id],
+        )?;
+        connection.execute(
+            "UPDATE photos SET status = 'failed' WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, job.photo_id],
         )?;
     }
     Ok(())
@@ -2755,6 +2826,10 @@ fn validate_photo(photo: &Photo) -> anyhow::Result<()> {
 }
 
 fn validate_photo_source_metadata(metadata: &PhotoSourceMetadata) -> anyhow::Result<()> {
+    ensure!(
+        metadata.proxy_provenance != PhotoProxyProvenance::EmbeddedPreview,
+        "embedded_preview provenance is not producible by any pipeline decoder; thumbnails must never be recorded as full decodes"
+    );
     ensure!(
         !metadata.source_format.trim().is_empty(),
         "source format is required"

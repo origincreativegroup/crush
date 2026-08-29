@@ -81,7 +81,7 @@ fn representative_stills_preserve_sources_and_record_fidelity() {
     let started = Instant::now();
     let mut checks = Vec::new();
     for (index, path) in sources.iter().enumerate() {
-        let decoded = decode_photo(path).unwrap();
+        let decoded = decode_photo(path, &CancellationToken::default()).unwrap();
         let (width, height) = decoded.image.dimensions();
         if path.file_name().unwrap() == "orientation-6.jpg" {
             assert_eq!((width, height), (50, 80));
@@ -153,7 +153,9 @@ fn corrupt_raw_variant_reports_decoder_and_never_falls_back_to_preview() {
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("unsupported-variant.cr3");
     std::fs::write(&source, b"not a camera raw file").unwrap();
-    let error = decode_photo(&source).unwrap_err().to_string();
+    let error = decode_photo(&source, &CancellationToken::default())
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("macOS ImageIO"));
     assert!(error.contains(".cr3"));
 }
@@ -169,10 +171,10 @@ fn oriented_heic_decodes_upright_and_matches_the_image_rs_reference() {
     let heic = temporary.path().join("orientation-6.heic");
     convert_with_sips(&["-s", "format", "heic"], &oriented, &heic);
 
-    let reference = decode_photo(&oriented).unwrap();
+    let reference = decode_photo(&oriented, &CancellationToken::default()).unwrap();
     assert_eq!(reference.image.dimensions(), (50, 80));
     assert_eq!(reference.orientation, Some(6));
-    let decoded = decode_photo(&heic).unwrap();
+    let decoded = decode_photo(&heic, &CancellationToken::default()).unwrap();
     assert_eq!(decoded.image.dimensions(), (50, 80));
     assert!(decoded.orientation_applied);
     assert_pixels_match(&decoded.image.to_rgb8(), &reference.image.to_rgb8(), 16);
@@ -207,7 +209,7 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         &heic,
     );
 
-    let decoded_jpeg = decode_photo(&jpeg).unwrap();
+    let decoded_jpeg = decode_photo(&jpeg, &CancellationToken::default()).unwrap();
     assert_eq!(decoded_jpeg.icc_profile.as_deref(), Some(srgb.as_slice()));
     let jpeg_derivative = write_jpeg_derivative(
         &decoded_jpeg.image,
@@ -228,7 +230,7 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         );
         return;
     };
-    let decoded_heic = decode_photo(&heic).unwrap();
+    let decoded_heic = decode_photo(&heic, &CancellationToken::default()).unwrap();
     let heic_profile = decoded_heic
         .icc_profile
         .clone()
@@ -312,7 +314,7 @@ fn representative_video_containers_codecs_and_proxy_path_record_fidelity() {
         if codec == "hevc" {
             assert!(policy.required);
             let proxy = temporary.path().join("hevc-working-proxy.mp4");
-            runner
+            let operation = runner
                 .generate_edit_proxy_with_control(
                     &path,
                     &proxy,
@@ -320,6 +322,11 @@ fn representative_video_containers_codecs_and_proxy_path_record_fidelity() {
                     |_| {},
                 )
                 .unwrap();
+            assert!(
+                operation.command.contains("-color_primaries"),
+                "edit proxy must carry explicit output color tags: {}",
+                operation.command
+            );
             assert_eq!(
                 runner.probe(&proxy).unwrap().value.video_codec.as_deref(),
                 Some("h264")

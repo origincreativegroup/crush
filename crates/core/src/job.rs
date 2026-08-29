@@ -8,6 +8,21 @@ pub enum Stage {
     Embed,
     Analyze,
     Transcribe,
+    /// Whole-file ingest of one photo: decode, derivatives, and embedding.
+    PhotoIngest,
+}
+
+impl std::fmt::Display for Stage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Split => "split",
+            Self::Embed => "embed",
+            Self::Analyze => "analyze",
+            Self::Transcribe => "transcribe",
+            Self::PhotoIngest => "photo_ingest",
+        };
+        formatter.write_str(name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +40,10 @@ pub enum JobStatus {
 pub struct JobRecord {
     pub id: String,
     pub owner_id: String,
-    pub video_id: String,
+    /// Video a job processes; always set except for photo jobs.
+    pub video_id: Option<String>,
+    /// Photo a job processes; always set except for video jobs.
+    pub photo_id: Option<String>,
     pub stage: Stage,
     pub status: JobStatus,
     pub started_at: chrono::DateTime<chrono::Utc>,

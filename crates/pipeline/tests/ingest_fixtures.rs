@@ -139,9 +139,22 @@ fn photo_ingest_is_idempotent_and_searchable() {
     assert_eq!(assessment.model_version, "strong-shot-v1");
     assert!((0.0..=1.0).contains(&assessment.technical_quality));
     assert!((0.0..=1.0).contains(&assessment.composition_quality));
+    let first_assessed_at = assessment.assessed_at;
     let evidence: serde_json::Value = serde_json::from_str(&assessment.explanation_json).unwrap();
     assert_eq!(evidence["independent_of_profile"], true);
     assert_eq!(evidence["identity_used"], false);
+    // Fidelity metadata now records the thumbnail hash and the derivative recipes.
+    let recorded_metadata: serde_json::Value =
+        serde_json::from_str(&source_metadata.metadata_json).unwrap();
+    assert!(recorded_metadata["thumbnail_sha256"].is_string());
+    assert_eq!(
+        recorded_metadata["proxy_recipe"]["proxy"]["max_dimension_px"],
+        2560
+    );
+    assert_eq!(
+        recorded_metadata["proxy_recipe"]["thumbnail"]["max_dimension_px"],
+        960
+    );
     let engine =
         SearchEngine::load(&store, DEFAULT_OWNER_ID, config.search.transcript_hit_boost).unwrap();
     let mut embedder = Embedder::new(paths.models(), ProviderPreference::Cpu, 2).unwrap();
@@ -165,6 +178,14 @@ fn photo_ingest_is_idempotent_and_searchable() {
 
     let store = Store::open(temp.path()).unwrap();
     let photo_id = store.photos(DEFAULT_OWNER_ID).unwrap().pop().unwrap().id;
+    let assessment = store
+        .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Photo, &photo_id)
+        .unwrap()
+        .expect("assessment survives a no-change re-ingest");
+    assert_eq!(
+        assessment.assessed_at, first_assessed_at,
+        "second ingest of an unchanged library must perform zero re-analysis work"
+    );
     drop(store);
     rusqlite::Connection::open(temp.path().join("library.db"))
         .unwrap()
@@ -261,13 +282,19 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
             Stage::Analyze => assert!(directory.join("aesthetic-frames").is_dir()),
             Stage::Transcribe => {
                 let video = store
-                    .video_by_id(DEFAULT_OWNER_ID, &job.video_id)
+                    .video_by_id(
+                        DEFAULT_OWNER_ID,
+                        job.video_id.as_deref().expect("video job has a video id"),
+                    )
                     .unwrap()
                     .unwrap();
                 if video.has_audio {
                     assert!(directory.join("audio.wav").is_file());
                     assert!(directory.join("commands.txt").is_file());
                 }
+            }
+            Stage::PhotoIngest => {
+                assert!(job.photo_id.is_some(), "photo jobs carry a photo id");
             }
         }
     }
@@ -355,7 +382,8 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
             DEFAULT_OWNER_ID,
             &NewJob {
                 id: "killed-mid-embed".to_owned(),
-                video_id: target.id.clone(),
+                video_id: Some(target.id.clone()),
+                photo_id: None,
                 stage: Stage::Embed,
                 started_at: Utc::now(),
                 debug_dir: None,
@@ -664,4 +692,96 @@ fn ten_minute_silent_ingest_smoke() {
     let video = store.videos(DEFAULT_OWNER_ID).unwrap().pop().unwrap();
     assert_eq!(video.status, VideoStatus::Done);
     assert!(video.duration_s.is_some_and(|duration| duration >= 599.0));
+}
+
+#[test]
+fn known_unsupported_extensions_are_recorded_with_precise_reasons() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("input");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::write(input.join("shot.avif"), b"not really an avif").unwrap();
+    std::fs::write(input.join("scan.erf"), b"not really an erf").unwrap();
+    std::fs::write(input.join("notes.txt"), b"plain text").unwrap();
+    std::fs::write(input.join(".DS_Store"), b"junk").unwrap();
+    let pipeline = Pipeline::new(
+        fixture_config(temp.path()),
+        AppPaths {
+            root: temp.path().to_path_buf(),
+        },
+        CancellationToken::default(),
+    );
+    let summary = pipeline.ingest(&input, false).unwrap();
+    assert_eq!(summary.discovered, 0);
+    assert_eq!(summary.indexed, 0);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(
+        summary.errors.len(),
+        2,
+        "only known-unsupported media files are recorded: {:?}",
+        summary.errors
+    );
+    for (path, reason) in &summary.errors {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(extension == "avif" || extension == "erf");
+        assert!(
+            reason.contains("decode is disabled") && reason.contains("embedded-preview"),
+            "reason must be precise: {reason}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_registry_never_flags_arbitrary_files() {
+    use crush_pipeline::KNOWN_UNSUPPORTED_EXTENSIONS;
+    use std::path::Path;
+
+    let reason = |name: &str| {
+        Path::new(name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .and_then(|extension| {
+                KNOWN_UNSUPPORTED_EXTENSIONS
+                    .iter()
+                    .find(|(known, _)| extension.eq_ignore_ascii_case(known))
+                    .map(|(_, reason)| *reason)
+            })
+    };
+    assert!(reason("a.avif").is_some());
+    assert!(reason("a.jxl").is_some());
+    assert!(reason("a.erf").is_some());
+    assert!(reason("notes.txt").is_none());
+    assert!(reason(".DS_Store").is_none());
+    assert!(reason("no-extension").is_none());
+}
+
+#[test]
+fn unsupported_registry_matches_the_checked_in_support_matrix() {
+    use crush_pipeline::KNOWN_UNSUPPORTED_EXTENSIONS;
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/source-formats/support-matrix.json"
+    ))
+    .unwrap();
+    let declared: Vec<&str> = fixture["known_unsupported"]
+        .as_array()
+        .expect("support matrix must declare known_unsupported entries")
+        .iter()
+        .filter_map(|entry| entry["extension"].as_str())
+        .collect();
+    for (extension, reason) in KNOWN_UNSUPPORTED_EXTENSIONS {
+        assert!(
+            declared.contains(extension),
+            "support matrix is missing .{extension}"
+        );
+        assert!(!reason.trim().is_empty());
+    }
+    assert_eq!(
+        declared.len(),
+        KNOWN_UNSUPPORTED_EXTENSIONS.len(),
+        "support matrix and code registry must agree exactly"
+    );
 }
