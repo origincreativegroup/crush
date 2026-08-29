@@ -171,10 +171,10 @@ fn oriented_heic_decodes_upright_and_matches_the_image_rs_reference() {
     let heic = temporary.path().join("orientation-6.heic");
     convert_with_sips(&["-s", "format", "heic"], &oriented, &heic);
 
-    let reference = decode_photo(&oriented).unwrap();
+    let reference = decode_photo(&oriented, &CancellationToken::default()).unwrap();
     assert_eq!(reference.image.dimensions(), (50, 80));
     assert_eq!(reference.orientation, Some(6));
-    let decoded = decode_photo(&heic).unwrap();
+    let decoded = decode_photo(&heic, &CancellationToken::default()).unwrap();
     assert_eq!(decoded.image.dimensions(), (50, 80));
     assert!(decoded.orientation_applied);
     assert_pixels_match(&decoded.image.to_rgb8(), &reference.image.to_rgb8(), 16);
@@ -209,7 +209,7 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         &heic,
     );
 
-    let decoded_jpeg = decode_photo(&jpeg).unwrap();
+    let decoded_jpeg = decode_photo(&jpeg, &CancellationToken::default()).unwrap();
     assert_eq!(decoded_jpeg.icc_profile.as_deref(), Some(srgb.as_slice()));
     let jpeg_derivative = write_jpeg_derivative(
         &decoded_jpeg.image,
@@ -230,7 +230,7 @@ fn icc_profiles_round_trip_into_derivatives_and_mismatches_are_detectable() {
         );
         return;
     };
-    let decoded_heic = decode_photo(&heic).unwrap();
+    let decoded_heic = decode_photo(&heic, &CancellationToken::default()).unwrap();
     let heic_profile = decoded_heic
         .icc_profile
         .clone()
