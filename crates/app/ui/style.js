@@ -1,7 +1,6 @@
 // Style panel (Task 018b). Loaded after search.js; owns #style-view and the "Style evidence"
-// block inside the asset detail drawer. Reference sets stay inert (no training signal) until
-// the user confirms them, and the status line only says "Learned" when the active profile
-// carries learned=1 from the held-out evaluation gate (Task 018a).
+// block inside the asset detail drawer. Confirmed sets are evidence, not human acceptance
+// of the model. Automated eval success must not bypass HANDOFF's held-out proof review.
 
 (() => {
   const bridge = window.__TAURI__;
@@ -68,11 +67,10 @@
         : "Ranking uses the general strong-shot model. Confirm a reference set, then retrain.";
       return;
     }
-    el.statusLine.textContent =
-      `Learned · held-out ${metric(status.heldOutMetric)} vs baseline ${metric(status.baselineMetric)}`;
-    el.statusLine.classList.add("learned");
-    el.statusLine.classList.remove("general");
-    const parts = [];
+    el.statusLine.textContent = "Experimental profile · human review pending";
+    el.statusLine.classList.remove("learned");
+    el.statusLine.classList.add("general");
+    const parts = [`Automated pair evaluation ${metric(status.heldOutMetric)} vs baseline ${metric(status.baselineMetric)}`];
     if (Number.isFinite(status.sampleCount)) parts.push(`${status.sampleCount} samples`);
     if (status.contextKey) parts.push(`context ${status.contextKey}`);
     parts.push(

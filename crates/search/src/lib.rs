@@ -829,6 +829,17 @@ pub struct SelectsCandidates {
     pub general: Vec<AssetSearchResult>,
     /// Brief-driven personalized ordering; empty when no brief was supplied.
     pub personalized: Vec<AssetSearchResult>,
+    /// Effective profile used for this request, not a later UI status lookup. Absent means
+    /// the right-hand list is brief-driven general ranking, not personalized evidence.
+    pub profile: Option<SelectsProfile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelectsProfile {
+    pub id: String,
+    pub version: i64,
+    pub context_key: String,
+    pub algorithm_version: String,
 }
 
 /// Produce both selects orderings in one response. With a `brief`, the personalized list is
@@ -844,6 +855,19 @@ pub fn selects_candidates<E: TextEmbedder>(
     context_key: Option<&str>,
 ) -> anyhow::Result<SelectsCandidates> {
     ensure!(top_k > 0, "top must be greater than zero");
+    let scorer = PersonalScorer::load(store, owner_id, context_key)?;
+    let profile = brief.and_then(|_| {
+        scorer
+            .context_profile
+            .as_ref()
+            .or(scorer.default_profile.as_ref())
+            .map(|(profile, _)| SelectsProfile {
+                id: profile.id.clone(),
+                version: profile.version,
+                context_key: profile.context_key.clone(),
+                algorithm_version: profile.algorithm_version.clone(),
+            })
+    });
     let personalized = match brief {
         Some(brief) => {
             ensure!(!brief.trim().is_empty(), "brief must not be empty");
@@ -860,6 +884,7 @@ pub fn selects_candidates<E: TextEmbedder>(
         context_key: context_key.map(str::to_owned),
         general,
         personalized,
+        profile,
     })
 }
 
@@ -1182,6 +1207,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(profile.learned, "planted style must pass the eval gate");
+        eprintln!(
+            "synthetic planted-style probe (not human approval): {}",
+            profile.metrics_json
+        );
         let held_out = profile.held_out_metric.expect("held-out metric recorded");
         let baseline = profile.baseline_metric.expect("baseline recorded");
         assert!(
@@ -1294,6 +1323,36 @@ mod tests {
                 .unwrap();
         assert_eq!(profile.name, "homepage-hero");
         assert_eq!(profile.context_key, "homepage-hero");
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| Ok([0.0; EMBEDDING_DIM]);
+        let named = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            Some("portraits"),
+            12,
+            Some("homepage-hero"),
+        )
+        .unwrap();
+        let provenance = named.profile.expect("effective named profile exported");
+        assert_eq!(provenance.id, profile.id);
+        assert_eq!(provenance.version, profile.version);
+        assert_eq!(provenance.context_key, "homepage-hero");
+        let unrelated = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            Some("portraits"),
+            12,
+            Some("another-project"),
+        )
+        .unwrap();
+        assert!(
+            unrelated.profile.is_none(),
+            "another context must not borrow this profile"
+        );
         assert!(store
             .active_style_profile(DEFAULT_OWNER_ID)
             .unwrap()
@@ -1326,6 +1385,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!profile.learned, "noise must never be marked learned");
+        eprintln!(
+            "identical-vector noise probe (not human approval): {}",
+            profile.metrics_json
+        );
         assert_eq!(profile.held_out_metric, Some(0.0));
         assert_eq!(profile.baseline_metric, Some(0.5));
 
@@ -1755,6 +1818,10 @@ mod tests {
         assert_eq!(selection.general[1].start_s, None);
         // The personalized ordering rides in the same response with full breakdowns.
         assert_eq!(selection.personalized.len(), 3);
+        assert!(
+            selection.profile.is_none(),
+            "brief alone is not personal provenance"
+        );
         for result in &selection.personalized {
             assert!(result.score_breakdown.is_some());
         }
@@ -1772,6 +1839,7 @@ mod tests {
         .unwrap();
         assert_eq!(general_only.general.len(), 3);
         assert!(general_only.personalized.is_empty());
+        assert!(general_only.profile.is_none());
 
         // Privacy: a not-usable annotation removes the asset from the general list.
         store

@@ -514,6 +514,15 @@ fn run_sips_with_control(
     command: &mut Command,
     cancellation: &CancellationToken,
 ) -> anyhow::Result<std::process::Output> {
+    run_sips_with_timeout(command, cancellation, SIPS_TIMEOUT)
+}
+
+#[cfg(target_os = "macos")]
+fn run_sips_with_timeout(
+    command: &mut Command,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+) -> anyhow::Result<std::process::Output> {
     ensure!(
         !cancellation.is_cancelled(),
         "sips was cancelled before it started"
@@ -542,13 +551,10 @@ fn run_sips_with_control(
             child.wait()?;
             bail!("sips invocation was cancelled");
         }
-        if started.elapsed() >= SIPS_TIMEOUT {
+        if started.elapsed() >= timeout {
             kill_sips(&mut child);
             child.wait()?;
-            bail!(
-                "sips invocation timed out after {} s",
-                SIPS_TIMEOUT.as_secs()
-            );
+            bail!("sips invocation timed out after {} s", timeout.as_secs());
         }
         match child.try_wait()? {
             Some(status) => break status,
@@ -757,7 +763,11 @@ mod tests {
         let mut command = Command::new("/bin/sleep");
         command.arg("30");
         let started = Instant::now();
-        let result = run_sips_with_control(&mut command, &CancellationToken::default());
+        let result = run_sips_with_timeout(
+            &mut command,
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+        );
         let elapsed = started.elapsed();
         let error = result.unwrap_err().to_string();
         assert!(error.contains("timed out"), "unexpected error: {error}");

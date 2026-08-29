@@ -6,11 +6,13 @@
     <title>Crush</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="search.css" />
+    <link rel="stylesheet" href="plans.css" />
     <script src="app.js" defer></script>
     <script src="search.js" defer></script>
     <script src="style.js" defer></script>
     <script src="library.js" defer></script>
     <script src="review.js" defer></script>
+    <script src="plans.js" defer></script>
   </head>
   <body>
     <div id="boot" class="boot-screen">
@@ -59,6 +61,10 @@
           <button class="nav-item" id="nav-style" type="button">
             <span class="nav-icon" aria-hidden="true">✦</span>
             Style
+          </button>
+          <button class="nav-item" id="nav-plans" type="button">
+            <span class="nav-icon" aria-hidden="true">≡</span>
+            Plans
           </button>
         </nav>
         <footer class="sidebar-footer">
@@ -117,6 +123,71 @@
             <strong>Drop folder to index</strong>
           </div>
         </div>
+      </main>
+
+      <main id="plans-view" class="workspace" aria-labelledby="plans-title" hidden>
+        <header class="toolbar">
+          <div><p class="eyebrow">Selects + sequences</p><h1 id="plans-title">Plans</h1></div>
+          <span class="plans-muted">Documents only · originals untouched</span>
+        </header>
+        <p id="plans-message" class="library-message" role="status" hidden></p>
+        <fieldset id="plans-controls" class="plans-layout">
+          <aside class="plans-list-panel" aria-label="Saved plans">
+            <form id="plan-create-form" class="plans-stack">
+              <label>New plan name<input id="plan-new-name" required maxlength="200" placeholder="Summer selects" /></label>
+              <label>Style context<input id="plan-new-context" required value="default" maxlength="200" /></label>
+              <button class="button primary" type="submit">Create plan</button>
+            </form>
+            <h2>Saved plans</h2>
+            <div id="plans-list" class="plans-stack"></div>
+            <p id="plans-empty" class="plans-muted">No plans yet. Create one to collect photo selects and video clips.</p>
+          </aside>
+          <div class="plans-main">
+            <p id="plan-no-selection" class="plans-muted">Choose or create a plan. General strong-shot candidates work without a style profile.</p>
+            <section id="plan-editor" hidden aria-label="Plan editor">
+              <form id="plan-header-form" class="plans-stack">
+                <div class="plans-fields">
+                  <label>Plan name<input id="plan-name" required maxlength="200" /></label>
+                  <label>Context (fixed for this plan)<input id="plan-context" readonly /></label>
+                </div>
+                <label>Description<input id="plan-description" /></label>
+                <label>Creative brief<textarea id="plan-brief" rows="2" placeholder="Quiet close-ups, warm evening light…"></textarea></label>
+                <div class="plans-actions">
+                  <button class="button secondary" type="submit">Save plan details</button>
+                  <button id="plan-duplicate" class="button secondary" type="button">Duplicate</button>
+                  <button id="plan-delete" class="button danger" type="button">Delete plan…</button>
+                  <span id="plan-dirty" class="plans-muted" hidden>Unsaved edits</span>
+                </div>
+              </form>
+              <section class="plans-candidates" aria-label="Candidate orderings">
+                <div class="plans-actions">
+                  <h2>Find candidates</h2>
+                  <button id="plan-generate" class="button primary" type="button">Refresh candidates</button>
+                </div>
+                <p id="plan-candidate-status" class="plans-muted" role="status">General quality is always available. Add a brief for the second ordering.</p>
+                <div class="plans-columns">
+                  <section aria-labelledby="plan-general-title"><h3 id="plan-general-title">General</h3><p class="plans-muted">Strong-shot quality, independent of your style.</p><div id="plan-general" class="plans-stack"></div></section>
+                  <section aria-labelledby="plan-personal-title"><h3 id="plan-personal-title">Personalized</h3><p id="plan-personal-status" class="plans-muted">Add a brief. Without an eligible profile, this is general brief matching.</p><div id="plan-personal" class="plans-stack"></div></section>
+                </div>
+              </section>
+              <section aria-labelledby="plan-sequence-title" class="plans-sequence">
+                <h2 id="plan-sequence-title">Sequence <span id="plan-item-count"></span></h2>
+                <p class="plans-muted">Add, edit, move, or remove items without training the model. “Pick for this context” records explicit feedback separately.</p>
+                <div id="plan-items" class="plans-stack"></div>
+                <p id="plan-items-empty" class="plans-muted">No selects yet. Add a candidate from either column.</p>
+              </section>
+              <section class="plans-revisions" aria-labelledby="plan-revisions-title">
+                <h2 id="plan-revisions-title">Saved versions</h2>
+                <form id="plan-revision-form" class="plans-actions">
+                  <label>Version note<input id="plan-revision-label" placeholder="First selects" /></label>
+                  <button class="button secondary" type="submit">Save version</button>
+                </form>
+                <div id="plan-revisions" class="plans-stack"></div>
+                <p class="plans-muted">Rendering and export arrive in Task 021. This plan is not a rendered file or a publication approval.</p>
+              </section>
+            </section>
+          </div>
+        </fieldset>
       </main>
 
       <main id="search-view" class="workspace search-workspace" aria-labelledby="search-title" hidden>
@@ -425,6 +496,15 @@
       </div>
       <p class="compare-hint">← → focus side · Enter prefer focused · p pick · x reject · 1–5 rate
         focused · ⌥← ⌥→ change B</p>
+    </dialog>
+
+    <dialog id="plan-confirm" class="doctor-dialog" aria-labelledby="plan-confirm-title">
+      <h2 id="plan-confirm-title">Confirm plan action</h2>
+      <p id="plan-confirm-copy"></p>
+      <form method="dialog" class="plans-actions">
+        <button class="button secondary" value="cancel" autofocus>Keep editing</button>
+        <button class="button danger" value="confirm">Confirm</button>
+      </form>
     </dialog>
 
     <dialog id="doctor-dialog" class="doctor-dialog">

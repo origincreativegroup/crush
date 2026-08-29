@@ -369,7 +369,7 @@ mod macos {
         command_result((|| {
             let manifest = models::bundled_manifest()?;
             let found = models::inspect(&state.paths.models(), &manifest)?;
-            Ok(found
+            found
                 .into_iter()
                 .map(|check| {
                     Ok(ModelFileStatus {
@@ -384,7 +384,7 @@ mod macos {
                         status: model_status_name(check.status).to_owned(),
                     })
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?)
+                .collect::<anyhow::Result<Vec<_>>>()
         })())
     }
 
@@ -842,12 +842,14 @@ mod macos {
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)] // Backward-compatible Tauri command argument surface.
     async fn record_feedback(
         asset_type: String,
         id: String,
         signal: String,
         value: Option<f64>,
         context: Option<String>,
+        context_key: Option<String>,
         compared_asset_type: Option<String>,
         compared_id: Option<String>,
         state: State<'_, RuntimeState>,
@@ -939,8 +941,10 @@ mod macos {
                         value,
                         compared_media_kind,
                         compared_media_id: compared_id,
-                        context_json: serde_json::json!({ "query": context.unwrap_or_default() })
-                            .to_string(),
+                        context_json: feedback_context_json(
+                            context.as_deref(),
+                            context_key.as_deref(),
+                        )?,
                         created_at: chrono::Utc::now(),
                     },
                 )?;
@@ -955,6 +959,15 @@ mod macos {
     }
 
     // ---- Style + reference sets (Task 018b) ----
+
+    fn feedback_context_json(
+        query: Option<&str>,
+        context_key: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let key = context_key.unwrap_or("default").trim();
+        ensure!(!key.is_empty(), "feedback context key must not be empty");
+        Ok(serde_json::json!({ "query": query.unwrap_or_default(), "context": key }).to_string())
+    }
 
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -973,9 +986,8 @@ mod macos {
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct StyleProfileStatusView {
-        /// True only when the active profile carries `learned = 1`, which the held-out
-        /// evaluation gate (Task 018a) sets at train time; the UI never says "Learned"
-        /// without it.
+        /// Automated eval result only. NOT human approval: the UI must label this
+        /// experimental until the held-out proof review in HANDOFF is signed off.
         learned: bool,
         has_active_profile: bool,
         profile_id: Option<String>,
@@ -1922,12 +1934,13 @@ mod macos {
             };
             let plan_id = plan_item.plan_id.clone();
             let media_id = plan_item.media_id.clone();
+            let media_kind = plan_item.media_kind;
             let mut store = store;
             store.plan_add_item(DEFAULT_OWNER_ID, &plan_item)?;
             let stored = store
                 .plan_items(DEFAULT_OWNER_ID, &plan_id)?
                 .into_iter()
-                .find(|stored| stored.media_id == media_id)
+                .find(|stored| stored.media_id == media_id && stored.media_kind == media_kind)
                 .context("stored plan item was not found after insert")?;
             Ok(plan_item_view(stored))
         })())
@@ -1943,10 +1956,11 @@ mod macos {
     ) -> CommandResult<PlanItemView> {
         command_result((|| {
             let mut store = Store::open(&state.paths.root)?;
+            let media_kind = parse_library_kind(&asset_type)?;
             store.plan_update_item(
                 DEFAULT_OWNER_ID,
                 &id,
-                parse_library_kind(&asset_type)?,
+                media_kind,
                 &media_id,
                 &PlanItemPatch {
                     start_s: patch.start_s,
@@ -1960,7 +1974,7 @@ mod macos {
             let stored = store
                 .plan_items(DEFAULT_OWNER_ID, &id)?
                 .into_iter()
-                .find(|stored| stored.media_id == media_id)
+                .find(|stored| stored.media_id == media_id && stored.media_kind == media_kind)
                 .context("stored plan item was not found after update")?;
             Ok(plan_item_view(stored))
         })())
@@ -2171,16 +2185,12 @@ mod macos {
                 notes: annotation
                     .as_ref()
                     .map_or_else(String::new, |value| value.notes.clone()),
-                usable: annotation.as_ref().map_or(true, |value| value.usable),
-                faces_visible: annotation
-                    .as_ref()
-                    .map_or(false, |value| value.faces_visible),
+                usable: annotation.as_ref().is_none_or(|value| value.usable),
+                faces_visible: annotation.as_ref().is_some_and(|value| value.faces_visible),
                 nametags_visible: annotation
                     .as_ref()
-                    .map_or(false, |value| value.nametags_visible),
-                blur_required: annotation
-                    .as_ref()
-                    .map_or(false, |value| value.blur_required),
+                    .is_some_and(|value| value.nametags_visible),
+                blur_required: annotation.as_ref().is_some_and(|value| value.blur_required),
             })
         })())
     }
@@ -2741,6 +2751,21 @@ mod macos {
     mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
+
+        #[test]
+        fn plan_feedback_context_does_not_become_universal_taste() {
+            let scoped: serde_json::Value = serde_json::from_str(
+                &feedback_context_json(Some("warm portraits"), Some(" campaign ")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(scoped["context"], "campaign");
+            assert_eq!(scoped["query"], "warm portraits");
+            let legacy: serde_json::Value =
+                serde_json::from_str(&feedback_context_json(Some("legacy search"), None).unwrap())
+                    .unwrap();
+            assert_eq!(legacy["context"], "default");
+            assert!(feedback_context_json(None, Some("  ")).is_err());
+        }
 
         #[test]
         fn doctor_reports_tauri_bundle_sidecars_as_bundled() {
