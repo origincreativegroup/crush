@@ -130,3 +130,16 @@ against the current tree; re-check if the tree has moved.
       that the harness is the only UI gate — no automated JS tests run in CI, only
       `cargo check -p crush-app`).
 - [ ] Analyze-stage jobs render as "Analyzing" at 70% in the library list instead of "Indexing".
+
+## Record (merged as PR #22)
+
+Implemented by the agent team 2026-08-29. ImageIO path now reads EXIF orientation from the sips-rendered
+JPEG and applies it to pixels (orientation_applied truthful on every decode path); oriented-HEIC fixture
+asserts upright pixels against the image-rs reference with tolerance 16. ICC test now embeds real sRGB
+profiles via JpegEncoder::set_icc_profile and asserts exact-byte derivative round-trip plus a P3-vs-sRGB
+mismatch case; the HEIC-ICC sub-case skips cleanly when sips refuses --setProperty iccProfile (observed
+on the CI runner). ScoreBreakdown exported on AssetSearchResult (semantic, transcript_boost, editorial,
+general_aesthetic, personal_style), rendered as an expandable plain-language breakdown; detail views carry
+personalStyleScore; analyze stage renders as Analyzing 70%. Unit tests pin the aesthetic term bounds
+(+/-0.08 centered 0.5) and equal-cosine ordering. macOS CI runs source_fidelity. No ranking-constant
+changes; goldens untouched.
