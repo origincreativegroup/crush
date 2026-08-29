@@ -308,22 +308,27 @@ fn search(
                 .map_or_else(|| "—".to_owned(), |value| format!("{value:.3}")),
             result.path
         );
-        println!(
-            "     asset={} thumb={} editorial_quality={} aesthetic={} breakdown=semantic{:+.3} transcript{:+.3} general{:+.3} style{:+.3} editorial{:+.3}",
-            result.asset_id,
-            result.thumb_path.as_deref().unwrap_or("—"),
-            result
-                .editorial_quality
-                .map_or_else(|| "—".to_owned(), |value| value.to_string()),
-            result
-                .aesthetic_score
-                .map_or_else(|| "—".to_owned(), |value| format!("{value:.3}")),
-            result.breakdown.semantic,
-            result.breakdown.transcript_boost,
-            result.breakdown.general_aesthetic,
-            result.breakdown.personal_style,
-            result.breakdown.editorial,
-        );
+        if let Some(breakdown) = &result.score_breakdown {
+            println!(
+                "     asset={} thumb={} editorial_quality={} aesthetic={} breakdown=semantic{:+.3} transcript{:+.3} general{:+.3} style{:+.3} context{:+.3} penalty{:+.3} editorial{:+.3} total{:+.3}",
+                result.asset_id,
+                result.thumb_path.as_deref().unwrap_or("-"),
+                result
+                    .editorial_quality
+                    .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+                result
+                    .aesthetic_score
+                    .map_or_else(|| "-".to_owned(), |value| format!("{value:.3}")),
+                breakdown.semantic,
+                breakdown.transcript_boost,
+                breakdown.general_aesthetic,
+                breakdown.personal_affinity,
+                breakdown.context_fit,
+                breakdown.penalties,
+                breakdown.editorial,
+                breakdown.total,
+            );
+        }
         if let Some(snippet) = &result.transcript_snippet {
             println!("     transcript: {snippet}");
         }

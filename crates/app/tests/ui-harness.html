@@ -77,25 +77,31 @@
             if (command === "search") {
               if (scenario === "empty" || args.q === "zzz") return [];
               return Array.from({ length: 8 }, (_, i) => {
+                const semantic = 0.24 - i * 0.02;
+                const transcriptBoost = i && i % 2 ? 0.06 : 0;
+                const generalAesthetic = i === 0 ? 0.06 : 0;
+                const personalAffinity = i === 0 ? 0.063 : 0;
                 const breakdown = {
-                  semantic: 0.24 - i * 0.02,
-                  transcript_boost: i && i % 2 ? 0.06 : 0,
+                  semantic,
+                  transcript_boost: transcriptBoost,
                   editorial: 0,
-                  general_aesthetic: i === 0 ? 0.06 : 0,
-                  personal_style: i === 0 ? 0.05 : 0,
+                  general_aesthetic: generalAesthetic,
+                  penalties: 0,
+                  personal_affinity: personalAffinity,
+                  context_fit: 0,
+                  total: semantic + transcriptBoost + generalAesthetic + personalAffinity,
                 };
                 return {
                   asset_type: i === 0 ? "photo" : "video", asset_id: i === 0 ? "photo-0" : `shot-${i}`,
                   path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : videos[i % videos.length].path,
                   start_s: i === 0 ? null : i * 3.2, end_s: i === 0 ? null : i * 3.2 + 2.75,
                   thumb_path: i === 0 ? "/Volumes/Photos/Campaign/select.jpg" : null,
-                  score: breakdown.semantic + breakdown.transcript_boost + breakdown.editorial
-                    + breakdown.general_aesthetic + breakdown.personal_style,
+                  score: breakdown.total,
                   cosine: breakdown.semantic,
-                  transcript_snippet: i && i % 2 ? "…and then the rocket cleared the tower…" : null,
+                  transcript_snippet: i && i % 2 ? ".and then the rocket cleared the tower." : null,
                   editorial_quality: i === 0 ? 5 : null, aesthetic_score: i === 0 ? 0.89 : null,
                   personal_style_score: i === 0 ? 0.42 : null,
-                  breakdown,
+                  score_breakdown: breakdown,
                 };
               });
             }

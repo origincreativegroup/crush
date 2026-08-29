@@ -91,15 +91,6 @@ pub struct SearchResult {
     pub transcript_snippet: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct ScoreBreakdown {
-    pub semantic: f32,
-    pub transcript_boost: f32,
-    pub editorial: f32,
-    pub general_aesthetic: f32,
-    pub personal_style: f32,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AssetSearchResult {
     pub asset_type: String,
@@ -1524,18 +1515,27 @@ mod tests {
         assert_eq!(results[0].asset_id, "shot-a");
         assert_eq!(results[1].asset_id, "shot-b");
         assert_eq!(results[0].cosine, results[1].cosine);
-        assert!((results[0].breakdown.general_aesthetic - 0.08).abs() < 1e-6);
-        assert!((results[1].breakdown.general_aesthetic + 0.08).abs() < 1e-6);
+        let breakdown_a = results[0].score_breakdown.expect("breakdown exported");
+        let breakdown_b = results[1].score_breakdown.expect("breakdown exported");
+        assert!((breakdown_a.general_aesthetic - 0.08).abs() < 1e-6);
+        assert!((breakdown_b.general_aesthetic + 0.08).abs() < 1e-6);
         for result in &results {
-            let breakdown = result.breakdown;
+            let breakdown = result.score_breakdown.expect("breakdown exported");
             let sum = breakdown.semantic
                 + breakdown.transcript_boost
                 + breakdown.editorial
                 + breakdown.general_aesthetic
-                + breakdown.personal_style;
+                + breakdown.penalties
+                + breakdown.personal_affinity
+                + breakdown.context_fit;
             assert!(
-                (sum - result.score).abs() < 1e-4,
-                "breakdown {breakdown:?} does not sum to {}",
+                (sum - breakdown.total).abs() < 1e-4,
+                "breakdown {breakdown:?} does not sum to its total"
+            );
+            assert!(
+                (result.score - breakdown.total).abs() < 1e-4,
+                "breakdown total {} does not match score {}",
+                breakdown.total,
                 result.score
             );
         }
