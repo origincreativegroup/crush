@@ -2365,7 +2365,7 @@ fn collections_round_trip_with_owner_isolation_and_cascades() {
         .into_iter()
         .map(|item| (item.media_kind, item.media_id))
         .collect::<Vec<_>>();
-    items.sort();
+    items.sort_by(|left, right| left.1.cmp(&right.1));
     assert_eq!(
         items,
         vec![
