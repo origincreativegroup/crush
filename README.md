@@ -5,10 +5,15 @@ strong shots, learns how a particular user defines even better and more consiste
 selects and clips, and renders finished media without uploading originals. A searchable DAM is the
 foundation that makes those decisions traceable; cataloging is not the product's only purpose.
 
-**Status:** pre-alpha. Video ingest/search/export and the JPEG/PNG DAM vertical slice work. The
-next milestone adds RAW/HEIF/TIFF photo sources, production-video proxies and metadata. The core
-general-quality model must work before personalization; user feedback and explicitly added examples
-of previous work then refine its style match. See `TASKS.md`.
+**Status:** pre-alpha. Mixed-media ingest/search, capability-gated RAW/HEIF/TIFF support,
+general strong-shot analysis, review tools and editable select plans are implemented. Personal
+profiles are experimental: held-out style proof still requires human review. Full recipe-based
+photo/reel rendering is in progress, followed by the Reel Studio importer and release acceptance.
+See `TASKS.md` for implemented scope and the remaining human gates.
+
+Clip export requires a new destination filename; it will not replace an original or an existing
+export. Rendering uses private staging and exclusive publication. If the destination filesystem
+does not support hard links, export fails safely; choose a supported local filesystem instead.
 
 - Blueprint: `docs/project-blueprint.md`
 - DAM and feedback direction: `docs/dam-feedback-blueprint.md`
