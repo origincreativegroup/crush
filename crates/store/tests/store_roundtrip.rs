@@ -1414,7 +1414,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
 #[test]
 fn second_owner_rows_are_isolated_from_the_default_owner() {
     let directory = TestDir::new("owner-isolation");
-    let store = Store::open(directory.path()).unwrap();
+    let mut store = Store::open(directory.path()).unwrap();
     const OWNER_B: &str = "editor-b";
     let audit = Connection::open(store.db_path()).unwrap();
     audit
