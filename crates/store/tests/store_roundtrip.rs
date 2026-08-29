@@ -1954,8 +1954,17 @@ fn reference_photo(id: &str, sha256: &str) -> Photo {
 
 #[test]
 fn reference_sets_round_trip_with_owner_isolation_and_cascade() {
+    const OWNER_B: &str = "editor-b";
     let directory = TestDir::new("reference-sets");
     let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at)
+             VALUES ('editor-b', 'Editor B', '2026-08-28T12:00:00+00:00')",
+            [],
+        )
+        .unwrap();
     let now = Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap();
     store
         .upsert_photo(
