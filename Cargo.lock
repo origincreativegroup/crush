@@ -740,6 +740,7 @@ dependencies = [
  "chrono",
  "crush-core",
  "crush-search",
+ "crush-stage-aesthetic",
  "crush-stage-asr",
  "crush-stage-embed",
  "crush-stage-split",
@@ -768,6 +769,17 @@ dependencies = [
  "tempfile",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "crush-stage-aesthetic"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -76,7 +76,7 @@ fn shot(id: &str, video_id: &str, idx: i64) -> Shot {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -87,12 +87,68 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 3);
+    assert_eq!(reopened.schema_version().unwrap(), 4);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .unwrap();
     assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+}
+
+#[test]
+fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
+    let directory = TestDir::new("migration-v3-v4");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('legacy-video', 'local', '/legacy.mov', 'legacy-sha', 1.0, 24.0,
+                       1920, 1080, 1, 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO jobs (
+                id, owner_id, video_id, stage, status, started_at, finished_at, duration_ms
+             ) VALUES ('legacy-job', 'local', 'legacy-video', 'embed', 'done',
+                       '2026-08-28T00:00:00Z', '2026-08-28T00:00:01Z', 1000)",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 4);
+    let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, "legacy-job");
+    assert_eq!(jobs[0].stage, Stage::Embed);
 }
 
 #[test]
@@ -226,6 +282,26 @@ fn photos_editorial_feedback_and_style_round_trip() {
         subject_placement: 0.91,
         negative_space: 0.95,
         visual_clarity: 0.86,
+        technical_quality: 0.84,
+        blur_control: 0.91,
+        clipping_control: 0.88,
+        noise_control: 0.82,
+        compression_quality: 0.86,
+        resolution_quality: 0.93,
+        motion_stability: 0.5,
+        duplicate_confidence: 0.0,
+        composition_quality: 0.87,
+        hierarchy: 0.9,
+        leading_lines: 0.72,
+        symmetry: 0.55,
+        crop_potential: 0.8,
+        moment_story: 0.7,
+        expression: 0.5,
+        gesture: 0.5,
+        action: 0.5,
+        novelty: 0.75,
+        pacing: 0.5,
+        repetition_risk: 0.0,
         overall: 0.89,
         confidence: 0.77,
         explanation_json: r#"{"strengths":["negative space","color harmony"]}"#.to_owned(),

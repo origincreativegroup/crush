@@ -457,6 +457,7 @@ impl SearchEngine {
             )?;
             let score = found.score
                 + editorial_adjustment(annotation.as_ref())
+                + general_aesthetic_adjustment(aesthetic.as_ref())
                 + personal_style_score.unwrap_or(0.0) * 0.15;
             results.push(AssetSearchResult {
                 asset_type: "video".to_owned(),
@@ -496,6 +497,7 @@ impl SearchEngine {
             )?;
             let score = found.score
                 + editorial_adjustment(annotation.as_ref())
+                + general_aesthetic_adjustment(aesthetic.as_ref())
                 + personal_style_score.unwrap_or(0.0) * 0.15;
             results.push(AssetSearchResult {
                 asset_type: "photo".to_owned(),
@@ -549,6 +551,10 @@ fn editorial_adjustment(annotation: Option<&crush_store::EditorialAnnotation>) -
         .quality
         .map_or(0.0, |value| (value as f32 - 3.0) * 0.025);
     quality + if annotation.standout { 0.05 } else { 0.0 }
+}
+
+fn general_aesthetic_adjustment(assessment: Option<&crush_store::AestheticAssessment>) -> f32 {
+    assessment.map_or(0.0, |value| ((value.overall - 0.5) * 0.16) as f32)
 }
 
 fn personal_style_score(

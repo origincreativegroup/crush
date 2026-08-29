@@ -1,0 +1,39 @@
+{
+  "model_version": "strong-shot-v1",
+  "reviewed_at": "2026-08-28",
+  "review_policy": "Component calibration, not a claim that one photographic style is universal. Semantic inputs are neutral in this pixel-only regression set.",
+  "fixtures": [
+    {
+      "name": "earth-timelapse-silent",
+      "media_kind": "still",
+      "review": "Strong graphic hierarchy and balance; severe clipped highlights and low-light softness must remain visible as technical cautions.",
+      "overall": [0.50, 0.64],
+      "technical": [0.29, 0.43],
+      "composition": [0.72, 0.87]
+    },
+    {
+      "name": "goodnight-earth-vertical",
+      "media_kind": "still",
+      "review": "Deliberate negative space and dramatic placement; low exposure and clipped lunar edge reduce technical confidence.",
+      "overall": [0.48, 0.61],
+      "technical": [0.29, 0.43],
+      "composition": [0.68, 0.82]
+    },
+    {
+      "name": "rocket-launch",
+      "media_kind": "video_shot",
+      "review": "A recognizable decisive event with strong separation, but the representative frame is very dark, soft, and highlight-clipped.",
+      "overall": [0.48, 0.62],
+      "technical": [0.25, 0.40],
+      "composition": [0.70, 0.85]
+    },
+    {
+      "name": "synthetic-speech",
+      "media_kind": "video_shot_control",
+      "review": "Synthetic test-pattern control: technically crisp and balanced but almost no negative space. Semantic production scoring must determine story value rather than pixel heuristics pretending to know it.",
+      "overall": [0.59, 0.72],
+      "technical": [0.53, 0.68],
+      "composition": [0.69, 0.84]
+    }
+  ]
+}

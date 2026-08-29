@@ -11,7 +11,9 @@ use crush_pipeline::{sha256_file, Pipeline};
 use crush_search::SearchEngine;
 use crush_stage_embed::embedder::{Embedder, ProviderPreference};
 use crush_stage_split::ffmpeg;
-use crush_store::{JobFilter, NewJob, PhotoProxyProvenance, PhotoStatus, Store, VideoStatus};
+use crush_store::{
+    JobFilter, MediaKind, NewJob, PhotoProxyProvenance, PhotoStatus, Store, VideoStatus,
+};
 use image::{Rgb, RgbImage};
 
 fn repo_root() -> PathBuf {
@@ -126,6 +128,20 @@ fn photo_ingest_is_idempotent_and_searchable() {
             .len(),
         512
     );
+    assert!(store
+        .active_style_profile(DEFAULT_OWNER_ID)
+        .unwrap()
+        .is_none());
+    let assessment = store
+        .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Photo, &photo.id)
+        .unwrap()
+        .expect("cold-start photo assessment");
+    assert_eq!(assessment.model_version, "strong-shot-v1");
+    assert!((0.0..=1.0).contains(&assessment.technical_quality));
+    assert!((0.0..=1.0).contains(&assessment.composition_quality));
+    let evidence: serde_json::Value = serde_json::from_str(&assessment.explanation_json).unwrap();
+    assert_eq!(evidence["independent_of_profile"], true);
+    assert_eq!(evidence["identity_used"], false);
     let engine =
         SearchEngine::load(&store, DEFAULT_OWNER_ID, config.search.transcript_hit_boost).unwrap();
     let mut embedder = Embedder::new(paths.models(), ProviderPreference::Cpu, 2).unwrap();
@@ -188,7 +204,7 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
 
     let first = pipeline.ingest(&clips, true).unwrap();
     assert_eq!(first.discovered, 4);
-    assert_eq!(first.indexed, 4);
+    assert_eq!(first.indexed, 4, "ingest errors: {:#?}", first.errors);
     assert_eq!(first.failed, 0);
     assert!(first.search_vectors > 0);
 
@@ -214,9 +230,23 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
                 metadata.proxy_sha256.as_deref().unwrap()
             );
         }
+        for shot in store.shots_for_video(DEFAULT_OWNER_ID, &video.id).unwrap() {
+            let assessment = store
+                .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, &shot.id)
+                .unwrap()
+                .expect("video shot assessment");
+            assert_eq!(assessment.model_version, "strong-shot-v1");
+            assert!((0.0..=1.0).contains(&assessment.motion_stability));
+            assert!((0.0..=1.0).contains(&assessment.pacing));
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&assessment.explanation_json).unwrap()
+                    ["groups"]["moment_sequence"]
+                    .is_object()
+            );
+        }
     }
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
-    assert_eq!(jobs.len(), 12);
+    assert_eq!(jobs.len(), 16);
     assert!(jobs.iter().all(|job| job.status == JobStatus::Done));
     for job in &jobs {
         let directory = Path::new(job.debug_dir.as_deref().expect("debug directory recorded"));
@@ -228,6 +258,7 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
                 assert!(directory.join("commands.txt").is_file());
             }
             Stage::Embed => assert!(directory.join("vectors.json").is_file()),
+            Stage::Analyze => assert!(directory.join("aesthetic-frames").is_dir()),
             Stage::Transcribe => {
                 let video = store
                     .video_by_id(DEFAULT_OWNER_ID, &job.video_id)
@@ -260,6 +291,21 @@ fn fixture_ingest_is_idempotent_resumable_and_exports_a_clip() {
         .map(|shot| shot.id)
         .collect::<Vec<_>>();
     drop(store);
+    rusqlite::Connection::open(temp.path().join("library.db"))
+        .unwrap()
+        .execute(
+            "DELETE FROM aesthetic_assessments WHERE media_kind = 'shot' AND media_id = ?1",
+            [&before_ids[0]],
+        )
+        .unwrap();
+    let backfilled = pipeline.ingest(Path::new(&target.path), false).unwrap();
+    assert_eq!(backfilled.indexed, 1);
+    assert_eq!(backfilled.skipped, 0);
+    assert!(Store::open(temp.path())
+        .unwrap()
+        .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, &before_ids[0])
+        .unwrap()
+        .is_some());
     pipeline.resplit(&target.id, false).unwrap();
     let store = Store::open(temp.path()).unwrap();
     let after_ids = store

@@ -143,6 +143,11 @@ mod macos {
         fps: Option<f64>,
         thumb_path: Option<String>,
         transcripts: Vec<TranscriptView>,
+        aesthetic_score: Option<f64>,
+        technical_score: Option<f64>,
+        composition_score: Option<f64>,
+        moment_score: Option<f64>,
+        analysis_summary: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -155,6 +160,10 @@ mod macos {
         format: String,
         quality: Option<i64>,
         aesthetic_score: Option<f64>,
+        technical_score: Option<f64>,
+        composition_score: Option<f64>,
+        moment_score: Option<f64>,
+        analysis_summary: Option<String>,
         description: String,
         tags: String,
         notes: String,
@@ -565,6 +574,11 @@ mod macos {
                 .map(|relative| store.thumbnail_path(relative))
                 .transpose()?
                 .map(|path| path.display().to_string());
+            let assessment = store.aesthetic_assessment(
+                DEFAULT_OWNER_ID,
+                crush_store::MediaKind::Shot,
+                &shot.id,
+            )?;
             Ok(ShotDetailView {
                 id: shot.id,
                 video_id: shot.video_id,
@@ -577,6 +591,11 @@ mod macos {
                 fps: video.fps,
                 thumb_path,
                 transcripts,
+                aesthetic_score: assessment.as_ref().map(|value| value.overall),
+                technical_score: assessment.as_ref().map(|value| value.technical_quality),
+                composition_score: assessment.as_ref().map(|value| value.composition_quality),
+                moment_score: assessment.as_ref().map(|value| value.moment_story),
+                analysis_summary: assessment.as_ref().and_then(assessment_summary),
             })
         })())
     }
@@ -617,7 +636,11 @@ mod macos {
                 height: photo.height,
                 format: photo.format,
                 quality: annotation.as_ref().and_then(|value| value.quality),
-                aesthetic_score: assessment.map(|value| value.overall),
+                aesthetic_score: assessment.as_ref().map(|value| value.overall),
+                technical_score: assessment.as_ref().map(|value| value.technical_quality),
+                composition_score: assessment.as_ref().map(|value| value.composition_quality),
+                moment_score: assessment.as_ref().map(|value| value.moment_story),
+                analysis_summary: assessment.as_ref().and_then(assessment_summary),
                 description: annotation
                     .as_ref()
                     .map_or_else(String::new, |value| value.description.clone()),
@@ -627,6 +650,14 @@ mod macos {
                 notes: annotation.map_or_else(String::new, |value| value.notes),
             })
         })())
+    }
+
+    fn assessment_summary(assessment: &crush_store::AestheticAssessment) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(&assessment.explanation_json)
+            .ok()?
+            .get("summary")?
+            .as_str()
+            .map(str::to_owned)
     }
 
     #[tauri::command]
@@ -965,7 +996,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=3"));
+            assert!(report.contains("schema=4"));
         }
     }
 }
