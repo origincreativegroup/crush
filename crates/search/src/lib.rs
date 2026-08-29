@@ -734,9 +734,7 @@ impl PersonalScorer {
         vector: Option<&Vec<f32>>,
         aesthetic_features: &[f32; AESTHETIC_FEATURES.len()],
     ) -> Option<f32> {
-        let Some(vector) = vector else {
-            return None;
-        };
+        let vector = vector?;
         if self.context_requested {
             if let Some(profile) = self.context_profile.as_ref() {
                 return Self::raw_affinity(profile, vector, aesthetic_features);
