@@ -818,3 +818,375 @@ nav {
   color: #e8e8ea;
   background: #24242a;
 }
+
+/* ---- Review library (Task 019b) ---- */
+
+.review-counts {
+  color: #8a8a93;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.review-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 26px;
+  border-bottom: 1px solid #2a2a30;
+  background: #19191c;
+}
+
+.review-filters,
+.saved-search-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-control select,
+.review-filters input,
+.saved-search-form input {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #3a3a42;
+  border-radius: 7px;
+  color: #d5d5da;
+  background: #26262b;
+}
+
+.review-filters input,
+.saved-search-form input {
+  background: #141416;
+}
+
+.saved-search-form input#saved-search-name {
+  flex: 1 1 180px;
+}
+
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 26px;
+  border-bottom: 1px solid #2a2a30;
+  background: #1c1c21;
+}
+
+.batch-count {
+  margin-right: auto;
+  color: #bdd1ff;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.review-content {
+  height: calc(100vh - 86px);
+  overflow: auto;
+}
+
+.review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  padding: 18px 26px 40px;
+}
+
+.review-tile {
+  position: relative;
+  padding: 6px;
+  border: 1px solid #26262b;
+  border-radius: 10px;
+  background: #18181b;
+  cursor: pointer;
+}
+
+.review-tile:hover {
+  background: #1c1c20;
+}
+
+.review-tile.selected {
+  border-color: #4f8cff;
+  background: #1c1c20;
+}
+
+.review-select {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  left: 12px;
+}
+
+.review-select input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #4f8cff;
+  cursor: pointer;
+}
+
+.review-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #26262b;
+}
+
+.review-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.review-thumb.blur img {
+  filter: blur(14px);
+}
+
+.review-kind {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: #ececf0;
+  background: rgb(0 0 0 / 66%);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+
+.review-thumb .status-pill {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+}
+
+.review-name {
+  margin-top: 8px;
+}
+
+.review-meta {
+  margin-top: 3px;
+  color: #8a8a93;
+  font-size: 11px;
+}
+
+.review-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.review-flag-pill {
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #aeb0b8;
+  background: #2a2a30;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.review-flag-pill.quality {
+  color: #e6c977;
+  background: rgb(230 201 119 / 12%);
+}
+
+.review-flag-pill.flagged {
+  color: #ff8d8d;
+  background: rgb(255 92 92 / 12%);
+}
+
+.review-flag-pill.member {
+  color: #8bb4ff;
+  background: rgb(79 140 255 / 13%);
+}
+
+/* ---- detail drawer: safety, metadata, stacks ---- */
+
+.detail-safety,
+.detail-metadata,
+.detail-stacks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #303039;
+  border-radius: 8px;
+  background: #19191d;
+}
+
+.detail-safety .eyebrow,
+.detail-metadata .eyebrow,
+.detail-stacks .eyebrow {
+  margin: 0;
+}
+
+.flag-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 14px;
+}
+
+.flag-grid label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #c9c9cf;
+  font-size: 12px;
+}
+
+.flag-grid input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #4f8cff;
+}
+
+.detail-metadata input {
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid #34343b;
+  border-radius: 7px;
+  color: #ececf0;
+  background: #141416;
+}
+
+.stack-controls,
+.stack-create-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stack-controls select {
+  min-height: 30px;
+  min-width: 0;
+  flex: 1;
+  border: 1px solid #3a3a43;
+  border-radius: 6px;
+  color: #e8e8ea;
+  background: #24242a;
+}
+
+.stack-create-controls input {
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid #34343b;
+  border-radius: 7px;
+  color: #ececf0;
+  background: #141416;
+}
+
+.detail-stack-memberships {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stack-membership-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stack-membership-name {
+  overflow: hidden;
+  color: #c9c9cf;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stack-memberships-empty {
+  margin: 0;
+  color: #6f6f78;
+  font-size: 11px;
+}
+
+/* ---- pairwise compare ---- */
+
+.compare-dialog {
+  width: 980px;
+  max-width: calc(100vw - 60px);
+  padding: 24px;
+  border: 1px solid #3a3a42;
+  border-radius: 13px;
+  color: #e8e8ea;
+  background: #1d1d21;
+  box-shadow: 0 30px 100px rgb(0 0 0 / 55%);
+}
+
+.compare-dialog::backdrop {
+  background: rgb(8 8 10 / 66%);
+  backdrop-filter: blur(3px);
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.compare-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #303037;
+  border-radius: 10px;
+  background: #18181b;
+}
+
+.compare-side.focused {
+  border-color: #4f8cff;
+}
+
+.compare-label {
+  margin: 0;
+  color: #8a8a93;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.compare-media {
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #000;
+}
+
+.compare-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.compare-side select {
+  min-height: 32px;
+  border: 1px solid #3a3a43;
+  border-radius: 6px;
+  color: #e8e8ea;
+  background: #24242a;
+}
+
+.compare-status {
+  min-height: 16px;
+  margin: 0;
+  color: #85d4a2;
+  font-size: 11px;
+}
+
+.compare-hint {
+  margin: 14px 0 0;
+  color: #6f6f78;
+  font-size: 11px;
+  text-align: center;
+}

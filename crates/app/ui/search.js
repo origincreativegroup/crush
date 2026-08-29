@@ -13,9 +13,11 @@
     libraryView: $("#library-view"),
     searchView: $("#search-view"),
     styleView: $("#style-view"),
+    reviewView: $("#review-view"),
     navSearch: $("#nav-search"),
     navLibrary: $("#nav-library"),
     navStyle: $("#nav-style"),
+    navReview: $("#nav-review"),
     input: $("#search-input"),
     top: $("#top-select"),
     count: $("#result-count"),
@@ -111,13 +113,19 @@
     el.libraryView.hidden = view !== "library";
     el.searchView.hidden = view !== "search";
     el.styleView.hidden = view !== "style";
+    el.reviewView.hidden = view !== "review";
     el.navSearch.classList.toggle("active", view === "search");
     el.navLibrary.classList.toggle("active", view === "library");
     el.navStyle.classList.toggle("active", view === "style");
+    el.navReview.classList.toggle("active", view === "review");
     if (view === "search") {
       el.input.focus();
       el.input.select();
       refreshIndexedState();
+    } else if (view === "review") {
+      // library.js owns the review panel contents; it refreshes on this event. The shared
+      // detail drawer stays usable from the review grid, so the detail is not closed here.
+      document.dispatchEvent(new CustomEvent("crush:review-shown"));
     } else {
       closeDetail();
     }
@@ -638,7 +646,13 @@
   el.navSearch.addEventListener("click", () => showView("search"));
   el.navLibrary.addEventListener("click", () => showView("library"));
   el.navStyle.addEventListener("click", () => showView("style"));
+  el.navReview.addEventListener("click", () => showView("review"));
   el.goLibrary.addEventListener("click", () => showView("library"));
+  // library.js (review grid) opens the shared detail drawer through this event; a plain DOM
+  // event keeps the two modules decoupled (same pattern as the style panel).
+  document.addEventListener("crush:open-asset", (event) => {
+    if (event.detail) openAssetDetail(event.detail);
+  });
   el.input.addEventListener("input", scheduleSearch);
   el.input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !state.results.length) {

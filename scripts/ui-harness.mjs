@@ -245,6 +245,198 @@ const tests = {
       async () => (await visibleText(frame.locator("#detail-add-style"))) === "Added",
     );
   },
+
+  async "library-grid"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    assert.match(await visibleText(frame.locator("#review-counts")), /2 photos · 1 shot/);
+    assert.match(await visibleText(frame.locator("#review-counts")), /1 flagged/);
+    // Kind badges distinguish photos from shots.
+    assert.equal(await visibleText(tiles.nth(0).locator(".review-kind")), "PHOTO");
+    assert.equal(await visibleText(tiles.nth(2).locator(".review-kind")), "▶ SHOT");
+    // The flagged photo carries its safety pill and a stack indicator.
+    assert.equal(await visibleText(tiles.nth(1).locator(".review-flag-pill.flagged")), "Blur required");
+    assert.equal(await visibleText(tiles.nth(1).locator(".review-flag-pill.member")), "⧉ 1 stack");
+    // Kind filter narrows the grid and reaches library_browse's filter argument.
+    await frame.locator("#filter-kind").selectOption("photo");
+    await frame.locator("#filter-apply").click();
+    await poll(async () => (await tiles.count()) === 2);
+    const calls = await mockCalls(page);
+    const browse = calls.filter((call) => call.command === "library_browse").at(-1);
+    assert.equal(browse.args.filter.kind, "photo");
+    await frame.locator("#filter-reset").click();
+    await poll(async () => (await tiles.count()) === 3);
+  },
+
+  async "library-bulk"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    const checkboxes = frame.locator("#review-grid .review-select input");
+    await checkboxes.nth(0).check();
+    await checkboxes.nth(1).check();
+    const bar = frame.locator("#batch-bar");
+    await poll(async () => bar.isVisible());
+    assert.equal(await visibleText(frame.locator("#batch-count")), "2 selected");
+    await frame.locator("#batch-pick").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "review_batch"
+          && call.args.ops?.length === 2
+          && call.args.ops.every((op) => op.op === "pick" && op.assetType === "photo"),
+      );
+    });
+    // Selection clears after the batch and the grid refreshes.
+    await poll(async () => !(await bar.isVisible()));
+    // Bulk rating flows through review_batch too.
+    await checkboxes.nth(0).check();
+    await poll(async () => bar.isVisible());
+    await frame.locator("#batch-rating").selectOption("4");
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "review_batch"
+          && call.args.ops?.length === 1
+          && call.args.ops[0].op === "rate"
+          && call.args.ops[0].rating === 4,
+      );
+    });
+  },
+
+  async "library-flags"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    // Open the flagged photo's drawer; the safety editor loads its current flags.
+    await frame.locator('.review-tile[data-key="photo|photo-two"]').click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    await poll(async () => (await frame.locator("#safety-blur").isChecked()) === true);
+    assert.equal(await frame.locator("#safety-usable").isChecked(), false);
+    assert.equal(await frame.locator("#safety-faces").isChecked(), true);
+    // Unchecking blur reduces protection, so the first click only arms the button.
+    await frame.locator("#safety-blur").uncheck();
+    const apply = frame.locator("#safety-apply");
+    await poll(() => apply.isEnabled());
+    await apply.click();
+    assert.equal(await visibleText(apply), "Really apply?");
+    await apply.click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "set_safety_flags"
+          && call.args.blurRequired === false
+          && call.args.facesVisible === true
+          && call.args.usable === false,
+      );
+    });
+    // Metadata editing diffs against the loaded annotation and reaches set_annotation.
+    await frame.locator("#meta-notes").fill("Prefer the wider frame");
+    await frame.locator("#metadata-save").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "set_annotation"
+          && call.args.fields?.notes === "Prefer the wider frame"
+          && call.args.fields.description === undefined,
+      );
+    });
+  },
+
+  async "library-saved-search"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    await frame.locator("#filter-blur").selectOption("true");
+    await frame.locator("#filter-apply").click();
+    await poll(async () => (await tiles.count()) === 1);
+    // Save the current filters as a named search.
+    await frame.locator("#saved-search-name").fill("Blur picks");
+    await frame.locator("#saved-search-save").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      const create = calls.find(
+        (call) => call.command === "saved_search_create" && call.args.name === "Blur picks",
+      );
+      if (!create) return false;
+      const filters = JSON.parse(create.args.filtersJson);
+      return filters.blurRequired === true;
+    });
+    // Load the pre-seeded saved search; its filters_json replays into the filter bar.
+    await frame.locator("#saved-search-select").selectOption({ label: "Blur review" });
+    await frame.locator("#saved-search-load").click();
+    assert.equal(await frame.locator("#filter-blur").inputValue(), "true");
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      const browse = calls.filter((call) => call.command === "library_browse").at(-1);
+      return browse.args.filter.blurRequired === true;
+    });
+    // Delete is two-step, mirroring the reference-set pattern.
+    const remove = frame.locator("#saved-search-delete");
+    await remove.click();
+    assert.equal(await visibleText(remove), "Really delete?");
+    await remove.click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) => call.command === "saved_search_delete" && call.args.id === "ss-one",
+      );
+    });
+  },
+
+  async "compare-view"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    // The compare view is reachable from the detail drawer.
+    await frame.locator('.review-tile[data-key="photo|photo-one"]').click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    await frame.locator("#compare-open").click();
+    const dialog = frame.locator("#compare-dialog");
+    await dialog.waitFor({ state: "visible" });
+    await poll(async () => (await frame.locator("#compare-media-a img").count()) === 1);
+    // Arrow keys focus a side; Enter records a prefer with the compared asset.
+    await dialog.press("ArrowRight");
+    await dialog.press("Enter");
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "record_feedback"
+          && call.args.signal === "prefer"
+          && call.args.id === "photo-two"
+          && call.args.comparedId === "photo-one"
+          && call.args.comparedAssetType === "photo"
+          && call.args.value === null,
+      );
+    });
+    await poll(
+      async () => (await visibleText(frame.locator("#compare-status-b"))) !== "",
+    );
+    // p picks the focused side through record_feedback.
+    await dialog.press("p");
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "record_feedback"
+          && call.args.signal === "pick"
+          && call.args.value === 1
+          && call.args.id === "photo-two",
+      );
+    });
+    await frame.locator("#compare-close").click();
+  },
 };
 
 const requested = process.argv.slice(2);

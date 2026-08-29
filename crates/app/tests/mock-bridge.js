@@ -377,6 +377,162 @@
     return set;
   };
 
+  // Task 019b mock state: two photos + one shot, one collection, one version stack, and one
+  // saved search. Rows mirror LibraryAssetView's camelCase projection (thumbPath is already
+  // resolved to an absolute path by the real command). Flags are annotation defaults except
+  // where set: photo-two carries the flagged profile (unusable + blur required + faces).
+  const reviewScenario = [
+    "library-grid",
+    "library-bulk",
+    "library-flags",
+    "library-saved-search",
+    "compare-view",
+  ].includes(scenario);
+
+  const reviewAssets = reviewScenario
+    ? [
+        {
+          mediaKind: "photo",
+          mediaId: "photo-one",
+          path: photo.path,
+          thumbPath: photo.path,
+          status: "done",
+          indexedAt: "2026-08-28T12:02:00Z",
+          videoId: null,
+          startS: null,
+          endS: null,
+          width: 6000,
+          height: 4000,
+          quality: 5,
+          usable: true,
+          standout: true,
+          facesVisible: false,
+          nametagsVisible: false,
+          blurRequired: false,
+          tags: "warm, geometric",
+          collectionIds: ["col-one"],
+          stackIds: [],
+        },
+        {
+          mediaKind: "photo",
+          mediaId: "photo-two",
+          path: "/Volumes/Photos/Campaign/alt.jpg",
+          thumbPath: "/Volumes/Photos/Campaign/alt.jpg",
+          status: "done",
+          indexedAt: "2026-08-28T12:03:00Z",
+          videoId: null,
+          startS: null,
+          endS: null,
+          width: 6000,
+          height: 4000,
+          quality: null,
+          usable: false,
+          standout: false,
+          facesVisible: true,
+          nametagsVisible: false,
+          blurRequired: true,
+          tags: "",
+          collectionIds: [],
+          stackIds: ["stk-one"],
+        },
+        {
+          mediaKind: "shot",
+          mediaId: "shot-1",
+          path: video.path,
+          thumbPath: null,
+          status: "done",
+          indexedAt: "2026-08-28T12:00:00Z",
+          videoId: "video-one",
+          startS: 3.2,
+          endS: 5.95,
+          width: 3840,
+          height: 2160,
+          quality: 4,
+          usable: true,
+          standout: false,
+          facesVisible: false,
+          nametagsVisible: false,
+          blurRequired: false,
+          tags: "",
+          collectionIds: [],
+          stackIds: [],
+        },
+      ]
+    : [];
+
+  const reviewCollections = reviewScenario
+    ? [{ id: "col-one", name: "Launch heroes", description: "", createdAt: "2026-08-28T13:00:00Z" }]
+    : [];
+  const reviewCollectionItems = [];
+  const reviewStacks = reviewScenario
+    ? [{ id: "stk-one", name: "Launch cut v1", createdAt: "2026-08-28T13:30:00Z" }]
+    : [];
+  const reviewSavedSearches = reviewScenario
+    ? [{
+        id: "ss-one",
+        name: "Blur review",
+        query: "",
+        contextKey: "default",
+        filtersJson: JSON.stringify({ blurRequired: true }),
+        createdAt: "2026-08-28T14:00:00Z",
+      }]
+    : [];
+  const annotationEdits = new Map();
+
+  const findReviewAsset = (assetType, mediaId) => {
+    const kind = assetType === "photo" ? "photo" : "shot";
+    const asset = reviewAssets.find(
+      (candidate) => candidate.mediaKind === kind && candidate.mediaId === mediaId,
+    );
+    if (!asset) throw `No ${kind} ${mediaId}`;
+    return asset;
+  };
+
+  const reviewBrowse = (filter = {}) =>
+    reviewAssets
+      .filter((asset) => {
+        if (filter.kind && asset.mediaKind !== (filter.kind === "photo" ? "photo" : "shot")) {
+          return false;
+        }
+        if (filter.status && asset.status !== filter.status) return false;
+        if (filter.usable !== undefined && filter.usable !== null && asset.usable !== filter.usable) {
+          return false;
+        }
+        if (
+          filter.blurRequired !== undefined
+          && filter.blurRequired !== null
+          && asset.blurRequired !== filter.blurRequired
+        ) {
+          return false;
+        }
+        if (filter.collectionId && !asset.collectionIds.includes(filter.collectionId)) return false;
+        if (filter.stackId && !asset.stackIds.includes(filter.stackId)) return false;
+        if (filter.contextKey) return false; // the mock has no collection item contexts
+        if (filter.search && !asset.path.toLowerCase().includes(String(filter.search).toLowerCase())) {
+          return false;
+        }
+        return true;
+      })
+      .map((asset) => ({ ...asset, collectionIds: [...asset.collectionIds], stackIds: [...asset.stackIds] }));
+
+  const reviewAnnotation = (assetType, mediaId) => {
+    const asset = findReviewAsset(assetType, mediaId);
+    const edits = annotationEdits.get(mediaId) || {};
+    return {
+      description: edits.description ?? (asset.mediaKind === "photo" && asset.mediaId === "photo-one"
+        ? "Warm geometric portrait with deliberate negative space."
+        : ""),
+      subjects: edits.subjects ?? "",
+      action: edits.action ?? "",
+      tags: edits.tags ?? asset.tags,
+      notes: edits.notes ?? "",
+      usable: asset.usable,
+      facesVisible: asset.facesVisible,
+      nametagsVisible: asset.nametagsVisible,
+      blurRequired: asset.blurRequired,
+    };
+  };
+
   async function invoke(command, args = {}) {
     calls.push({ command, args });
     switch (command) {
@@ -460,6 +616,135 @@
         return { path: args.out, mode: "Copy" };
       case "open_in_finder":
         return null;
+      case "library_counts": {
+        const flagged = reviewAssets.filter((asset) => !asset.usable || asset.blurRequired).length;
+        return {
+          photos: reviewAssets.filter((asset) => asset.mediaKind === "photo").length,
+          shots: reviewAssets.filter((asset) => asset.mediaKind === "shot").length,
+          picks: 0,
+          rejects: 0,
+          flagged,
+        };
+      }
+      case "library_browse":
+        return reviewBrowse(args.filter || {});
+      case "collection_list":
+        return reviewCollections.map((collection) => ({ ...collection }));
+      case "collection_create": {
+        const collection = {
+          id: `col-new-${reviewCollections.length + 1}`,
+          name: String(args.name || "Untitled collection"),
+          description: String(args.description || ""),
+          createdAt: "2026-08-28T15:00:00Z",
+        };
+        reviewCollections.push(collection);
+        return collection;
+      }
+      case "collection_add_items": {
+        const items = Array.isArray(args.items) ? args.items : [];
+        for (const item of items) {
+          reviewCollectionItems.push({
+            collectionId: args.id,
+            mediaKind: item.assetType === "photo" ? "photo" : "shot",
+            mediaId: item.mediaId,
+            contextKey: item.contextKey ?? null,
+          });
+          const kind = item.assetType === "photo" ? "photo" : "shot";
+          const asset = reviewAssets.find(
+            (candidate) => candidate.mediaKind === kind && candidate.mediaId === item.mediaId,
+          );
+          if (asset && !asset.collectionIds.includes(args.id)) asset.collectionIds.push(args.id);
+        }
+        return items.length;
+      }
+      case "collection_items":
+        return reviewCollectionItems
+          .filter((item) => item.collectionId === args.id)
+          .map((item) => ({ ...item, marked: false, addedAt: "2026-08-28T15:05:00Z" }));
+      case "stack_list":
+        return reviewStacks.map((stack) => ({ ...stack }));
+      case "stack_create": {
+        const stack = {
+          id: `stk-new-${reviewStacks.length + 1}`,
+          name: String(args.name || "Untitled stack"),
+          createdAt: "2026-08-28T15:30:00Z",
+        };
+        reviewStacks.push(stack);
+        return stack;
+      }
+      case "stack_add_item": {
+        const asset = findReviewAsset(args.assetType, args.mediaId);
+        if (args.role === "original" && asset.stackIds.length) {
+          // Mirrors the partial unique index: one original per stack.
+          throw `asset ${asset.mediaId} is already an original in another stack`;
+        }
+        if (!asset.stackIds.includes(args.stackId)) asset.stackIds.push(args.stackId);
+        return null;
+      }
+      case "stack_remove_item": {
+        const asset = findReviewAsset(args.assetType, args.mediaId);
+        asset.stackIds = asset.stackIds.filter((stackId) => stackId !== args.stackId);
+        return true;
+      }
+      case "stacks_for_asset":
+        return reviewStacks.filter((stack) => {
+          const kind = args.assetType === "photo" ? "photo" : "shot";
+          const asset = reviewAssets.find(
+            (candidate) => candidate.mediaKind === kind && candidate.mediaId === args.mediaId,
+          );
+          return asset ? asset.stackIds.includes(stack.id) : false;
+        });
+      case "saved_search_list":
+        return reviewSavedSearches.map((saved) => ({ ...saved }));
+      case "saved_search_create": {
+        const saved = {
+          id: `ss-new-${reviewSavedSearches.length + 1}`,
+          name: String(args.name || "Untitled search"),
+          query: String(args.query || ""),
+          contextKey: String(args.contextKey || "default"),
+          filtersJson: String(args.filtersJson || "{}"),
+          createdAt: "2026-08-28T16:00:00Z",
+        };
+        reviewSavedSearches.push(saved);
+        return saved;
+      }
+      case "saved_search_delete": {
+        const index = reviewSavedSearches.findIndex((saved) => saved.id === args.id);
+        if (index === -1) throw `No saved search ${args.id}`;
+        reviewSavedSearches.splice(index, 1);
+        return true;
+      }
+      case "editorial_annotation_get":
+        return reviewAnnotation(args.assetType, args.id);
+      case "set_safety_flags": {
+        const asset = findReviewAsset(args.assetType, args.id);
+        asset.facesVisible = Boolean(args.facesVisible);
+        asset.nametagsVisible = Boolean(args.nametagsVisible);
+        asset.blurRequired = Boolean(args.blurRequired);
+        asset.usable = Boolean(args.usable);
+        return null;
+      }
+      case "set_annotation":
+        annotationEdits.set(args.id, {
+          ...annotationEdits.get(args.id),
+          ...(args.fields || {}),
+        });
+        return null;
+      case "review_batch": {
+        const ops = Array.isArray(args.ops) ? args.ops : [];
+        for (const op of ops) {
+          if (op.op === "rate") {
+            findReviewAsset(op.assetType, op.mediaId).quality = op.rating;
+          } else if (op.op === "add_to_collection") {
+            const asset = findReviewAsset(op.assetType, op.mediaId);
+            if (!asset.collectionIds.includes(op.collectionId)) {
+              asset.collectionIds.push(op.collectionId);
+            }
+          }
+          // pick/reject/flag append feedback events; the mock records the call itself.
+        }
+        return ops.length;
+      }
       default:
         throw `Unhandled command: ${command}`;
     }

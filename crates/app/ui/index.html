@@ -9,6 +9,8 @@
     <script src="app.js" defer></script>
     <script src="search.js" defer></script>
     <script src="style.js" defer></script>
+    <script src="library.js" defer></script>
+    <script src="review.js" defer></script>
   </head>
   <body>
     <div id="boot" class="boot-screen">
@@ -49,6 +51,10 @@
           <button class="nav-item active" id="nav-library" type="button">
             <span class="nav-icon" aria-hidden="true">▦</span>
             Library
+          </button>
+          <button class="nav-item" id="nav-review" type="button">
+            <span class="nav-icon" aria-hidden="true">✎</span>
+            Review
           </button>
           <button class="nav-item" id="nav-style" type="button">
             <span class="nav-icon" aria-hidden="true">✦</span>
@@ -195,6 +201,111 @@
         </section>
       </main>
 
+      <main id="review-view" class="workspace review-workspace" aria-labelledby="review-title" hidden>
+        <header class="toolbar">
+          <div>
+            <p class="eyebrow">Mixed-media review</p>
+            <h1 id="review-title">Review</h1>
+          </div>
+          <div class="toolbar-actions">
+            <span id="review-counts" class="review-counts" aria-live="polite"></span>
+          </div>
+        </header>
+
+        <div id="review-message" class="library-message" role="status" hidden></div>
+
+        <section class="review-controls">
+          <form id="review-filters" class="review-filters">
+            <label class="filter-control"><span class="sr-only">Kind</span>
+              <select id="filter-kind" aria-label="Kind">
+                <option value="">Photos + shots</option>
+                <option value="photo">Photos</option>
+                <option value="shot">Shots</option>
+              </select>
+            </label>
+            <label class="filter-control"><span class="sr-only">Status</span>
+              <select id="filter-status" aria-label="Status">
+                <option value="">Any status</option>
+                <option value="done">Done</option>
+                <option value="pending">Pending</option>
+                <option value="embedded">Embedded</option>
+                <option value="split">Split</option>
+                <option value="transcribed">Transcribed</option>
+                <option value="failed">Failed</option>
+              </select>
+            </label>
+            <label class="filter-control"><span class="sr-only">Usable</span>
+              <select id="filter-usable" aria-label="Usable">
+                <option value="">Usable any</option>
+                <option value="true">Usable</option>
+                <option value="false">Unusable</option>
+              </select>
+            </label>
+            <label class="filter-control"><span class="sr-only">Blur required</span>
+              <select id="filter-blur" aria-label="Blur required">
+                <option value="">Blur any</option>
+                <option value="true">Blur required</option>
+                <option value="false">No blur needed</option>
+              </select>
+            </label>
+            <label class="filter-control"><span class="sr-only">Collection</span>
+              <select id="filter-collection" aria-label="Collection">
+                <option value="">Any collection</option>
+              </select>
+            </label>
+            <label class="filter-control"><span class="sr-only">Version stack</span>
+              <select id="filter-stack" aria-label="Version stack">
+                <option value="">Any stack</option>
+              </select>
+            </label>
+            <input id="filter-context" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Context" aria-label="Context key" />
+            <input id="filter-search" type="search" autocomplete="off" spellcheck="false"
+              placeholder="File name…" aria-label="Search file names" />
+            <button id="filter-apply" class="button secondary" type="submit">Apply</button>
+            <button id="filter-reset" class="button secondary" type="button">Reset</button>
+          </form>
+          <form id="saved-search-form" class="saved-search-form">
+            <label class="filter-control"><span class="sr-only">Saved searches</span>
+              <select id="saved-search-select" aria-label="Saved searches">
+                <option value="">Saved searches…</option>
+              </select>
+            </label>
+            <button id="saved-search-load" class="button secondary small" type="button" disabled>Load</button>
+            <button id="saved-search-delete" class="button danger small" type="button" disabled>Delete</button>
+            <input id="saved-search-name" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Save current filters as…" aria-label="Saved search name" />
+            <button id="saved-search-save" class="button secondary small" type="submit">Save</button>
+          </form>
+        </section>
+
+        <div id="batch-bar" class="batch-bar" hidden>
+          <span id="batch-count" class="batch-count"></span>
+          <button id="batch-pick" class="button secondary small" type="button">Pick</button>
+          <button id="batch-reject" class="button secondary small" type="button">Reject</button>
+          <label class="filter-control"><span class="sr-only">Rate selected</span>
+            <select id="batch-rating" aria-label="Rate selected">
+              <option value="">Rate…</option><option value="1">★ 1</option><option value="2">★ 2</option>
+              <option value="3">★ 3</option><option value="4">★ 4</option><option value="5">★ 5</option>
+            </select>
+          </label>
+          <label class="filter-control"><span class="sr-only">Add selected to collection</span>
+            <select id="batch-collection" aria-label="Add selected to collection">
+              <option value="">Add to collection…</option>
+            </select>
+          </label>
+          <button id="batch-add-collection" class="button secondary small" type="button" disabled>Add</button>
+          <button id="batch-clear" class="button secondary small" type="button">Clear selection</button>
+        </div>
+
+        <section id="review-content" class="review-content" aria-live="polite">
+          <div id="review-empty" class="empty-state muted" hidden>
+            <p>No photos or shots match these filters.</p>
+          </div>
+          <div id="review-grid" class="review-grid" hidden></div>
+        </section>
+      </main>
+
       <aside id="detail" class="detail-panel" role="dialog" aria-label="Asset detail" tabindex="-1" hidden>
         <div class="detail-head">
           <div>
@@ -216,6 +327,7 @@
           <button id="copy-timecodes" class="button secondary" type="button">Copy path + timecodes</button>
           <button id="export-clip" class="button secondary" type="button">Export clip…</button>
           <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>
+          <button id="compare-open" class="button secondary" type="button">Compare…</button>
         </div>
         <div class="detail-feedback" aria-label="Editorial feedback">
           <span class="eyebrow">Teach my style</span>
@@ -235,6 +347,49 @@
           </select>
           <button id="detail-add-style" class="button secondary" type="button" disabled>Add to set</button>
         </div>
+        <div class="detail-safety" aria-label="Safety flags">
+          <span class="eyebrow">Safety flags</span>
+          <div class="flag-grid">
+            <label><input id="safety-faces" type="checkbox" /> Faces visible</label>
+            <label><input id="safety-nametags" type="checkbox" /> Nametags visible</label>
+            <label><input id="safety-blur" type="checkbox" /> Blur required</label>
+            <label><input id="safety-usable" type="checkbox" /> Usable</label>
+          </div>
+          <button id="safety-apply" class="button secondary small" type="button" disabled>Apply flags</button>
+        </div>
+        <div class="detail-metadata" aria-label="Editorial metadata">
+          <span class="eyebrow">Metadata</span>
+          <input id="meta-description" type="text" autocomplete="off" spellcheck="false"
+            placeholder="Description" aria-label="Description" />
+          <input id="meta-subjects" type="text" autocomplete="off" spellcheck="false"
+            placeholder="Subjects" aria-label="Subjects" />
+          <input id="meta-action" type="text" autocomplete="off" spellcheck="false"
+            placeholder="Action" aria-label="Action" />
+          <input id="meta-tags" type="text" autocomplete="off" spellcheck="false"
+            placeholder="Tags" aria-label="Tags" />
+          <input id="meta-notes" type="text" autocomplete="off" spellcheck="false"
+            placeholder="Notes" aria-label="Notes" />
+          <button id="metadata-save" class="button secondary small" type="button">Save metadata</button>
+        </div>
+        <div class="detail-stacks" aria-label="Version stacks">
+          <span class="eyebrow">Version stacks</span>
+          <div class="stack-controls">
+            <select id="detail-stack" aria-label="Version stack">
+              <option value="">No stacks yet</option>
+            </select>
+            <select id="detail-stack-role" aria-label="Stack role">
+              <option value="derived">Derived</option>
+              <option value="original">Original</option>
+            </select>
+            <button id="detail-add-stack" class="button secondary small" type="button" disabled>Add</button>
+          </div>
+          <div class="stack-create-controls">
+            <input id="stack-new-name" type="text" autocomplete="off" spellcheck="false"
+              placeholder="New stack name" aria-label="New stack name" />
+            <button id="stack-create" class="button secondary small" type="button">Create</button>
+          </div>
+          <div id="detail-stack-memberships" class="detail-stack-memberships"></div>
+        </div>
         <div class="detail-nav">
           <button id="prev-shot" class="button secondary" type="button">← Prev shot</button>
           <button id="next-shot" class="button secondary" type="button">Next shot →</button>
@@ -245,6 +400,32 @@
         </section>
       </aside>
     </div>
+
+    <dialog id="compare-dialog" class="compare-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Pairwise compare</p>
+          <h2>Which is better?</h2>
+        </div>
+        <button id="compare-close" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="compare-grid">
+        <div class="compare-side" id="compare-side-a">
+          <p class="compare-label">A</p>
+          <div class="compare-media" id="compare-media-a"></div>
+          <select id="compare-select-a" aria-label="Asset A"></select>
+          <p id="compare-status-a" class="compare-status" role="status"></p>
+        </div>
+        <div class="compare-side" id="compare-side-b">
+          <p class="compare-label">B</p>
+          <div class="compare-media" id="compare-media-b"></div>
+          <select id="compare-select-b" aria-label="Asset B"></select>
+          <p id="compare-status-b" class="compare-status" role="status"></p>
+        </div>
+      </div>
+      <p class="compare-hint">← → focus side · Enter prefer focused · p pick · x reject · 1–5 rate
+        focused · ⌥← ⌥→ change B</p>
+    </dialog>
 
     <dialog id="doctor-dialog" class="doctor-dialog">
       <div class="dialog-heading">
