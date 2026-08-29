@@ -1442,6 +1442,11 @@ mod macos {
                         }
                     }
                 };
+            let tags_edited = patch.tags.is_some();
+            let copy_edited = patch.description.is_some()
+                || patch.subjects.is_some()
+                || patch.action.is_some()
+                || patch.notes.is_some();
             if let Some(value) = patch.description {
                 annotation.description = value;
             }
@@ -1473,14 +1478,10 @@ mod macos {
             store.upsert_editorial_annotation(DEFAULT_OWNER_ID, &annotation)?;
 
             let mut signals: Vec<(FeedbackSignal, Option<f64>)> = Vec::new();
-            if patch.tags.is_some() {
+            if tags_edited {
                 signals.push((FeedbackSignal::Tag, None));
             }
-            if patch.description.is_some()
-                || patch.subjects.is_some()
-                || patch.action.is_some()
-                || patch.notes.is_some()
-            {
+            if copy_edited {
                 signals.push((FeedbackSignal::Edit, None));
             }
             if patch.crop_x.is_some() {
