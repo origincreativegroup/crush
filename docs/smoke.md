@@ -46,3 +46,21 @@ checkout present: Y/N. Artifact label: signed-notarized / ad-hoc. DMG SHA-256 ve
 
 Result: Pass / Needs fixes / Blocked. Reviewer: __. Date: __. Release may not be published as
 accepted until the Task 021 render-golden review and this human clean-machine record are complete.
+
+## Pre-clean-machine tooling run — 2026-08-30, dev M4 Pro host, build 838d557 (not an acceptance run)
+
+Environment: developer machine, NOT a fresh account/VM; Xcode/Rust/Node/source checkout present,
+so the clean-machine route could not be honestly executed. Artifact: `/Applications/Crush.app`,
+bundle version 0.0.1, **ad-hoc signature** (`flags=0x10002 adhoc,runtime`) — not notarized; no DMG
+exists to verify a `.dmg.sha256` against.
+
+- `scripts/verify-release.sh`: PASS — app sha256 `a2b18191f6135c57274f81d43a6b59bda1c38779f3bb86ac2275f196c70dad8b`,
+  codesign deep-strict verify PASS (ad-hoc), bundled sidecars present, models green, database
+  integrity clean, doctor `active=coreml providers=cpu,coreml`, whisper Metal, 24 GiB RAM.
+  Note: on this host doctor resolved ffmpeg from the source checkout (`target/debug/ffmpeg`) —
+  impossible on a clean machine, which is itself proof this was not a clean-machine run.
+
+Clean-machine route: **NOT EXECUTED** — every checklist item above remains open. Result: **Blocked**
+(not runnable here; also downstream-blocked by the Task 021 render-golden review, which rejected
+the ordered-reel artifact on 2026-08-30 — see `docs/task-021-render-review.md`). Reviewer: acting
+reviewer for the human hard stop. Date: 2026-08-30. No release claim is made or implied.

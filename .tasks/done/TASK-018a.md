@@ -34,3 +34,22 @@ with personal_affinity and context_fit (penalties exported separately); no-profi
 to the general ranker (test-enforced); ranking-time gate re-check ignores unlearned profiles.
 crushctl style retrain/status/reset. HUMAN HARD STOP (docs/HANDOFF.md): the held-out style proof output
 in PR #25 requires John's review before the UI may claim learned status (018b).
+
+## Held-out style proof review — 2026-08-30 (human hard stop, acting reviewer)
+
+- Probes re-run on current HEAD (`838d557`): planted-direction 12 held-out pairs, personal 1.00 vs
+  baseline 0.50 → `learned=true`; identical-vector noise 12 pairs, 0.00 vs 0.50 → `learned=false`.
+  Both tests self-label "not human approval". Gate logic in `crates/search/src/style/eval.rs`
+  verified: deterministic every-3rd split, ties count as failures, ≥4 pairs and ≥0.6 floors,
+  strict improvement required, ranking-time re-check ignores unlearned profiles.
+- UI claim status verified on HEAD: `crates/app/ui/style.js` renders even an automated-`learned`
+  profile as "Experimental preferences · human review pending"; `plans.js` says "Human proof
+  review pending". No surface claims "learned".
+- Approval of a "learned" claim is WITHHELD. The recorded probes are synthetic regression checks,
+  not unseen-work proof: `docs/review-2026-08-29.md` finding 2 (pair-level split reuses media
+  across train/eval; the composed production ranker is not what is evaluated) and finding 3
+  (evidence-withdrawal semantics) are unremediated — TASK-032 remains in backlog.
+- Gate outcome: Task 018 held-out style proof remains OPEN until asset/project-disjoint
+  evaluation of the composed ranker, repeated/conflicting-evidence controls, evidence-withdrawal
+  tests, and representative user review are recorded. The honest UI copy is correct as shipped and
+  must not change until then.
