@@ -3997,6 +3997,212 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
 }
 
 #[test]
+fn reel_recipe_v2_round_trips_reel_studio_intent_and_keeps_v1_compatible() {
+    let directory = TestDir::new("reel-recipe-v2");
+    let store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 20, 0, 0).unwrap();
+    let schema = serde_json::json!({
+        "schema_version": 2,
+        "kind": "reel",
+        "provenance": {
+            "origin": "historical",
+            "source": "reel_studio",
+            "external_id": "healthy-earth-final",
+            "profile_version": null
+        },
+        "theme": "Healthy Earth",
+        "vibe": "bright",
+        "music": "music/bright/example-track.mp3",
+        "target_seconds": 30.0,
+        "beat_snap": true,
+        "format": "9:16",
+        "music_volume": 82.0,
+        "watermark": "br",
+        "cover": {"id": "V1-0001_S1", "time": 2.4},
+        "sequence": [
+            {
+                "id": "V1-0001_S1",
+                "in": 1.0,
+                "out": 4.0,
+                "crop_x": 0.42,
+                "crop_kf": [{"t": 1.0, "x": 0.42}, {"t": 3.4, "x": 0.61}],
+                "caption": "A short warm opening line",
+                "cap_pos": "low",
+                "transition": "mix",
+                "speed": 1.0,
+                "motion": "in",
+                "clip_volume": 12.0,
+                "grade": {"b": 103, "c": 104, "s": 106, "t": 26, "h": 0,
+                          "v": 14, "sh": 8, "hl": 0}
+            },
+            {
+                "id": "V1-0002_S1",
+                "in": 2.0,
+                "out": 5.0,
+                "crop_x": 0.34,
+                "crop_kf": [],
+                "caption": null,
+                "cap_pos": "mid",
+                "transition": "cut",
+                "speed": 0.75,
+                "motion": "none",
+                "clip_volume": 0,
+                "grade": {"b": 100, "c": 100, "s": 100, "t": 0, "h": 0,
+                          "v": 0, "sh": 0, "hl": 0}
+            }
+        ],
+        "crops": {"V1-0001_S1": 0.42, "V1-0002_S1": 0.34},
+        "output": {"preset": "mp4-h264-sdr-v1"}
+    });
+    let recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "historical-reel".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Reel,
+        name: "Healthy Earth final".to_owned(),
+        schema_json: schema.to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+    assert_eq!(
+        store
+            .render_recipe_get(DEFAULT_OWNER_ID, "historical-reel", 1)
+            .unwrap(),
+        Some(recipe)
+    );
+
+    // Schema v1 remains valid and frozen rather than being reinterpreted as the richer v2 shape.
+    let v1 = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "legacy-reel".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Reel,
+        name: "Legacy reel".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "reel",
+            "transition": {"kind": "cut"},
+            "audio": {"mode": "source"},
+            "output": {"preset": "mov-h264-sdr-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store.render_recipe_create(DEFAULT_OWNER_ID, &v1).unwrap();
+}
+
+#[test]
+fn reel_recipe_v2_rejects_unknown_or_incoherent_historical_intent() {
+    let directory = TestDir::new("reel-recipe-v2-invalid");
+    let store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 20, 0, 0).unwrap();
+    let valid = serde_json::json!({
+        "schema_version": 2,
+        "kind": "reel",
+        "provenance": {
+            "origin": "imported",
+            "source": "reel_studio",
+            "external_id": "reel-1",
+            "profile_version": null
+        },
+        "theme": null,
+        "vibe": null,
+        "music": null,
+        "target_seconds": null,
+        "beat_snap": false,
+        "format": "4:5",
+        "music_volume": 100,
+        "watermark": null,
+        "cover": null,
+        "sequence": [{
+            "id": "V1-0001_S1",
+            "in": 1.0,
+            "out": 4.0,
+            "crop_x": 0.5,
+            "crop_kf": [{"t": 1.0, "x": 0.5}, {"t": 4.0, "x": 0.6}],
+            "caption": null,
+            "cap_pos": "low",
+            "transition": "cut",
+            "speed": 1.0,
+            "motion": "none",
+            "clip_volume": 0,
+            "grade": {"b": 100, "c": 100, "s": 100, "t": 0, "h": 0,
+                      "v": 0, "sh": 0, "hl": 0}
+        }],
+        "crops": {"V1-0001_S1": 0.5},
+        "output": {"preset": "mp4-h264-sdr-v1"}
+    });
+    let rejected = |id: &str, schema: serde_json::Value| {
+        store
+            .render_recipe_create(
+                DEFAULT_OWNER_ID,
+                &RenderRecipe {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    id: id.to_owned(),
+                    version: 1,
+                    kind: RenderRecipeKind::Reel,
+                    name: id.to_owned(),
+                    schema_json: schema.to_string(),
+                    created_at: now,
+                },
+            )
+            .is_err()
+    };
+
+    let mut unknown_root = valid.clone();
+    unknown_root["renderer_guess"] = serde_json::json!(true);
+    assert!(rejected("unknown-root", unknown_root));
+
+    let mut unknown_item = valid.clone();
+    unknown_item["sequence"][0]["filter"] = serde_json::json!("cinematic");
+    assert!(rejected("unknown-item", unknown_item));
+
+    let mut bad_grade = valid.clone();
+    bad_grade["sequence"][0]["grade"]["lut"] = serde_json::json!("mystery.cube");
+    assert!(rejected("unknown-grade", bad_grade));
+
+    let mut bad_keyframes = valid.clone();
+    bad_keyframes["sequence"][0]["crop_kf"] =
+        serde_json::json!([{"t": 3.0, "x": 0.5}, {"t": 2.0, "x": 0.6}]);
+    assert!(rejected("bad-keyframes", bad_keyframes));
+
+    let mut bad_crop = valid.clone();
+    bad_crop["crops"]["V1-0001_S1"] = serde_json::json!(0.75);
+    assert!(rejected("mismatched-crop", bad_crop));
+
+    let mut windows_traversal = valid.clone();
+    windows_traversal["music"] = serde_json::json!(r#"music\..\private\track.mp3"#);
+    assert!(rejected("windows-music-traversal", windows_traversal));
+
+    let mut forged_profile = valid.clone();
+    forged_profile["provenance"]["profile_version"] = serde_json::json!(4);
+    assert!(rejected("forged-profile", forged_profile));
+
+    let mut missing_external_id = valid.clone();
+    missing_external_id["provenance"]["external_id"] = serde_json::Value::Null;
+    assert!(rejected("missing-external-id", missing_external_id));
+
+    let mut wrong_cover = valid.clone();
+    wrong_cover["cover"] = serde_json::json!({"id": "V1-missing", "time": 2.0});
+    assert!(rejected("wrong-cover", wrong_cover));
+
+    let clip_v2 = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "clip-v2".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::VideoClip,
+        name: "Not a reel".to_owned(),
+        schema_json: valid.to_string(),
+        created_at: now,
+    };
+    assert!(store
+        .render_recipe_create(DEFAULT_OWNER_ID, &clip_v2)
+        .is_err());
+}
+
+#[test]
 fn render_jobs_freeze_portable_inputs_and_verified_outputs() {
     let directory = TestDir::new("render-contract");
     let mut store = Store::open(directory.path()).unwrap();
@@ -4008,6 +4214,9 @@ fn render_jobs_freeze_portable_inputs_and_verified_outputs() {
     let source_path = directory.path().join("original.jpg");
     let destination = directory.path().join("exports/hero.jpg");
     let staging = directory.path().join("exports/.crush-render/job-1.partial");
+    let mut source_photo = reference_photo("photo-hero", &source_hash);
+    source_photo.path = source_path.to_string_lossy().into_owned();
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
 
     let recipe = RenderRecipe {
         owner_id: DEFAULT_OWNER_ID.to_owned(),
@@ -4079,6 +4288,19 @@ fn render_jobs_freeze_portable_inputs_and_verified_outputs() {
     assert_eq!(job.model_versions_json, model_versions);
     assert!(job.frozen_recipe_json.contains("photo-web"));
     assert!(job.frozen_recipe_json.contains("jpeg-srgb-v1"));
+
+    // A legitimate relink happens after queueing: the job keeps the original audit path while
+    // execution will resolve the current owner-scoped row by ID and verify its stored/file hash.
+    source_photo.path = "/relinked/library/original.jpg".to_owned();
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+    assert_eq!(
+        store
+            .photo_by_id(DEFAULT_OWNER_ID, "photo-hero")
+            .unwrap()
+            .unwrap()
+            .path,
+        source_photo.path
+    );
 
     assert!(audit
         .execute(
@@ -4205,6 +4427,13 @@ fn render_contract_rejects_unsupported_or_cross_owner_intent_and_retries_safely(
     store
         .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
         .unwrap();
+    let mut owned_video = video("video-1", &"d".repeat(64));
+    owned_video.path = directory
+        .path()
+        .join("source.mov")
+        .to_string_lossy()
+        .into_owned();
+    store.upsert_video(DEFAULT_OWNER_ID, &owned_video).unwrap();
     recipe.id = "unsupported".to_owned();
     recipe.schema_json = recipe
         .schema_json
@@ -4244,7 +4473,63 @@ fn render_contract_rejects_unsupported_or_cross_owner_intent_and_retries_safely(
             .into_owned(),
         created_at: now,
     };
-    assert!(store.render_job_create(OWNER_B, &request).is_err());
+    // A recipe owned by another owner still cannot bind a local owner's source row.
+    let mut owner_b_recipe = recipe.clone();
+    owner_b_recipe.owner_id = OWNER_B.to_owned();
+    owner_b_recipe.id = "clip-owner-b".to_owned();
+    owner_b_recipe.schema_json = serde_json::json!({
+        "schema_version": 1,
+        "kind": "video_clip",
+        "in_s": 1.0,
+        "out_s": 3.0,
+        "crop": null,
+        "grade": {"mode": "none"},
+        "transition": {"kind": "cut"},
+        "audio": {"mode": "source"},
+        "output": {"preset": "mp4-h264-sdr-v1"}
+    })
+    .to_string();
+    store
+        .render_recipe_create(OWNER_B, &owner_b_recipe)
+        .unwrap();
+    let mut cross_owner = request.clone();
+    cross_owner.id = "render-cross-owner".to_owned();
+    cross_owner.recipe_id = owner_b_recipe.id;
+    assert!(store.render_job_create(OWNER_B, &cross_owner).is_err());
+
+    // Snapshot JSON alone cannot invent an arbitrary source or substitute another content hash.
+    let mut arbitrary_source = request.clone();
+    arbitrary_source.id = "render-arbitrary-source".to_owned();
+    let mut arbitrary_json: serde_json::Value =
+        serde_json::from_str(&arbitrary_source.source_snapshot_json).unwrap();
+    arbitrary_json["sources"][0]["media_id"] = serde_json::json!("video-missing");
+    arbitrary_json["sources"][0]["source_id"] = serde_json::json!("video-missing");
+    arbitrary_source.source_snapshot_json = arbitrary_json.to_string();
+    assert!(store
+        .render_job_create(DEFAULT_OWNER_ID, &arbitrary_source)
+        .is_err());
+
+    let mut forged_hash = request.clone();
+    forged_hash.id = "render-forged-hash".to_owned();
+    let mut forged_json: serde_json::Value =
+        serde_json::from_str(&forged_hash.source_snapshot_json).unwrap();
+    forged_json["sources"][0]["sha256"] = serde_json::json!("e".repeat(64));
+    forged_hash.source_snapshot_json = forged_json.to_string();
+    assert!(store
+        .render_job_create(DEFAULT_OWNER_ID, &forged_hash)
+        .is_err());
+
+    let mut forged_path = request.clone();
+    forged_path.id = "render-forged-path".to_owned();
+    let mut forged_path_json: serde_json::Value =
+        serde_json::from_str(&forged_path.source_snapshot_json).unwrap();
+    forged_path_json["sources"][0]["path"] =
+        serde_json::json!(directory.path().join("not-the-library-source.mov"));
+    forged_path.source_snapshot_json = forged_path_json.to_string();
+    assert!(store
+        .render_job_create(DEFAULT_OWNER_ID, &forged_path)
+        .is_err());
+
     store.render_job_create(DEFAULT_OWNER_ID, &request).unwrap();
     let first_staging = directory.path().join(".render-retry-1/clip.partial");
     store

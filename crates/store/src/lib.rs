@@ -2767,6 +2767,7 @@ impl Store {
                     job.recipe_id, job.recipe_version
                 )
             })?;
+        self.validate_render_source_ownership(owner_id, recipe.kind, &job.source_snapshot_json)?;
         let frozen_plan = match (&job.plan_id, job.plan_revision) {
             (Some(plan_id), Some(revision)) => Some(
                 self.connection
@@ -2830,6 +2831,109 @@ impl Store {
         transaction.commit()?;
         self.render_job_by_id(owner_id, &job.id)?
             .context("queued render job could not be read back")
+    }
+
+    /// Bind a queued render to media that actually belongs to this owner. At queue time the IDs,
+    /// stored SHA-256, and current library path must all match so the frozen audit path cannot be
+    /// forged. A later legitimate relink may update the library row; execution resolves that
+    /// current row by ID and rechecks both its stored hash and the file's bytes.
+    fn validate_render_source_ownership(
+        &self,
+        owner_id: &str,
+        recipe_kind: RenderRecipeKind,
+        snapshot_json: &str,
+    ) -> anyhow::Result<()> {
+        let parsed: serde_json::Value = serde_json::from_str(snapshot_json)
+            .context("validated render source snapshot could not be parsed")?;
+        let sources = parsed
+            .get("sources")
+            .and_then(serde_json::Value::as_array)
+            .context("validated render source snapshot has no sources array")?;
+        match recipe_kind {
+            RenderRecipeKind::Photo => ensure!(
+                sources.len() == 1
+                    && sources[0]
+                        .get("media_kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("photo"),
+                "photo recipes require exactly one owned photo source"
+            ),
+            RenderRecipeKind::VideoClip => ensure!(
+                sources.len() == 1
+                    && matches!(
+                        sources[0]
+                            .get("media_kind")
+                            .and_then(serde_json::Value::as_str),
+                        Some("video" | "shot")
+                    ),
+                "video clip recipes require exactly one owned video or shot source"
+            ),
+            RenderRecipeKind::Reel => ensure!(
+                sources.iter().all(|source| matches!(
+                    source.get("media_kind").and_then(serde_json::Value::as_str),
+                    Some("photo" | "shot")
+                )),
+                "reel recipes require owned photo or shot sources"
+            ),
+        }
+
+        for (index, source) in sources.iter().enumerate() {
+            let source = source
+                .as_object()
+                .with_context(|| format!("validated render source {index} is not an object"))?;
+            let media_kind = required_json_string(source, "media_kind", "render source")?;
+            let media_id = required_json_string(source, "media_id", "render source")?;
+            let source_id = required_json_string(source, "source_id", "render source")?;
+            let snapshot_hash = required_json_string(source, "sha256", "render source")?;
+            let snapshot_path = required_json_string(source, "path", "render source")?;
+            let (stored_hash, stored_path) = match media_kind {
+                "photo" => {
+                    let photo = self.photo_by_id(owner_id, media_id)?.with_context(|| {
+                        format!("render photo {media_id} is not owned by {owner_id}")
+                    })?;
+                    ensure!(
+                        source_id == photo.id,
+                        "render photo source_id must match its media_id"
+                    );
+                    (photo.sha256, photo.path)
+                }
+                "video" => {
+                    let video = self.video_by_id(owner_id, media_id)?.with_context(|| {
+                        format!("render video {media_id} is not owned by {owner_id}")
+                    })?;
+                    ensure!(
+                        source_id == video.id,
+                        "render video source_id must match its media_id"
+                    );
+                    (video.sha256, video.path)
+                }
+                "shot" => {
+                    let shot = self.shot_by_id(owner_id, media_id)?.with_context(|| {
+                        format!("render shot {media_id} is not owned by {owner_id}")
+                    })?;
+                    ensure!(
+                        source_id == shot.video_id,
+                        "render shot source_id must identify its owning video"
+                    );
+                    let video = self
+                        .video_by_id(owner_id, &shot.video_id)?
+                        .with_context(|| {
+                            format!("render shot {media_id} has no owned source video")
+                        })?;
+                    (video.sha256, video.path)
+                }
+                other => bail!("unsupported render source media_kind {other:?}"),
+            };
+            ensure!(
+                stored_hash.eq_ignore_ascii_case(snapshot_hash),
+                "render source {media_kind}:{media_id} SHA-256 does not match the owned library record"
+            );
+            ensure!(
+                stored_path == snapshot_path,
+                "render source {media_kind}:{media_id} path does not match the current owned library record"
+            );
+        }
+        Ok(())
     }
 
     pub fn render_job_by_id(
@@ -6217,6 +6321,25 @@ fn validate_render_recipe_json(kind: RenderRecipeKind, value: &str) -> anyhow::R
     let object = parsed
         .as_object()
         .context("render recipe schema must be a JSON object")?;
+    let schema_version = object
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .context("render recipe schema_version must be an unsigned integer")?;
+    match schema_version {
+        1 => validate_render_recipe_v1(kind, object),
+        2 if kind == RenderRecipeKind::Reel => validate_reel_recipe_v2(object),
+        2 => bail!("render recipe schema_version 2 is supported only for reel recipes"),
+        other => bail!("unsupported render recipe schema_version {other}"),
+    }
+}
+
+/// The original Task 021 recipe contract remains frozen and accepted exactly as shipped. New
+/// reel features belong to a new schema version so adding importer compatibility cannot silently
+/// reinterpret an already-queued v1 job.
+fn validate_render_recipe_v1(
+    kind: RenderRecipeKind,
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
     ensure_json_keys(
         object,
         match kind {
@@ -6298,6 +6421,410 @@ fn validate_render_recipe_json(kind: RenderRecipeKind, value: &str) -> anyhow::R
             )?;
         }
     }
+    Ok(())
+}
+
+/// Closed, explicit Reel Studio-compatible reel recipe. Optional Reel Studio values are frozen
+/// as JSON nulls instead of omitted, which keeps manifests deterministic and makes unsupported
+/// intent fail at recipe creation rather than disappear during rendering.
+fn validate_reel_recipe_v2(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<()> {
+    ensure_json_keys(
+        object,
+        &[
+            "schema_version",
+            "kind",
+            "provenance",
+            "theme",
+            "vibe",
+            "music",
+            "target_seconds",
+            "beat_snap",
+            "format",
+            "music_volume",
+            "watermark",
+            "cover",
+            "sequence",
+            "crops",
+            "output",
+        ],
+        "reel recipe v2",
+    )?;
+    ensure!(
+        object
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2),
+        "reel recipe v2 schema_version must be 2"
+    );
+    ensure!(
+        object.get("kind").and_then(serde_json::Value::as_str) == Some("reel"),
+        "reel recipe v2 kind must be reel"
+    );
+    validate_reel_provenance(object.get("provenance").expect("key set checked"))?;
+    validate_nullable_string(object.get("theme").expect("key set checked"), "reel theme")?;
+    validate_nullable_enum(
+        object.get("vibe").expect("key set checked"),
+        &["bright", "electro", "trap"],
+        "reel vibe",
+    )?;
+    validate_nullable_relative_path(object.get("music").expect("key set checked"), "reel music")?;
+    validate_nullable_positive_number(
+        object.get("target_seconds").expect("key set checked"),
+        "reel target_seconds",
+    )?;
+    ensure!(
+        object
+            .get("beat_snap")
+            .is_some_and(serde_json::Value::is_boolean),
+        "reel beat_snap must be a boolean"
+    );
+    ensure!(
+        matches!(
+            object.get("format").and_then(serde_json::Value::as_str),
+            Some("9:16" | "4:5" | "1:1" | "16:9")
+        ),
+        "reel format must be 9:16, 4:5, 1:1, or 16:9"
+    );
+    validate_percentage(
+        object.get("music_volume").expect("key set checked"),
+        "reel music_volume",
+    )?;
+    validate_nullable_enum(
+        object.get("watermark").expect("key set checked"),
+        &["tl", "tr", "bl", "br"],
+        "reel watermark",
+    )?;
+    validate_output_preset(
+        object.get("output").expect("key set checked"),
+        &["mp4-h264-sdr-v1", "mov-h264-sdr-v1"],
+    )?;
+
+    let sequence = object
+        .get("sequence")
+        .and_then(serde_json::Value::as_array)
+        .context("reel sequence must be an array")?;
+    ensure!(!sequence.is_empty(), "reel sequence must not be empty");
+    let mut segment_ids = HashSet::new();
+    let mut item_crops = std::collections::HashMap::new();
+    let mut item_spans = std::collections::HashMap::new();
+    for (index, item) in sequence.iter().enumerate() {
+        let item = item
+            .as_object()
+            .with_context(|| format!("reel sequence item {index} must be an object"))?;
+        ensure_json_keys(
+            item,
+            &[
+                "id",
+                "in",
+                "out",
+                "crop_x",
+                "crop_kf",
+                "caption",
+                "cap_pos",
+                "transition",
+                "speed",
+                "motion",
+                "clip_volume",
+                "grade",
+            ],
+            "reel sequence item",
+        )?;
+        let segment_id = required_json_string(item, "id", "reel sequence item")?;
+        ensure!(
+            segment_ids.insert(segment_id.to_owned()),
+            "reel sequence contains duplicate id {segment_id:?}"
+        );
+        let start = finite_json_number(item, "in", "reel sequence item")?;
+        let end = finite_json_number(item, "out", "reel sequence item")?;
+        ensure!(
+            start >= 0.0 && end > start,
+            "reel sequence item out must exceed non-negative in"
+        );
+        let crop_x = finite_json_number(item, "crop_x", "reel sequence item")?;
+        ensure_unit_score(crop_x, "reel sequence item crop_x")?;
+        validate_crop_keyframes(item.get("crop_kf").expect("key set checked"), start, end)?;
+        validate_nullable_string(
+            item.get("caption").expect("key set checked"),
+            "reel sequence item caption",
+        )?;
+        ensure!(
+            matches!(
+                item.get("cap_pos").and_then(serde_json::Value::as_str),
+                Some("low" | "mid" | "high")
+            ),
+            "reel sequence item cap_pos must be low, mid, or high"
+        );
+        ensure!(
+            matches!(
+                item.get("transition").and_then(serde_json::Value::as_str),
+                Some(
+                    "cut"
+                        | "mix"
+                        | "fade"
+                        | "white"
+                        | "slideL"
+                        | "slideR"
+                        | "slideU"
+                        | "wipeL"
+                        | "circle"
+                        | "blurmix"
+                        | "whip"
+                        | "zoom"
+                )
+            ),
+            "reel sequence item transition is unsupported"
+        );
+        let speed = finite_json_number(item, "speed", "reel sequence item")?;
+        ensure!(
+            (0.5..=2.0).contains(&speed),
+            "reel sequence item speed must be between 0.5 and 2"
+        );
+        ensure!(
+            matches!(
+                item.get("motion").and_then(serde_json::Value::as_str),
+                Some("none" | "in" | "out" | "left" | "right")
+            ),
+            "reel sequence item motion must be none, in, out, left, or right"
+        );
+        validate_percentage(
+            item.get("clip_volume").expect("key set checked"),
+            "reel sequence item clip_volume",
+        )?;
+        validate_reel_grade(item.get("grade").expect("key set checked"))?;
+        item_crops.insert(segment_id.to_owned(), crop_x);
+        item_spans.insert(segment_id.to_owned(), (start, end));
+    }
+
+    validate_reel_crops(object.get("crops").expect("key set checked"), &item_crops)?;
+    validate_reel_cover(
+        object.get("cover").expect("key set checked"),
+        &segment_ids,
+        &item_spans,
+    )
+}
+
+fn validate_reel_provenance(value: &serde_json::Value) -> anyhow::Result<()> {
+    let object = value
+        .as_object()
+        .context("reel provenance must be an object")?;
+    ensure_json_keys(
+        object,
+        &["origin", "source", "external_id", "profile_version"],
+        "reel provenance",
+    )?;
+    let origin = required_json_string(object, "origin", "reel provenance")?;
+    ensure!(
+        matches!(origin, "general" | "personal" | "historical" | "imported"),
+        "reel provenance origin must be general, personal, historical, or imported"
+    );
+    required_json_string(object, "source", "reel provenance")?;
+    validate_nullable_string(
+        object.get("external_id").expect("key set checked"),
+        "reel provenance external_id",
+    )?;
+    let profile_version = object.get("profile_version").expect("key set checked");
+    if origin == "personal" {
+        ensure!(
+            profile_version.as_i64().is_some_and(|version| version > 0),
+            "personal reel provenance requires a positive profile_version"
+        );
+    } else {
+        ensure!(
+            profile_version.is_null(),
+            "only personal reel provenance may carry profile_version"
+        );
+    }
+    if matches!(origin, "historical" | "imported") {
+        ensure!(
+            object
+                .get("external_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty()),
+            "historical or imported reel provenance requires external_id"
+        );
+    }
+    Ok(())
+}
+
+fn validate_crop_keyframes(value: &serde_json::Value, start: f64, end: f64) -> anyhow::Result<()> {
+    let keyframes = value
+        .as_array()
+        .context("reel sequence item crop_kf must be an array")?;
+    let mut previous = None;
+    for (index, keyframe) in keyframes.iter().enumerate() {
+        let object = keyframe
+            .as_object()
+            .with_context(|| format!("crop keyframe {index} must be an object"))?;
+        ensure_json_keys(object, &["t", "x"], "crop keyframe")?;
+        let time = finite_json_number(object, "t", "crop keyframe")?;
+        let x = finite_json_number(object, "x", "crop keyframe")?;
+        ensure!(
+            (start..=end).contains(&time),
+            "crop keyframe time must stay inside the item in/out span"
+        );
+        ensure_unit_score(x, "crop keyframe x")?;
+        if let Some(previous) = previous {
+            ensure!(
+                time > previous,
+                "crop keyframe times must be strictly increasing"
+            );
+        }
+        previous = Some(time);
+    }
+    Ok(())
+}
+
+fn validate_reel_grade(value: &serde_json::Value) -> anyhow::Result<()> {
+    let object = value
+        .as_object()
+        .context("reel sequence item grade must be an object")?;
+    ensure_json_keys(
+        object,
+        &["b", "c", "s", "t", "h", "v", "sh", "hl"],
+        "reel sequence item grade",
+    )?;
+    for (key, minimum, maximum) in [
+        ("b", 60.0, 140.0),
+        ("c", 60.0, 140.0),
+        ("s", 0.0, 180.0),
+        ("t", -50.0, 50.0),
+        ("h", -30.0, 30.0),
+        ("v", -50.0, 50.0),
+        ("sh", -50.0, 50.0),
+        ("hl", -50.0, 50.0),
+    ] {
+        let value = finite_json_number(object, key, "reel sequence item grade")?;
+        ensure!(
+            (minimum..=maximum).contains(&value),
+            "reel sequence item grade {key} must be between {minimum} and {maximum}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_reel_crops(
+    value: &serde_json::Value,
+    item_crops: &std::collections::HashMap<String, f64>,
+) -> anyhow::Result<()> {
+    let crops = value.as_object().context("reel crops must be an object")?;
+    for (segment_id, value) in crops {
+        let crop_x = value
+            .as_f64()
+            .with_context(|| format!("reel crop for {segment_id:?} must be a number"))?;
+        ensure_unit_score(crop_x, "reel crop")?;
+        let item_crop = item_crops
+            .get(segment_id)
+            .with_context(|| format!("reel crops references unknown sequence id {segment_id:?}"))?;
+        ensure!(
+            crop_x == *item_crop,
+            "reel crop for {segment_id:?} must match the sequence item crop_x"
+        );
+    }
+    Ok(())
+}
+
+fn validate_reel_cover(
+    value: &serde_json::Value,
+    segment_ids: &HashSet<String>,
+    item_spans: &std::collections::HashMap<String, (f64, f64)>,
+) -> anyhow::Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let object = value
+        .as_object()
+        .context("reel cover must be null or an object")?;
+    ensure_json_keys(object, &["id", "time"], "reel cover")?;
+    let segment_id = required_json_string(object, "id", "reel cover")?;
+    ensure!(
+        segment_ids.contains(segment_id),
+        "reel cover references unknown sequence id {segment_id:?}"
+    );
+    let (start, end) = item_spans
+        .get(segment_id)
+        .with_context(|| format!("reel cover references unknown sequence id {segment_id:?}"))?;
+    let time = finite_json_number(object, "time", "reel cover")?;
+    ensure!(
+        (*start..=*end).contains(&time),
+        "reel cover time must stay inside the item in/out span"
+    );
+    Ok(())
+}
+
+fn validate_nullable_string(value: &serde_json::Value, name: &str) -> anyhow::Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    ensure!(
+        value.as_str().is_some_and(|value| !value.trim().is_empty()),
+        "{name} must be null or a non-empty string"
+    );
+    Ok(())
+}
+
+fn validate_nullable_enum(
+    value: &serde_json::Value,
+    allowed: &[&str],
+    name: &str,
+) -> anyhow::Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let value = value
+        .as_str()
+        .with_context(|| format!("{name} must be null or a string"))?;
+    ensure!(allowed.contains(&value), "unsupported {name} {value:?}");
+    Ok(())
+}
+
+fn validate_nullable_relative_path(value: &serde_json::Value, name: &str) -> anyhow::Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let value = value
+        .as_str()
+        .with_context(|| format!("{name} must be null or a string"))?;
+    ensure!(
+        safe_portable_relative_path(value),
+        "{name} must be a safe portable relative path"
+    );
+    Ok(())
+}
+
+/// Validate recipe-owned relative paths independent of the host running the import. In
+/// particular, Unix `Path` treats Windows backslashes and drive prefixes as ordinary characters,
+/// so relying on host parsing alone would accept traversal that becomes meaningful after relink.
+fn safe_portable_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('\0')
+        && !value.starts_with(['/', '\\'])
+        && !value.as_bytes().get(1).is_some_and(|byte| *byte == b':')
+        && value
+            .split(['/', '\\'])
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+fn validate_nullable_positive_number(value: &serde_json::Value, name: &str) -> anyhow::Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let value = value
+        .as_f64()
+        .with_context(|| format!("{name} must be null or a number"))?;
+    ensure!(value.is_finite() && value > 0.0, "{name} must be positive");
+    Ok(())
+}
+
+fn validate_percentage(value: &serde_json::Value, name: &str) -> anyhow::Result<()> {
+    let value = value
+        .as_f64()
+        .with_context(|| format!("{name} must be a number"))?;
+    ensure!(
+        value.is_finite() && (0.0..=100.0).contains(&value),
+        "{name} must be between 0 and 100"
+    );
     Ok(())
 }
 

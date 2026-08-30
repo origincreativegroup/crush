@@ -1,6 +1,6 @@
 # TASK-021 — implementation plan and progress
 
-Status: **in progress, durable safety/recipe foundation plus UX work**. The parent acceptance in `TASK-021.md`
+Status: **in progress, photo renderer and durable recovery implemented**. The parent acceptance in `TASK-021.md`
 is unchanged. This extends the existing engineering and editorial/DAM blueprints; it does
 not replace them. Task 022 stays next, after the render-golden human review.
 
@@ -112,9 +112,22 @@ The existing clip verifier does not constitute the full color/audio/frame golden
   incomplete attempt from the frozen recipe with tracked staging; never trust a partial
   output merely because its filename exists. Resume must be idempotent.
 
-Remaining in this section: connect the store state machine to pipeline execution/recovery, define
-the advanced reel schema required above, recheck frozen hashes at execution, and reconcile tracked
-staging after process/app death.
+The foundation and photo execution path in this section are complete. Video clips and reels will
+reuse the same source binding, state machine, manifest and recovery protocol.
+
+Implemented in the second slice:
+
+- Reel recipe schema v2 preserves Reel Studio's exact `sequence[].id`, `cover: {id,time}` and
+  `crops` keys plus every documented global/item treatment. Historical and imported origins are
+  distinct from general/personal provenance. Unknown fields and incoherent cross-references fail.
+- Queueing now binds every source to an owner-scoped photo/video/shot row and exact current path
+  and stored hash. Execution resolves the current owner-scoped row again, permitting a legitimate
+  post-queue relink only when content identity is unchanged, and hashes source bytes before and
+  after rendering.
+- The pipeline executes frozen photo jobs through running/verifying/done, creates owner/job/attempt
+  marked staging on the destination filesystem, publishes output plus manifest without overwrite,
+  and finalizes or safely fails interrupted attempts at app startup. Complete verifying
+  publications are recovered idempotently; unrecognized staging is preserved.
 
 ### 2. Photo derivatives and documented presets
 
@@ -128,6 +141,15 @@ staging after process/app death.
   high-bit-depth RAW/TIFF fidelity or claim unsupported source profiles are color-correct.
 - Strip private metadata by default and document any opt-in preservation. Retain source
   provenance in the manifest independently of embedded EXIF/GPS policy.
+
+Implemented in the second slice. [`docs/render-presets.md`](../../docs/render-presets.md) is the
+versioned contract. The CPU baseline performs actual ICC/CICP conversion through pinned pure-Rust
+`moxcms`, emits deterministic sRGB profiles, applies crop/rotation/basic grade, and produces
+exclusive-create JPEG/PNG/TIFF outputs. Unsupported high depth, unconvertible named color spaces,
+and transparent JPEG intent fail explicitly. Pipeline/store/app tests cover successful publication,
+source immutability, stale hashes, destination/manifest collisions, cancellation before start,
+owned-marker recovery, preservation of unknown directories, and finalization after a simulated
+post-publication crash.
 
 ### 3. Video clips and reels
 
@@ -173,6 +195,10 @@ staging after process/app death.
   smoke remains ignored. The targeted clip-export test passes again with source/existing
   output hash assertions. Format and diff checks pass. PR results are recorded separately
   from the unimplemented render-golden acceptance above.
-- `cargo test -p crush-store`: 35 tests pass, including the schema-v10 render contract, immutable
+- Initial store slice: 35 tests passed, including the schema-v10 render contract, immutable
   frozen inputs, owner isolation, unsupported-treatment rejection, retry/cancel and verified
   output/manifest state.
+- Second-slice verification: `cargo test -p crush-store` passes 37 tests; pipeline library tests
+  pass 20 tests; durable render integration passes 6 tests; app library tests pass 3 tests; targeted
+  store/pipeline clippy passes with warnings denied. These tests do not constitute the required
+  visual render-golden approval.

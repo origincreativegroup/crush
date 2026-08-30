@@ -14,7 +14,7 @@ mod macos {
     use crush_core::models::{self, ModelStatus};
     use crush_core::paths::AppPaths;
     use crush_core::{Config, DEFAULT_OWNER_ID};
-    use crush_pipeline::{IngestSummary, Pipeline};
+    use crush_pipeline::{render::RenderRecoverySummary, IngestSummary, Pipeline};
     use crush_search::{
         personal_style_score, retrain_style_profile, selects_candidates as rank_selects_candidates,
         AssetSearchResult, SearchEngine, SelectsCandidates,
@@ -2637,6 +2637,14 @@ mod macos {
         result.map_err(|error| format!("{error:#}"))
     }
 
+    fn recover_interrupted_renders(
+        config: &Config,
+        paths: &AppPaths,
+    ) -> anyhow::Result<RenderRecoverySummary> {
+        Pipeline::new(config.clone(), paths.clone(), CancellationToken::default())
+            .recover_interrupted_render_jobs(DEFAULT_OWNER_ID)
+    }
+
     pub fn run() {
         tauri::Builder::default()
             .plugin(tauri_plugin_clipboard_manager::init())
@@ -2649,6 +2657,13 @@ mod macos {
                 let mut config = Config::load(None)?;
                 config.data_dir = Some(data_dir.clone());
                 let paths = AppPaths::resolve(config.data_dir.as_ref())?;
+                let render_recovery = recover_interrupted_renders(&config, &paths)?;
+                eprintln!(
+                    "startup render recovery: finalized={} failed={} staging_removed={}",
+                    render_recovery.finalized,
+                    render_recovery.failed,
+                    render_recovery.staging_removed
+                );
                 let store = Store::open(&paths.root)?;
                 store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
                 let scope = app.asset_protocol_scope();
@@ -2794,6 +2809,19 @@ mod macos {
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
             assert!(report.contains("schema=10"));
+        }
+
+        #[test]
+        fn startup_render_recovery_accepts_an_empty_library() {
+            let temporary = tempfile::tempdir().unwrap();
+            let paths = AppPaths {
+                root: temporary.path().join("data"),
+            };
+            std::fs::create_dir_all(&paths.root).unwrap();
+
+            let summary = recover_interrupted_renders(&Config::default(), &paths).unwrap();
+
+            assert_eq!(summary, RenderRecoverySummary::default());
         }
     }
 }
