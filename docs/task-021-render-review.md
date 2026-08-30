@@ -4,7 +4,7 @@ This is the first persistent review packet for the Task 021 human hard stop. Aut
 passed before these files were retained, but that does not constitute visual, color, timing, or
 audio approval.
 
-Local packet: `target/render-golden-review/task-021-0724f08/`
+Local packet: `target/render-golden-review/task-021-pr37-initial/`
 
 ## Review order
 
