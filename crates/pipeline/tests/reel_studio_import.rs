@@ -4,17 +4,20 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crush_core::cancellation::CancellationToken;
-use crush_core::paths::AppPaths;
-use crush_core::Config;
 use crush_core::DEFAULT_OWNER_ID;
 use crush_pipeline::reel_studio_import::{import_reel_studio, ImportOptions};
-use crush_pipeline::{sha256_file, Pipeline};
+use crush_pipeline::sha256_file;
 use crush_store::{
     MediaKind, PlanOrigin, RenderRecipeKind, Shot, SpanBoundaryBasis, Store, Video, VideoStatus,
 };
-use crush_store::{NewRenderJob, RenderRecipe};
 use rusqlite::Connection;
+
+#[cfg(target_os = "macos")]
+use crush_core::{cancellation::CancellationToken, paths::AppPaths, Config};
+#[cfg(target_os = "macos")]
+use crush_pipeline::Pipeline;
+#[cfg(target_os = "macos")]
+use crush_store::{NewRenderJob, RenderRecipe};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -542,8 +545,10 @@ fn imported_span_project_renders_through_the_reel_executor() {
         )
         .unwrap();
     drop(store);
-    let mut config = Config::default();
-    config.data_dir = Some(data_dir.clone());
+    let config = Config {
+        data_dir: Some(data_dir.clone()),
+        ..Config::default()
+    };
     let paths = AppPaths::resolve(config.data_dir.as_ref()).unwrap();
     let output = Pipeline::new(config, paths, CancellationToken::default())
         .execute_render_job(DEFAULT_OWNER_ID, "render-imported-reel")
