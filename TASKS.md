@@ -62,6 +62,7 @@ validated ONNX export; the shipped app always retains a CPU path.
 | TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | backlog — next stretch |
 | TASK-034 | Imported-evidence search + explicit confirmation bridge (022 follow-up) | OpenCode | backlog — next stretch, after 021/022 merge |
 | TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | backlog — next stretch, after 021 merge; no golden changes |
+| TASK-036 | Ordered-reel boundary-frame drops (021 review rejection) | Lane A (Codex; OpenCode if idle) | **open — gates 021**; reel artifact re-render + human re-review required |
 
 ## OpenCode next stretch (2026-08-30)
 
