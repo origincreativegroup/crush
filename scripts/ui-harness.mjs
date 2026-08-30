@@ -58,11 +58,23 @@ const tests = {
     await poll(async () => await frame.locator("#plan-general .plans-candidate").count() === 2);
     assert.match(await visibleText(frame.locator("#plan-personal-status")), /Experimental preference profile v3.*review pending/);
     await frame.locator("#plan-general .plans-candidate").first().locator("button").click();
+    await frame.locator("#project-reel-choose").click();
+    assert.match(await frame.locator("#project-reel-destination").inputValue(), /Launch-selects\.mp4$/);
+    await frame.locator("#project-reel-render").click();
+    await frame.locator("#project-reel-result").waitFor({ state: "visible" });
+    assert.match(await visibleText(frame.locator("#project-reel-status")), /Reel rendered and verified/);
+    await frame.locator("#project-reel-result summary").click();
+    assert.match(await visibleText(frame.locator("#project-reel-verification")), /2\.75 seconds.*Output checksum/s);
+    const reelRenderCall = (await mockCalls(page)).find((call) => call.command === "render_project_reel");
+    assert.equal(reelRenderCall.args.projectId, "plan-1");
+    assert.equal(reelRenderCall.args.preset, "mp4-h264-sdr-v1");
     await frame.locator("#plan-personal .plans-candidate").first().locator("button").click();
     const items = frame.locator("#plan-items .plans-item");
     await poll(async () => await items.count() === 2);
     assert.equal(await visibleText(items.nth(0).locator(".plans-pill")), "General");
     assert.match(await visibleText(items.nth(1).locator(".plans-pill")), /Preference-assisted · profile v3/);
+    assert.equal(await frame.locator("#project-reel-render").isDisabled(), true);
+    assert.match(await visibleText(frame.locator("#project-reel-status")), /sequence includes photos/);
     // Sequence preview starts on the first clip and exposes visible, boundary-aware controls.
     await frame.locator("#project-preview").waitFor({ state: "visible" });
     assert.equal(await frame.locator("#project-preview-play").isVisible(), true);
@@ -94,7 +106,7 @@ const tests = {
     assert.match(await visibleText(frame.locator("#project-photo-output-path")), /select_export\.png$/);
     assert.match(await visibleText(frame.locator("#project-photo-manifest-path")), /crush-manifest\.json$/);
     await frame.locator("#project-photo-result summary").click();
-    assert.match(await visibleText(frame.locator("#project-photo-verification")), /2400 × 1600.*3.00 MB.*Photo checksum/s);
+    assert.match(await visibleText(frame.locator("#project-photo-verification")), /2400 × 1600.*3.00 MB.*Output checksum/s);
     await frame.locator("#project-photo-show-manifest").click();
     const renderCall = (await mockCalls(page)).find((call) => call.command === "render_project_photo");
     assert.equal(renderCall.args.projectId, "plan-1");

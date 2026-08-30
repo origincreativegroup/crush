@@ -2683,14 +2683,7 @@ impl Store {
         owner_id: &str,
         recipe: &RenderRecipe,
     ) -> anyhow::Result<()> {
-        ensure_owner_matches(owner_id, &recipe.owner_id, "render recipe")?;
-        ensure!(!recipe.id.trim().is_empty(), "recipe id must not be empty");
-        ensure!(recipe.version > 0, "recipe version must be positive");
-        ensure!(
-            !recipe.name.trim().is_empty(),
-            "recipe name must not be empty"
-        );
-        validate_render_recipe_json(recipe.kind, &recipe.schema_json)?;
+        validate_render_recipe_record(owner_id, recipe)?;
         self.connection
             .execute(
                 "INSERT INTO render_recipes
@@ -2751,14 +2744,6 @@ impl Store {
         owner_id: &str,
         job: &NewRenderJob,
     ) -> anyhow::Result<RenderJob> {
-        ensure!(!job.id.trim().is_empty(), "render job id must not be empty");
-        ensure!(
-            job.plan_id.is_some() == job.plan_revision.is_some(),
-            "plan id and revision must be supplied together"
-        );
-        validate_source_snapshot_json(&job.source_snapshot_json)?;
-        validate_model_versions_json(&job.model_versions_json)?;
-        validate_destination_path(&job.destination_path)?;
         let recipe = self
             .render_recipe_get(owner_id, &job.recipe_id, job.recipe_version)?
             .with_context(|| {
@@ -2767,7 +2752,89 @@ impl Store {
                     job.recipe_id, job.recipe_version
                 )
             })?;
-        self.validate_render_source_ownership(owner_id, recipe.kind, &job.source_snapshot_json)?;
+        let (frozen_plan, frozen_recipe) = self.prepare_render_job(owner_id, job, &recipe)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        insert_render_job(
+            &transaction,
+            owner_id,
+            job,
+            &recipe,
+            frozen_plan,
+            frozen_recipe,
+        )?;
+        transaction.commit()?;
+        self.render_job_by_id(owner_id, &job.id)?
+            .context("queued render job could not be read back")
+    }
+
+    /// Atomically insert a one-off immutable recipe and queue its first render job. If queueing
+    /// fails, the recipe insert is rolled back so append-only storage cannot accumulate recipes
+    /// that no job has ever referenced.
+    pub fn render_recipe_and_job_create(
+        &mut self,
+        owner_id: &str,
+        recipe: &RenderRecipe,
+        job: &NewRenderJob,
+    ) -> anyhow::Result<RenderJob> {
+        validate_render_recipe_record(owner_id, recipe)?;
+        ensure!(
+            job.recipe_id == recipe.id && job.recipe_version == recipe.version,
+            "render job must reference the recipe inserted with it"
+        );
+        let (frozen_plan, frozen_recipe) = self.prepare_render_job(owner_id, job, recipe)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction
+            .execute(
+                "INSERT INTO render_recipes
+                 (owner_id, id, version, kind, name, schema_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    owner_id,
+                    recipe.id,
+                    recipe.version,
+                    render_recipe_kind_to_str(recipe.kind),
+                    recipe.name,
+                    recipe.schema_json,
+                    recipe.created_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to create immutable render recipe")?;
+        insert_render_job(
+            &transaction,
+            owner_id,
+            job,
+            recipe,
+            frozen_plan,
+            frozen_recipe,
+        )?;
+        transaction.commit()?;
+        self.render_job_by_id(owner_id, &job.id)?
+            .context("queued render job could not be read back")
+    }
+
+    fn prepare_render_job(
+        &self,
+        owner_id: &str,
+        job: &NewRenderJob,
+        recipe: &RenderRecipe,
+    ) -> anyhow::Result<(Option<String>, String)> {
+        ensure!(!job.id.trim().is_empty(), "render job id must not be empty");
+        ensure!(
+            job.plan_id.is_some() == job.plan_revision.is_some(),
+            "plan id and revision must be supplied together"
+        );
+        validate_source_snapshot_json(&job.source_snapshot_json)?;
+        validate_model_versions_json(&job.model_versions_json)?;
+        validate_destination_path(&job.destination_path)?;
+        ensure!(
+            job.recipe_id == recipe.id && job.recipe_version == recipe.version,
+            "render job recipe identity does not match the resolved recipe"
+        );
+        self.validate_render_source_ownership(owner_id, recipe, &job.source_snapshot_json)?;
         let frozen_plan = match (&job.plan_id, job.plan_revision) {
             (Some(plan_id), Some(revision)) => Some(
                 self.connection
@@ -2799,38 +2866,7 @@ impl Store {
             "schema": recipe_schema,
         })
         .to_string();
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction
-            .execute(
-                "INSERT INTO render_jobs (
-                    owner_id, id, recipe_id, recipe_version, recipe_kind, frozen_recipe_json,
-                    plan_id, plan_revision, frozen_plan_json, source_snapshot_json,
-                    model_versions_json, destination_path, status, progress, current_attempt,
-                    created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                           'queued', 0.0, 0, ?13)",
-                params![
-                    owner_id,
-                    job.id,
-                    recipe.id,
-                    recipe.version,
-                    render_recipe_kind_to_str(recipe.kind),
-                    frozen_recipe,
-                    job.plan_id,
-                    job.plan_revision,
-                    frozen_plan,
-                    job.source_snapshot_json,
-                    job.model_versions_json,
-                    job.destination_path,
-                    job.created_at.to_rfc3339(),
-                ],
-            )
-            .context("failed to queue render job")?;
-        transaction.commit()?;
-        self.render_job_by_id(owner_id, &job.id)?
-            .context("queued render job could not be read back")
+        Ok((frozen_plan, frozen_recipe))
     }
 
     /// Bind a queued render to media that actually belongs to this owner. At queue time the IDs,
@@ -2840,7 +2876,7 @@ impl Store {
     fn validate_render_source_ownership(
         &self,
         owner_id: &str,
-        recipe_kind: RenderRecipeKind,
+        recipe: &RenderRecipe,
         snapshot_json: &str,
     ) -> anyhow::Result<()> {
         let parsed: serde_json::Value = serde_json::from_str(snapshot_json)
@@ -2849,7 +2885,7 @@ impl Store {
             .get("sources")
             .and_then(serde_json::Value::as_array)
             .context("validated render source snapshot has no sources array")?;
-        match recipe_kind {
+        match recipe.kind {
             RenderRecipeKind::Photo => ensure!(
                 sources.len() == 1
                     && sources[0]
@@ -2868,13 +2904,32 @@ impl Store {
                     ),
                 "video clip recipes require exactly one owned video or shot source"
             ),
-            RenderRecipeKind::Reel => ensure!(
-                sources.iter().all(|source| matches!(
-                    source.get("media_kind").and_then(serde_json::Value::as_str),
-                    Some("photo" | "shot")
-                )),
-                "reel recipes require owned photo or shot sources"
-            ),
+            RenderRecipeKind::Reel => {
+                let schema_version =
+                    serde_json::from_str::<serde_json::Value>(&recipe.schema_json)?
+                        .get("schema_version")
+                        .and_then(serde_json::Value::as_u64)
+                        .context("reel recipe schema_version is missing")?;
+                if schema_version == 1 {
+                    ensure!(
+                        sources.iter().all(|source| {
+                            source
+                                .get("media_kind")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("shot")
+                        }),
+                        "ordered reel v1 accepts shot sources only; photo holds need a versioned duration and framing contract"
+                    );
+                } else {
+                    ensure!(
+                        sources.iter().all(|source| matches!(
+                            source.get("media_kind").and_then(serde_json::Value::as_str),
+                            Some("photo" | "shot")
+                        )),
+                        "reel recipes require owned photo or shot sources"
+                    );
+                }
+            }
         }
 
         for (index, source) in sources.iter().enumerate() {
@@ -5509,6 +5564,54 @@ fn render_recipe_from_row(row: &Row<'_>) -> rusqlite::Result<RenderRecipe> {
         schema_json: row.get(5)?,
         created_at: timestamp_from_str(&created_at, 6)?,
     })
+}
+
+fn validate_render_recipe_record(owner_id: &str, recipe: &RenderRecipe) -> anyhow::Result<()> {
+    ensure_owner_matches(owner_id, &recipe.owner_id, "render recipe")?;
+    ensure!(!recipe.id.trim().is_empty(), "recipe id must not be empty");
+    ensure!(recipe.version > 0, "recipe version must be positive");
+    ensure!(
+        !recipe.name.trim().is_empty(),
+        "recipe name must not be empty"
+    );
+    validate_render_recipe_json(recipe.kind, &recipe.schema_json)
+}
+
+fn insert_render_job(
+    connection: &Connection,
+    owner_id: &str,
+    job: &NewRenderJob,
+    recipe: &RenderRecipe,
+    frozen_plan: Option<String>,
+    frozen_recipe: String,
+) -> anyhow::Result<()> {
+    connection
+        .execute(
+            "INSERT INTO render_jobs (
+                owner_id, id, recipe_id, recipe_version, recipe_kind, frozen_recipe_json,
+                plan_id, plan_revision, frozen_plan_json, source_snapshot_json,
+                model_versions_json, destination_path, status, progress, current_attempt,
+                created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                       'queued', 0.0, 0, ?13)",
+            params![
+                owner_id,
+                job.id,
+                recipe.id,
+                recipe.version,
+                render_recipe_kind_to_str(recipe.kind),
+                frozen_recipe,
+                job.plan_id,
+                job.plan_revision,
+                frozen_plan,
+                job.source_snapshot_json,
+                job.model_versions_json,
+                job.destination_path,
+                job.created_at.to_rfc3339(),
+            ],
+        )
+        .context("failed to queue render job")?;
+    Ok(())
 }
 
 fn render_job_from_row(row: &Row<'_>) -> rusqlite::Result<RenderJob> {

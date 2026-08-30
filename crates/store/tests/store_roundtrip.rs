@@ -4094,6 +4094,93 @@ fn reel_recipe_v2_round_trips_reel_studio_intent_and_keeps_v1_compatible() {
 }
 
 #[test]
+fn ordered_reel_v1_rejects_photo_sources_before_queueing() {
+    let directory = TestDir::new("reel-v1-photo-source");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 30, 10, 0, 0).unwrap();
+    let source_hash = "a".repeat(64);
+    let source_photo = reference_photo("photo-hold", &source_hash);
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("photo-reel", "Photo reel"))
+        .unwrap();
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("photo-reel", MediaKind::Photo, "photo-hold"),
+        )
+        .unwrap();
+    let revision = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "photo-reel", "photo hold")
+        .unwrap();
+    let recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "ordered-reel-v1".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Reel,
+        name: "Ordered reel v1".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "reel",
+            "transition": {"kind": "cut"},
+            "audio": {"mode": "mute"},
+            "output": {"preset": "mp4-h264-sdr-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+
+    let error = store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "photo-reel-job".to_owned(),
+                recipe_id: recipe.id,
+                recipe_version: 1,
+                plan_id: Some("photo-reel".to_owned()),
+                plan_revision: Some(revision.revision),
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "test",
+                    "selection_provenance": {"origin": "general"},
+                    "sources": [{
+                        "media_kind": "photo",
+                        "media_id": source_photo.id,
+                        "source_id": source_photo.id,
+                        "sha256": source_photo.sha256,
+                        "path": source_photo.path,
+                    }]
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used"
+                    }
+                })
+                .to_string(),
+                destination_path: directory
+                    .path()
+                    .join("photo-reel.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("photo holds need a versioned duration"));
+    assert!(store
+        .render_job_by_id(DEFAULT_OWNER_ID, "photo-reel-job")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn reel_recipe_v2_rejects_unknown_or_incoherent_historical_intent() {
     let directory = TestDir::new("reel-recipe-v2-invalid");
     let store = Store::open(directory.path()).unwrap();
@@ -4389,6 +4476,115 @@ fn render_jobs_freeze_portable_inputs_and_verified_outputs() {
     assert!(audit
         .execute("DELETE FROM render_jobs WHERE id = 'render-photo-1'", [])
         .is_err());
+}
+
+#[test]
+fn atomic_recipe_and_job_queue_rolls_back_recipe_when_job_insert_fails() {
+    let directory = TestDir::new("atomic-render-queue");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 30, 11, 0, 0).unwrap();
+    let source_hash = "a".repeat(64);
+    let source_photo = reference_photo("atomic-photo", &source_hash);
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+    let recipe_schema = serde_json::json!({
+        "schema_version": 1,
+        "kind": "photo",
+        "crop": null,
+        "rotation_degrees": 0,
+        "grade": {"mode": "none"},
+        "output": {"preset": "jpeg-srgb-v1"}
+    })
+    .to_string();
+    let source_snapshot = serde_json::json!({
+        "schema_version": 1,
+        "context_key": "test",
+        "selection_provenance": {"origin": "general"},
+        "sources": [{
+            "media_kind": "photo",
+            "media_id": source_photo.id,
+            "source_id": source_photo.id,
+            "sha256": source_photo.sha256,
+            "path": source_photo.path,
+        }]
+    })
+    .to_string();
+    let model_versions = serde_json::json!({
+        "schema_version": 1,
+        "models": {
+            "clip": "not_used",
+            "aesthetic": "not_used",
+            "personal_style": "not_used"
+        }
+    })
+    .to_string();
+    let existing_recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "existing-recipe".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Photo,
+        name: "Existing".to_owned(),
+        schema_json: recipe_schema.clone(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &existing_recipe)
+        .unwrap();
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "duplicate-job-id".to_owned(),
+                recipe_id: existing_recipe.id,
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: source_snapshot.clone(),
+                model_versions_json: model_versions.clone(),
+                destination_path: directory
+                    .path()
+                    .join("existing.jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+
+    let one_off = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "one-off-recipe".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Photo,
+        name: "One-off".to_owned(),
+        schema_json: recipe_schema,
+        created_at: now,
+    };
+    let error = store
+        .render_recipe_and_job_create(
+            DEFAULT_OWNER_ID,
+            &one_off,
+            &NewRenderJob {
+                id: "duplicate-job-id".to_owned(),
+                recipe_id: one_off.id.clone(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: source_snapshot,
+                model_versions_json: model_versions,
+                destination_path: directory
+                    .path()
+                    .join("one-off.jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("failed to queue render job"));
+    assert!(store
+        .render_recipe_get(DEFAULT_OWNER_ID, "one-off-recipe", 1)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

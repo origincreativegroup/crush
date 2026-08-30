@@ -67,10 +67,15 @@ Known caveats carried forward:
   before any UI may claim "learned"), Task 021 render-golden review, Task 023 clean-machine
   acceptance. Plan files and per-task acceptance records live in `.tasks/done/`.
 
-Next: **TASK-021** non-destructive recipes and media rendering per
-`.tasks/backlog/TASK-021-impl-plan.md`. The current branch contains only the no-clobber clip-export
-safety foundation. Do not proceed to 022 or call 021 complete until the full render contract and
-John's render-golden review are satisfied; 023 retains its clean-machine human stop.
+Current: **TASK-021** non-destructive recipes and media rendering per
+`.tasks/backlog/TASK-021-impl-plan.md`. PR #37 has functional photo, selected-clip, and ordered
+clip-reel rendering, durable recovery/no-clobber publication, a Projects export workflow, active
+reel cancellation, and direct retry. The 2026-08-30 review findings owned by 021 are fixed:
+published checksummed pairs stay verifying ahead of late cancellation; durable failure-transition
+errors are surfaced; one-off clip recipes and jobs queue atomically; and reel v1 rejects photo
+sources before creating an unrenderable job. Whole-reel photo holds remain an explicit capability
+error until duration/framing intent is versioned. Do not call 021 complete until John's
+render-golden review; 023 retains its clean-machine human stop.
 
 The 2026-08-29 user review is part of acceptance for this continuation: user-facing Plans becomes
 Projects with a guided selects -> sequence -> preview -> export flow; Style becomes Preferences
@@ -85,10 +90,9 @@ later Windows track, and use PyTorch only for training/evaluation plus validated
 Task 021 recipes and manifests must remain backend-neutral now. Tasks 028–031 are the additive
 Windows delivery track; they do not replace or bypass Tasks 021–023 or their human gates.
 
-Task 022 reconnaissance against `/Users/origin/GitHub/reel-studio-main` found two required schema
-changes for that task: exact imported/manual video spans that survive re-splitting, and honest
-historical/imported plan provenance. Its real recipe fields are recorded in the Task 021/022 plans.
-Do not start importer writes before the Task 021 render-golden review.
+Task 022 is implemented in draft PR #38, stacked on #37, with imported/manual spans and honest
+historical/imported provenance. John explicitly allowed that work to proceed while Task 021's
+render-golden review remains pending. Keep the PRs separate and rebase #38 after #37 lands.
 
 ## Previous implementation state (2026-08-28)
 

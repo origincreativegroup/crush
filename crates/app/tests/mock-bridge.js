@@ -632,6 +632,7 @@
           mediaType: args.preset.startsWith("jpeg") ? "image/jpeg" : args.preset.startsWith("tiff") ? "image/tiff" : "image/png",
           width: 2400,
           height: 1600,
+          durationS: null,
           completedAt: "2026-08-29T12:30:00Z",
         };
       }
@@ -653,9 +654,30 @@
           mediaType: args.preset.startsWith("mp4") ? "video/mp4" : "video/quicktime",
           width: 1920,
           height: 1080,
+          durationS: 1.8,
           completedAt: "2026-08-29T12:31:00Z",
         };
       }
+      case "render_project_reel": {
+        const plan = planFor(args.projectId);
+        if (!plan.items.length) throw "add at least one clip before rendering a reel";
+        if (plan.items.some((item) => item.mediaKind !== "shot")) throw "whole-reel photo holds need a saved duration and framing contract";
+        return {
+          jobId: "render-job-reel-demo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "e".repeat(64),
+          manifestSha256: "f".repeat(64),
+          sizeBytes: 12582912,
+          mediaType: args.preset.startsWith("mp4") ? "video/mp4" : "video/quicktime",
+          width: 1920,
+          height: 1080,
+          durationS: plan.items.reduce((total, item) => total + (item.endS - item.startS), 0),
+          completedAt: "2026-08-29T12:32:00Z",
+        };
+      }
+      case "cancel_project_render":
+        return true;
       case "models_status":
         return modelsStatus();
       case "models_download":

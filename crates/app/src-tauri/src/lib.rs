@@ -41,6 +41,7 @@ mod macos {
         paths: AppPaths,
         background: Arc<Mutex<BTreeMap<String, BackgroundTask>>>,
         active_ingest: Arc<Mutex<Option<ActiveIngest>>>,
+        active_renders: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
         search: Arc<Mutex<Option<SearchRuntime>>>,
         /// Set by `record_feedback`; the next `search` retrains the style profile instead of
         /// doing it inline on every pick click.
@@ -1787,7 +1788,24 @@ mod macos {
         media_type: String,
         width: Option<i64>,
         height: Option<i64>,
+        duration_s: Option<f64>,
         completed_at: String,
+    }
+
+    fn render_output_view(output: crush_store::RenderOutput) -> PhotoRenderView {
+        PhotoRenderView {
+            job_id: output.job_id,
+            output_path: output.output_path,
+            manifest_path: output.manifest_path,
+            output_sha256: output.output_sha256,
+            manifest_sha256: output.manifest_sha256,
+            size_bytes: output.size_bytes,
+            media_type: output.media_type,
+            width: output.width,
+            height: output.height,
+            duration_s: output.duration_s,
+            completed_at: output.created_at.to_rfc3339(),
+        }
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -2050,18 +2068,7 @@ mod macos {
             Path::new(&output.output_path).is_file() && Path::new(&output.manifest_path).is_file(),
             "render completed without both verified files"
         );
-        Ok(PhotoRenderView {
-            job_id: output.job_id,
-            output_path: output.output_path,
-            manifest_path: output.manifest_path,
-            output_sha256: output.output_sha256,
-            manifest_sha256: output.manifest_sha256,
-            size_bytes: output.size_bytes,
-            media_type: output.media_type,
-            width: output.width,
-            height: output.height,
-            completed_at: output.created_at.to_rfc3339(),
-        })
+        Ok(render_output_view(output))
     }
 
     fn render_project_clip_job(
@@ -2136,64 +2143,58 @@ mod macos {
         );
 
         let recipe_id = format!("crush-video-clip-{}", Uuid::new_v4());
-        store.render_recipe_create(
-            DEFAULT_OWNER_ID,
-            &RenderRecipe {
-                owner_id: DEFAULT_OWNER_ID.to_owned(),
-                id: recipe_id.clone(),
-                version: 1,
-                kind: RenderRecipeKind::VideoClip,
-                name: spec.name.to_owned(),
-                schema_json: clip_recipe_schema(start_s, end_s, grade, audio, spec.preset)
-                    .to_string(),
-                created_at: chrono::Utc::now(),
-            },
-        )?;
+        let recipe = RenderRecipe {
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            id: recipe_id.clone(),
+            version: 1,
+            kind: RenderRecipeKind::VideoClip,
+            name: spec.name.to_owned(),
+            schema_json: clip_recipe_schema(start_s, end_s, grade, audio, spec.preset).to_string(),
+            created_at: chrono::Utc::now(),
+        };
         let origin = match selected.origin {
             PlanOrigin::General => "general",
             PlanOrigin::Personal => "personal",
         };
         let job_id = format!("render-job-{}", Uuid::new_v4());
-        store.render_job_create(
-            DEFAULT_OWNER_ID,
-            &NewRenderJob {
-                id: job_id.clone(),
-                recipe_id,
-                recipe_version: 1,
-                plan_id: None,
-                plan_revision: None,
-                source_snapshot_json: serde_json::json!({
-                    "schema_version": 1,
-                    "context_key": project.context_key,
-                    "selection_provenance": {
-                        "project_id": project.id,
-                        "position": selected.position,
-                        "origin": origin,
-                        "rank": selected.rank,
-                        "profile_version": selected.profile_version,
-                    },
-                    "sources": [{
-                        "media_kind": "shot",
-                        "media_id": shot.id,
-                        "source_id": video.id,
-                        "sha256": video.sha256,
-                        "path": video.path,
-                    }],
-                })
-                .to_string(),
-                model_versions_json: serde_json::json!({
-                    "schema_version": 1,
-                    "models": {
-                        "clip": "not_used",
-                        "aesthetic": "not_used",
-                        "personal_style": "not_used",
-                    },
-                })
-                .to_string(),
-                destination_path: destination_path.to_string_lossy().into_owned(),
-                created_at: chrono::Utc::now(),
-            },
-        )?;
+        let job = NewRenderJob {
+            id: job_id.clone(),
+            recipe_id,
+            recipe_version: 1,
+            plan_id: None,
+            plan_revision: None,
+            source_snapshot_json: serde_json::json!({
+                "schema_version": 1,
+                "context_key": project.context_key,
+                "selection_provenance": {
+                    "project_id": project.id,
+                    "position": selected.position,
+                    "origin": origin,
+                    "rank": selected.rank,
+                    "profile_version": selected.profile_version,
+                },
+                "sources": [{
+                    "media_kind": "shot",
+                    "media_id": shot.id,
+                    "source_id": video.id,
+                    "sha256": video.sha256,
+                    "path": video.path,
+                }],
+            })
+            .to_string(),
+            model_versions_json: serde_json::json!({
+                "schema_version": 1,
+                "models": {
+                    "clip": "not_used",
+                    "aesthetic": "not_used",
+                    "personal_style": "not_used",
+                },
+            })
+            .to_string(),
+            destination_path: destination_path.to_string_lossy().into_owned(),
+            created_at: chrono::Utc::now(),
+        };
+        store.render_recipe_and_job_create(DEFAULT_OWNER_ID, &recipe, &job)?;
         drop(store);
 
         let output = Pipeline::new(config.clone(), paths.clone(), CancellationToken::default())
@@ -2202,18 +2203,171 @@ mod macos {
             Path::new(&output.output_path).is_file() && Path::new(&output.manifest_path).is_file(),
             "render completed without both verified files"
         );
-        Ok(PhotoRenderView {
-            job_id: output.job_id,
-            output_path: output.output_path,
-            manifest_path: output.manifest_path,
-            output_sha256: output.output_sha256,
-            manifest_sha256: output.manifest_sha256,
-            size_bytes: output.size_bytes,
-            media_type: output.media_type,
-            width: output.width,
-            height: output.height,
-            completed_at: output.created_at.to_rfc3339(),
-        })
+        Ok(render_output_view(output))
+    }
+
+    fn render_project_reel_job(
+        config: &Config,
+        paths: &AppPaths,
+        project_id: &str,
+        preset: &str,
+        audio: &str,
+        destination: &str,
+        cancellation: CancellationToken,
+    ) -> anyhow::Result<PhotoRenderView> {
+        let spec = clip_preset_spec(preset)?;
+        ensure!(
+            matches!(audio, "source" | "mute"),
+            "sound must be source or mute"
+        );
+        let destination_path = PathBuf::from(destination);
+        ensure!(
+            destination_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| spec
+                    .extensions
+                    .iter()
+                    .any(|allowed| value.eq_ignore_ascii_case(allowed))),
+            "the selected file type requires a .{} destination",
+            spec.extensions[0]
+        );
+
+        let mut store = Store::open(&paths.root)?;
+        let project = store
+            .plan_get(DEFAULT_OWNER_ID, project_id)?
+            .with_context(|| format!("project {project_id} was not found"))?;
+        let items = store.plan_items(DEFAULT_OWNER_ID, project_id)?;
+        ensure!(
+            !items.is_empty(),
+            "add at least one clip before rendering a reel"
+        );
+        let mut sources = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            ensure!(
+                item.media_kind == MediaKind::Shot,
+                "item {} is a photo; whole-reel photo holds need a saved duration and framing contract, so export it individually for now",
+                index + 1
+            );
+            ensure!(
+                item.pacing.is_none(),
+                "item {} has pacing that the current reel renderer cannot reproduce",
+                index + 1
+            );
+            ensure!(
+                item.crop_x.is_none(),
+                "item {} has framing that the current reel renderer cannot reproduce",
+                index + 1
+            );
+            clip_grade_from_plan(item.grade_json.as_deref()).with_context(|| {
+                format!(
+                    "item {} has a color treatment the current reel renderer cannot reproduce",
+                    index + 1
+                )
+            })?;
+            let start_s = item
+                .start_s
+                .with_context(|| format!("item {} needs a saved In point", index + 1))?;
+            let end_s = item
+                .end_s
+                .with_context(|| format!("item {} needs a saved Out point", index + 1))?;
+            ensure!(
+                end_s > start_s,
+                "item {} needs an Out point after its In point",
+                index + 1
+            );
+            let shot = store
+                .shot_by_id(DEFAULT_OWNER_ID, &item.media_id)?
+                .with_context(|| format!("clip {} was not found", item.media_id))?;
+            ensure!(
+                start_s >= shot.start_s && end_s <= shot.end_s,
+                "item {} boundaries must stay inside its source shot",
+                index + 1
+            );
+            let annotation =
+                store.editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, &shot.id)?;
+            ensure!(
+                !annotation.is_some_and(|value| !value.usable || value.blur_required),
+                "item {} is flagged unusable or blur-required and cannot be rendered",
+                index + 1
+            );
+            let video = store
+                .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
+                .with_context(|| format!("source video {} was not found", shot.video_id))?;
+            sources.push(serde_json::json!({
+                "media_kind": "shot",
+                "media_id": shot.id,
+                "source_id": video.id,
+                "sha256": video.sha256,
+                "path": video.path,
+            }));
+        }
+
+        let revision = store.plan_save_revision(
+            DEFAULT_OWNER_ID,
+            project_id,
+            &format!(
+                "Export · {}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+            ),
+        )?;
+        let recipe_id = format!("crush-video-reel-{}", Uuid::new_v4());
+        let recipe = RenderRecipe {
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            id: recipe_id.clone(),
+            version: 1,
+            kind: RenderRecipeKind::Reel,
+            name: spec.name.to_owned(),
+            schema_json: serde_json::json!({
+                "schema_version": 1,
+                "kind": "reel",
+                "transition": {"kind": "cut"},
+                "audio": {"mode": audio},
+                "output": {"preset": spec.preset},
+            })
+            .to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let job_id = format!("render-job-{}", Uuid::new_v4());
+        let job = NewRenderJob {
+            id: job_id.clone(),
+            recipe_id,
+            recipe_version: 1,
+            plan_id: Some(project.id.clone()),
+            plan_revision: Some(revision.revision),
+            source_snapshot_json: serde_json::json!({
+                "schema_version": 1,
+                "context_key": project.context_key,
+                "selection_provenance": {
+                    "project_id": project.id,
+                    "revision": revision.revision,
+                    "origin": "project_sequence",
+                },
+                "sources": sources,
+            })
+            .to_string(),
+            model_versions_json: serde_json::json!({
+                "schema_version": 1,
+                "models": {
+                    "clip": "not_used",
+                    "aesthetic": "not_used",
+                    "personal_style": "not_used",
+                },
+            })
+            .to_string(),
+            destination_path: destination_path.to_string_lossy().into_owned(),
+            created_at: chrono::Utc::now(),
+        };
+        store.render_recipe_and_job_create(DEFAULT_OWNER_ID, &recipe, &job)?;
+        drop(store);
+
+        let output = Pipeline::new(config.clone(), paths.clone(), cancellation)
+            .execute_render_job(DEFAULT_OWNER_ID, &job_id)?;
+        ensure!(
+            Path::new(&output.output_path).is_file() && Path::new(&output.manifest_path).is_file(),
+            "render completed without both verified files"
+        );
+        Ok(render_output_view(output))
     }
 
     fn plan_view(store: &Store, plan: Plan) -> anyhow::Result<PlanView> {
@@ -2925,6 +3079,59 @@ mod macos {
     }
 
     #[tauri::command]
+    async fn render_project_reel(
+        project_id: String,
+        preset: String,
+        audio: String,
+        destination: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PhotoRenderView> {
+        let config = state.config.clone();
+        let paths = state.paths.clone();
+        let cancellation = CancellationToken::default();
+        {
+            let mut active = lock(&state.active_renders)?;
+            if active.contains_key(&project_id) {
+                return Err("this project is already rendering".to_owned());
+            }
+            active.insert(project_id.clone(), cancellation.clone());
+        }
+        let active_renders = Arc::clone(&state.active_renders);
+        let active_key = project_id.clone();
+        let worker = tauri::async_runtime::spawn_blocking(move || {
+            command_result(render_project_reel_job(
+                &config,
+                &paths,
+                &project_id,
+                &preset,
+                &audio,
+                &destination,
+                cancellation,
+            ))
+        });
+        let result = worker
+            .await
+            .map_err(|error| format!("reel render worker failed: {error}"));
+        if let Ok(mut active) = active_renders.lock() {
+            active.remove(&active_key);
+        }
+        result?
+    }
+
+    #[tauri::command]
+    fn cancel_project_render(
+        project_id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<bool> {
+        let active = lock(&state.active_renders)?;
+        let Some(cancellation) = active.get(&project_id) else {
+            return Ok(false);
+        };
+        cancellation.cancel();
+        Ok(true)
+    }
+
+    #[tauri::command]
     async fn export_clip(
         id: String,
         out: String,
@@ -3180,6 +3387,7 @@ mod macos {
                     paths,
                     background: Arc::new(Mutex::new(BTreeMap::new())),
                     active_ingest: Arc::new(Mutex::new(None)),
+                    active_renders: Arc::new(Mutex::new(BTreeMap::new())),
                     search: Arc::new(Mutex::new(None)),
                     retrain_dirty: Arc::new(AtomicBool::new(false)),
                 });
@@ -3249,6 +3457,8 @@ mod macos {
                 selects_candidates,
                 render_project_photo,
                 render_project_clip,
+                render_project_reel,
+                cancel_project_render,
                 export_clip,
                 open_in_finder
             ])

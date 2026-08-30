@@ -1,6 +1,6 @@
 # TASK-021 — implementation plan and progress
 
-Status: **in progress, photo/clip and initial ordered-reel renderers plus durable recovery implemented**. The parent acceptance in `TASK-021.md`
+Status: **in progress, photo/clip and ordered clip-reel renderers plus durable recovery and Projects export implemented**. The parent acceptance in `TASK-021.md`
 is unchanged. This extends the existing engineering and editorial/DAM blueprints; it does
 not replace them. Task 022 stays next, after the render-golden human review.
 
@@ -196,7 +196,12 @@ verified files before reporting success. It refuses unsafe photos and project fr
 that the current photo UI cannot reproduce; it never silently drops those edits. The same compact
 surface exports a selected shot to MP4/MOV with exact saved boundaries, supported basic treatment,
 and source/muted audio. Saved pacing, scalar crop, or unknown treatment is an explicit capability
-error. Whole-project reel actions, active cancellation and retry controls remain.
+error. Projects now adds a fourth whole-reel export step for ordered clip-only sequences with
+MP4/MOV, source/muted audio, a native destination, verified result/manifest, active cancellation
+and direct retry after failure. A project containing photos is blocked with a precise message
+because photo holds still need a versioned duration and framing contract; those photos remain
+individually exportable. Same-job retry/resume history and the broader mixed-media treatment set
+remain before final acceptance.
 
 ### 5. Automated matrix, then John's human hard stop
 
@@ -228,7 +233,8 @@ error. Whole-project reel actions, active cancellation and retry controls remain
   store/pipeline clippy passes with warnings denied. These tests do not constitute the required
   visual render-golden approval.
 - Third/fourth-slice verification: stage-split passes 22 library, 12 FFmpeg fixture, and two ordered
-  reel fixture tests; pipeline passes 26 library and nine durable integration tests (including real
-  frozen clip and two-item reel renders on macOS); app tests pass five and all 17 browser scenarios
-  pass. Targeted stage/pipeline/app clippy passes with warnings denied. The bounded human review
+  reel fixture tests; pipeline passes 28 library and nine durable integration tests (including real
+  frozen clip and two-item reel renders on macOS); store passes 39 tests; app tests pass five and all
+  17 browser scenarios pass, including whole-project export. Workspace tests and Clippy with
+  warnings denied pass. The bounded human review
   packet, broader color/orientation/audio matrix, and John's visual approval are still outstanding.

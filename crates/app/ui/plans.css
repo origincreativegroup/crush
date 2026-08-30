@@ -24,6 +24,8 @@
 #project-preview-time { color: #aaaab4; font-size: 11px; white-space: nowrap; }
 #project-preview-label { margin: 8px 0 0; }
 .project-photo-export { margin-top: 12px; padding: 12px; border-top: 1px solid #35353d; }
+.project-reel-export { margin-top: 18px; padding-top: 18px; border-top: 1px solid #35353d; }
+.project-reel-export select { min-height: 34px; padding: 0 8px; border: 1px solid #42424a; border-radius: 5px; color: #f0f0f3; background: #17171b; }
 .project-photo-export h3 { margin-top: 2px !important; }
 .photo-export-fields { display: grid; grid-template-columns: minmax(190px, .7fr) minmax(280px, 1.3fr); gap: 12px; margin: 12px 0; }
 .project-photo-export select { min-height: 34px; padding: 0 8px; border: 1px solid #42424a; border-radius: 5px; color: #f0f0f3; background: #17171b; }

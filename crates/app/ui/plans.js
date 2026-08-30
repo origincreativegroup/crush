@@ -9,6 +9,7 @@
     plans: [], plan: null, items: [], revisions: [], candidates: null,
     busy: false, dirty: new Set(), loaded: false, previewKey: null, previewLoop: false,
     photoExportKey: null, photoExportKind: null, photoExportBusy: false, photoExportResult: null,
+    reelExportKey: null, reelExportBusy: false, reelExportResult: null,
   };
   const kind = (value) => value === "photo" ? "photo" : "video";
   const itemKey = (item) => `${kind(item.mediaKind)}:${item.mediaId}`;
@@ -34,6 +35,7 @@
   function dirty(key, value = true) {
     if (value) state.dirty.add(key); else state.dirty.delete(key);
     $("plan-dirty").hidden = state.dirty.size === 0;
+    renderReelExport();
   }
   const preview = {
     root: $("project-preview"), video: $("project-preview-video"), photo: $("project-preview-photo"),
@@ -52,6 +54,16 @@
     outputPath: $("project-photo-output-path"), manifestPath: $("project-photo-manifest-path"),
     showOutput: $("project-photo-show-output"), showManifest: $("project-photo-show-manifest"),
     verification: $("project-photo-verification"),
+  };
+  const reelExport = {
+    root: $("project-reel-export"), preset: $("project-reel-preset"),
+    audio: $("project-reel-audio"), destination: $("project-reel-destination"),
+    choose: $("project-reel-choose"), render: $("project-reel-render"),
+    cancel: $("project-reel-cancel"),
+    progress: $("project-reel-progress"), status: $("project-reel-status"),
+    result: $("project-reel-result"), outputPath: $("project-reel-output-path"),
+    manifestPath: $("project-reel-manifest-path"), showOutput: $("project-reel-show-output"),
+    showManifest: $("project-reel-show-manifest"), verification: $("project-reel-verification"),
   };
   const photoPresets = {
     "jpeg-srgb-v1": { extension: "jpg", filter: { name: "JPEG image", extensions: ["jpg", "jpeg"] } },
@@ -150,6 +162,7 @@
     }));
     renderCandidates();
     renderPreview();
+    renderReelExport();
   }
   function evidence(result) {
     const breakdown = result.score_breakdown;
@@ -261,7 +274,7 @@
       ["Dimensions", result.width && result.height ? `${result.width} × ${result.height}` : "Verified"],
       ["File size", `${(result.sizeBytes / 1048576).toFixed(2)} MB`],
       ["Media type", result.mediaType],
-      ["Photo checksum", result.outputSha256],
+      ["Output checksum", result.outputSha256],
       ["Manifest checksum", result.manifestSha256],
     ];
     photoExport.verification.replaceChildren(...facts.flatMap(([term, detail]) => [node("dt", term), node("dd", detail)]));
@@ -273,6 +286,60 @@
     photoExport.choose.disabled = value;
     photoExport.render.disabled = value || !photoExport.destination.value;
     photoExport.progress.hidden = !value;
+  }
+  function setReelExportBusy(value) {
+    state.reelExportBusy = value;
+    reelExport.preset.disabled = value;
+    reelExport.audio.disabled = value;
+    reelExport.choose.disabled = value || !state.items.length || state.items.some((item) => item.mediaKind !== "shot");
+    reelExport.render.disabled = value || !reelExport.destination.value || state.dirty.size > 0;
+    reelExport.cancel.hidden = !value;
+    reelExport.cancel.disabled = !value;
+    reelExport.progress.hidden = !value;
+  }
+  function renderReelExport() {
+    if (!reelExport.root) return;
+    const key = state.plan?.id || null;
+    reelExport.root.hidden = !key;
+    if (state.reelExportKey !== key) {
+      state.reelExportKey = key;
+      state.reelExportResult = null;
+      reelExport.destination.value = "";
+      reelExport.result.hidden = true;
+    }
+    if (!key) return;
+    const hasUnsupportedItems = state.items.some((item) => item.mediaKind !== "shot");
+    reelExport.choose.disabled = state.reelExportBusy || !state.items.length || hasUnsupportedItems;
+    reelExport.render.disabled = state.reelExportBusy || !reelExport.destination.value || state.dirty.size > 0 || !state.items.length || hasUnsupportedItems;
+    reelExport.status.classList.remove("error");
+    if (!state.items.length) {
+      reelExport.status.textContent = "Add at least one clip before exporting a reel.";
+    } else if (hasUnsupportedItems) {
+      reelExport.status.textContent = "This sequence includes photos. Export those individually above; whole-reel photo timing is not enabled yet.";
+    } else if (state.dirty.size) {
+      reelExport.status.textContent = "Save every clip edit before rendering so the reel matches this sequence.";
+    } else if (!reelExport.destination.value) {
+      reelExport.status.textContent = `${state.items.length} clips ready. Choose where to save the finished reel.`;
+    } else {
+      reelExport.status.textContent = `${state.items.length} clips ready to render in this order.`;
+    }
+  }
+  function showReelRenderResult(result) {
+    state.reelExportResult = result;
+    reelExport.outputPath.textContent = result.outputPath;
+    reelExport.outputPath.title = result.outputPath;
+    reelExport.manifestPath.textContent = result.manifestPath;
+    reelExport.manifestPath.title = result.manifestPath;
+    const facts = [
+      ["Dimensions", result.width && result.height ? `${result.width} × ${result.height}` : "Verified"],
+      ["Duration", result.durationS != null ? `${Number(result.durationS).toFixed(2)} seconds` : "Verified"],
+      ["File size", `${(result.sizeBytes / 1048576).toFixed(2)} MB`],
+      ["Media type", result.mediaType],
+      ["Output checksum", result.outputSha256],
+      ["Manifest checksum", result.manifestSha256],
+    ];
+    reelExport.verification.replaceChildren(...facts.flatMap(([term, detail]) => [node("dt", term), node("dd", detail)]));
+    reelExport.result.hidden = false;
   }
   function setPreviewLoop(value) {
     state.previewLoop = value;
@@ -621,6 +688,88 @@
       catch (error) {
         photoExport.status.textContent = `Could not show that file: ${String(error)}`;
         photoExport.status.classList.add("error");
+      }
+    });
+  }
+  reelExport.preset.addEventListener("change", () => {
+    reelExport.destination.value = "";
+    reelExport.result.hidden = true;
+    state.reelExportResult = null;
+    renderReelExport();
+  });
+  reelExport.choose.addEventListener("click", async () => {
+    if (state.reelExportBusy || !state.plan || !state.items.length || state.items.some((item) => item.mediaKind !== "shot")) return;
+    const preset = photoPresets[reelExport.preset.value];
+    const projectName = String(state.plan.name || "project").trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-|-$/g, "") || "project";
+    try {
+      const destination = await bridge.dialog.save({
+        title: "Export finished reel",
+        defaultPath: `${projectName}.${preset.extension}`,
+        filters: [preset.filter],
+      });
+      if (!destination) return;
+      reelExport.destination.value = destination;
+      reelExport.result.hidden = true;
+      state.reelExportResult = null;
+      renderReelExport();
+    } catch (error) {
+      reelExport.status.textContent = `Could not choose a destination: ${String(error)}`;
+      reelExport.status.classList.add("error");
+    }
+  });
+  reelExport.render.addEventListener("click", async () => {
+    if (state.reelExportBusy || state.busy || !state.plan || !reelExport.destination.value) return;
+    if (state.dirty.size) {
+      renderReelExport();
+      return;
+    }
+    const projectId = state.plan.id;
+    reelExport.result.hidden = true;
+    reelExport.status.textContent = "Rendering the clip order and verifying the finished reel…";
+    reelExport.status.classList.remove("error");
+    reelExport.render.textContent = "Render reel";
+    setReelExportBusy(true);
+    try {
+      const result = await invoke("render_project_reel", {
+        projectId,
+        preset: reelExport.preset.value,
+        audio: reelExport.audio.value,
+        destination: reelExport.destination.value,
+      });
+      if (state.plan?.id !== projectId) return;
+      showReelRenderResult(result);
+      reelExport.destination.value = "";
+      reelExport.status.textContent = "Reel rendered and verified. Source media was not changed.";
+    } catch (error) {
+      if (state.plan?.id !== projectId) return;
+      reelExport.status.textContent = `Reel render failed: ${String(error)}`;
+      reelExport.status.classList.add("error");
+      reelExport.render.textContent = "Retry render";
+    } finally {
+      setReelExportBusy(false);
+    }
+  });
+  reelExport.cancel.addEventListener("click", async () => {
+    if (!state.reelExportBusy || !state.plan) return;
+    reelExport.cancel.disabled = true;
+    reelExport.status.textContent = "Cancelling after the current media operation stops safely…";
+    try {
+      const requested = await invoke("cancel_project_render", { projectId: state.plan.id });
+      if (!requested) reelExport.status.textContent = "The render already finished; checking its result…";
+    } catch (error) {
+      reelExport.status.textContent = `Could not request cancellation: ${String(error)}`;
+      reelExport.status.classList.add("error");
+      reelExport.cancel.disabled = false;
+    }
+  });
+  for (const [control, field] of [[reelExport.showOutput, "outputPath"], [reelExport.showManifest, "manifestPath"]]) {
+    control.addEventListener("click", async () => {
+      const path = state.reelExportResult?.[field];
+      if (!path) return;
+      try { await invoke("open_in_finder", { path }); }
+      catch (error) {
+        reelExport.status.textContent = `Could not show that file: ${String(error)}`;
+        reelExport.status.classList.add("error");
       }
     });
   }

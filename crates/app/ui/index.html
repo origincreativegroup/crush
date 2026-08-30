@@ -247,6 +247,48 @@
                 <div id="plan-revisions" class="plans-stack"></div>
                 <p class="plans-muted">A saved version preserves this edit document. It is not a rendered file or publication approval.</p>
               </section>
+              <section id="project-reel-export" class="project-reel-export" aria-labelledby="project-reel-export-title">
+                <p class="workflow-step">Step 4</p>
+                <h2 id="project-reel-export-title">Export the reel</h2>
+                <p class="plans-muted">Render the saved clip order into one verified video. Originals stay untouched. Photo selects can still be exported individually while photo-hold timing is finalized.</p>
+                <div class="photo-export-fields">
+                  <label>File type
+                    <select id="project-reel-preset">
+                      <option value="mp4-h264-sdr-v1">MP4 — compatible H.264</option>
+                      <option value="mov-h264-sdr-v1">MOV — editing-friendly H.264</option>
+                    </select>
+                  </label>
+                  <label>Save to
+                    <span class="photo-export-destination">
+                      <input id="project-reel-destination" readonly placeholder="Choose where to save…" />
+                      <button id="project-reel-choose" class="button secondary small" type="button">Choose…</button>
+                    </span>
+                  </label>
+                </div>
+                <details class="plans-item-options">
+                  <summary>Sound options</summary>
+                  <label>Sound
+                    <select id="project-reel-audio">
+                      <option value="source">Keep source sound</option>
+                      <option value="mute">Muted</option>
+                    </select>
+                  </label>
+                </details>
+                <div class="plans-actions">
+                  <button id="project-reel-render" class="button primary" type="button" disabled>Render reel</button>
+                  <button id="project-reel-cancel" class="button secondary" type="button" hidden>Cancel render</button>
+                  <progress id="project-reel-progress" hidden aria-label="Reel render progress"></progress>
+                  <span id="project-reel-status" class="plans-muted" role="status">Add clips, save their edits, then choose where to export.</span>
+                </div>
+                <section id="project-reel-result" class="photo-export-result" hidden aria-label="Verified reel export">
+                  <div><strong>Finished reel</strong><code id="project-reel-output-path"></code><button id="project-reel-show-output" class="button secondary small" type="button">Show in Finder</button></div>
+                  <div><strong>Verification manifest</strong><code id="project-reel-manifest-path"></code><button id="project-reel-show-manifest" class="button secondary small" type="button">Show in Finder</button></div>
+                  <details>
+                    <summary>Verification details</summary>
+                    <dl id="project-reel-verification" class="photo-export-verification"></dl>
+                  </details>
+                </section>
+              </section>
             </section>
           </div>
         </fieldset>

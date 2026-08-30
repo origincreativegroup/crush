@@ -145,6 +145,59 @@ impl ManagedStaging {
     }
 }
 
+fn settle_render_execution_error(
+    store: &mut Store,
+    owner_id: &str,
+    job_id: &str,
+    destination: &Path,
+    cancelled: bool,
+    execution_error: anyhow::Error,
+) -> anyhow::Error {
+    let current = match store.render_job_by_id(owner_id, job_id) {
+        Ok(current) => current,
+        Err(state_error) => {
+            return anyhow::anyhow!(
+                "render execution failed: {execution_error:#}; durable job state could not be read: {state_error:#}"
+            )
+        }
+    };
+    let Some(current) = current else {
+        return execution_error;
+    };
+    if !matches!(
+        current.status,
+        RenderJobStatus::Running | RenderJobStatus::Verifying
+    ) {
+        return execution_error;
+    }
+
+    // Once both public files exist, cancellation must not relabel a checksummed publication as
+    // cancelled. Keep it verifying so recovery can validate the pair and finish atomically.
+    if current.status == RenderJobStatus::Verifying
+        && destination.is_file()
+        && manifest_path(destination).is_file()
+    {
+        return execution_error;
+    }
+
+    let transition = if cancelled {
+        store.render_job_cancel(owner_id, job_id, Utc::now())
+    } else {
+        store.render_job_fail(
+            owner_id,
+            job_id,
+            &format!("{execution_error:#}"),
+            Utc::now(),
+        )
+    };
+    match transition {
+        Ok(()) => execution_error,
+        Err(state_error) => anyhow::anyhow!(
+            "render execution failed: {execution_error:#}; durable failure state could not be persisted: {state_error:#}"
+        ),
+    }
+}
+
 impl Pipeline {
     /// Execute one frozen photo, clip, or initial ordered-reel job.
     pub fn execute_render_job(&self, owner_id: &str, job_id: &str) -> anyhow::Result<RenderOutput> {
@@ -239,33 +292,14 @@ impl Pipeline {
         })();
         match execution {
             Ok(output) => Ok(output),
-            Err(error) => {
-                let current = store.render_job_by_id(owner_id, job_id)?;
-                if let Some(current) = current {
-                    if matches!(
-                        current.status,
-                        RenderJobStatus::Running | RenderJobStatus::Verifying
-                    ) {
-                        if self.cancellation.is_cancelled() {
-                            let _ = store.render_job_cancel(owner_id, job_id, Utc::now());
-                        } else if destination.is_file()
-                            && manifest_path(&destination).is_file()
-                            && current.status == RenderJobStatus::Verifying
-                        {
-                            // Publication completed but SQLite finalization did not. Leave the
-                            // job verifying so startup recovery can validate and finish it.
-                        } else {
-                            let _ = store.render_job_fail(
-                                owner_id,
-                                job_id,
-                                &format!("{error:#}"),
-                                Utc::now(),
-                            );
-                        }
-                    }
-                }
-                Err(error)
-            }
+            Err(error) => Err(settle_render_execution_error(
+                &mut store,
+                owner_id,
+                job_id,
+                &destination,
+                self.cancellation.is_cancelled(),
+                error,
+            )),
         }
     }
 
@@ -321,31 +355,14 @@ impl Pipeline {
         })();
         match execution {
             Ok(output) => Ok(output),
-            Err(error) => {
-                if let Some(current) = store.render_job_by_id(owner_id, &job.id)? {
-                    if matches!(
-                        current.status,
-                        RenderJobStatus::Running | RenderJobStatus::Verifying
-                    ) {
-                        if self.cancellation.is_cancelled() {
-                            let _ = store.render_job_cancel(owner_id, &job.id, Utc::now());
-                        } else if destination.is_file()
-                            && manifest_path(&destination).is_file()
-                            && current.status == RenderJobStatus::Verifying
-                        {
-                            // Recovery will finalize the already-published checksummed pair.
-                        } else {
-                            let _ = store.render_job_fail(
-                                owner_id,
-                                &job.id,
-                                &format!("{error:#}"),
-                                Utc::now(),
-                            );
-                        }
-                    }
-                }
-                Err(error)
-            }
+            Err(error) => Err(settle_render_execution_error(
+                store,
+                owner_id,
+                &job.id,
+                &destination,
+                self.cancellation.is_cancelled(),
+                error,
+            )),
         }
     }
 
@@ -396,31 +413,14 @@ impl Pipeline {
         })();
         match execution {
             Ok(output) => Ok(output),
-            Err(error) => {
-                if let Some(current) = store.render_job_by_id(owner_id, &job.id)? {
-                    if matches!(
-                        current.status,
-                        RenderJobStatus::Running | RenderJobStatus::Verifying
-                    ) {
-                        if self.cancellation.is_cancelled() {
-                            let _ = store.render_job_cancel(owner_id, &job.id, Utc::now());
-                        } else if destination.is_file()
-                            && manifest_path(&destination).is_file()
-                            && current.status == RenderJobStatus::Verifying
-                        {
-                            // Recovery will finalize the already-published checksummed pair.
-                        } else {
-                            let _ = store.render_job_fail(
-                                owner_id,
-                                &job.id,
-                                &format!("{error:#}"),
-                                Utc::now(),
-                            );
-                        }
-                    }
-                }
-                Err(error)
-            }
+            Err(error) => Err(settle_render_execution_error(
+                store,
+                owner_id,
+                &job.id,
+                &destination,
+                self.cancellation.is_cancelled(),
+                error,
+            )),
         }
     }
 
@@ -1756,6 +1756,104 @@ fn cleanup_managed_staging(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crush_core::DEFAULT_OWNER_ID;
+    use crush_store::{NewRenderJob, Photo, PhotoStatus, RenderRecipe};
+    use rusqlite::Connection;
+
+    fn running_photo_job(store: &mut Store, root: &Path, job_id: &str) -> PathBuf {
+        let source_path = root.join("source.jpg");
+        let source_hash = "a".repeat(64);
+        store
+            .upsert_photo(
+                DEFAULT_OWNER_ID,
+                &Photo {
+                    id: "photo-1".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: source_path.to_string_lossy().into_owned(),
+                    sha256: source_hash.clone(),
+                    width: 100,
+                    height: 100,
+                    format: "jpeg".to_owned(),
+                    orientation: Some(1),
+                    captured_at: None,
+                    camera_make: None,
+                    camera_model: None,
+                    lens: None,
+                    thumb_rel: None,
+                    status: PhotoStatus::Done,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        store
+            .render_recipe_create(
+                DEFAULT_OWNER_ID,
+                &RenderRecipe {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    id: "photo-test".to_owned(),
+                    version: 1,
+                    kind: RenderRecipeKind::Photo,
+                    name: "Photo test".to_owned(),
+                    schema_json: json!({
+                        "schema_version": 1,
+                        "kind": "photo",
+                        "crop": null,
+                        "rotation_degrees": 0,
+                        "grade": {"mode": "none"},
+                        "output": {"preset": "jpeg-srgb-v1"}
+                    })
+                    .to_string(),
+                    created_at: Utc::now(),
+                },
+            )
+            .unwrap();
+        let destination = root.join("output.jpg");
+        store
+            .render_job_create(
+                DEFAULT_OWNER_ID,
+                &NewRenderJob {
+                    id: job_id.to_owned(),
+                    recipe_id: "photo-test".to_owned(),
+                    recipe_version: 1,
+                    plan_id: None,
+                    plan_revision: None,
+                    source_snapshot_json: json!({
+                        "schema_version": 1,
+                        "context_key": "test",
+                        "selection_provenance": {"origin": "general"},
+                        "sources": [{
+                            "media_kind": "photo",
+                            "media_id": "photo-1",
+                            "source_id": "photo-1",
+                            "sha256": source_hash,
+                            "path": source_path,
+                        }]
+                    })
+                    .to_string(),
+                    model_versions_json: json!({
+                        "schema_version": 1,
+                        "models": {
+                            "clip": "not_used",
+                            "aesthetic": "not_used",
+                            "personal_style": "not_used"
+                        }
+                    })
+                    .to_string(),
+                    destination_path: destination.to_string_lossy().into_owned(),
+                    created_at: Utc::now(),
+                },
+            )
+            .unwrap();
+        store
+            .render_job_start(
+                DEFAULT_OWNER_ID,
+                job_id,
+                &root.join("staging/output.jpg").to_string_lossy(),
+                Utc::now(),
+            )
+            .unwrap();
+        destination
+    }
 
     #[test]
     fn manifest_is_a_sibling_and_destination_extensions_are_strict() {
@@ -1858,6 +1956,78 @@ mod tests {
         assert!(
             parse_frozen_reel_plan(&plan(Value::Null, json!(r#"{"warmth":12}"#)).to_string())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn published_verifying_pair_wins_over_late_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        let destination = running_photo_job(&mut store, directory.path(), "late-cancel");
+        store
+            .render_job_mark_verifying(DEFAULT_OWNER_ID, "late-cancel")
+            .unwrap();
+        fs::write(&destination, b"published output").unwrap();
+        fs::write(manifest_path(&destination), b"published manifest").unwrap();
+
+        let returned = settle_render_execution_error(
+            &mut store,
+            DEFAULT_OWNER_ID,
+            "late-cancel",
+            &destination,
+            true,
+            anyhow::anyhow!("simulated finalization failure"),
+        );
+
+        assert!(returned
+            .to_string()
+            .contains("simulated finalization failure"));
+        assert_eq!(
+            store
+                .render_job_by_id(DEFAULT_OWNER_ID, "late-cancel")
+                .unwrap()
+                .unwrap()
+                .status,
+            RenderJobStatus::Verifying
+        );
+    }
+
+    #[test]
+    fn durable_failure_transition_errors_are_not_swallowed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        let destination = running_photo_job(&mut store, directory.path(), "persist-failure");
+        let audit = Connection::open(store.db_path()).unwrap();
+        audit
+            .execute_batch(
+                "CREATE TRIGGER reject_failed_render
+                 BEFORE UPDATE OF status ON render_jobs
+                 WHEN NEW.status = 'failed'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'simulated durable transition failure');
+                 END;",
+            )
+            .unwrap();
+
+        let returned = settle_render_execution_error(
+            &mut store,
+            DEFAULT_OWNER_ID,
+            "persist-failure",
+            &destination,
+            false,
+            anyhow::anyhow!("simulated render failure"),
+        );
+        let message = format!("{returned:#}");
+        assert!(message.contains("simulated render failure"));
+        assert!(message.contains("durable failure state could not be persisted"));
+        assert!(message.contains("simulated durable transition failure"));
+        assert_eq!(
+            store
+                .render_job_by_id(DEFAULT_OWNER_ID, "persist-failure")
+                .unwrap()
+                .unwrap()
+                .status,
+            RenderJobStatus::Running
         );
     }
 }
