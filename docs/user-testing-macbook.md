@@ -6,16 +6,19 @@ not Task 021 render-golden approval or Task 023 clean-machine acceptance.
 ## Installed build and preserved state
 
 - App: `/Applications/Crush.app`
-- Git commit: `c333a5a` on `task/21-render-export` (draft PR #37), based on merged PR #36.
+- Git commit: `0724f08` on `task/21-render-export` (draft PR #37), based on merged PR #36.
 - Build: release, arm64, Hardened Runtime, ad-hoc signed. The bundled FFmpeg and FFprobe
   signatures and the complete bundle pass `codesign --verify --deep --strict`.
 - Not notarized and not a DMG. Those are Task 023 release gates, not defects in this local build.
 - Existing database backup:
   `~/Library/Application Support/dev.crush.app/backups/pre-user-test-2026-08-29.db`
   (`SHA-256 2e0500e7d986e504afa34180a0aafa8320161ea2e577c7f51e24064129b1de55`).
+- Post-migration schema-v10 checkpoint:
+  `~/Library/Application Support/dev.crush.app/backups/pre-ui-smoke-0724f08.db`
+  (`SHA-256 6404f06c93f04124398cf6f9c649d3be516c611517488b9ee281bcdc675d0d18`).
 - Prepared catalogue: four license-safe videos and three derived license-safe photos are Done.
   They provide 19 video vectors, three photo vectors and 22 aesthetic assessments. SQLite
-  integrity is clean at schema v9.
+  integrity is clean at schema v10.
 - One pre-existing offline record remains Failed:
   `/Volumes/Photos/Canon IMG Drop/101CANON/MVI_5342.MOV`. Keep it as the missing-drive case.
 - Test photo sources are under `target/user-testing/media/`. They were generated from the
@@ -24,9 +27,10 @@ not Task 021 render-golden approval or Task 023 clean-machine acceptance.
 
 Preparation checks passed:
 
-- The installed app launched and exposed Search, Library, Review, Style and Plans through the
-  native accessibility tree.
-- All 17 real-DOM UI harness scenarios passed, including plan editing/provenance, style copy,
+- The preceding installed build launched through the native accessibility tree. The current build
+  is installed and code-signed; its final native smoke check is pending only because the Mac was
+  locked during preparation.
+- All 17 real-DOM UI harness scenarios passed, including project editing/provenance, preference copy,
   mixed-media review, failures and draft preservation.
 - A 12-second video+AAC MOV was exported to
   `~/Desktop/Crush User Test Exports/synthetic-speech-shot-001.mov` and verified with the
@@ -39,14 +43,15 @@ Preparation checks passed:
 
 ## Test boundary
 
-It is safe to create collections, annotations, feedback, reference sets and plans in this
+It is safe to create collections, annotations, feedback, reference sets and projects in this
 catalogue: the pre-test database is backed up. Crush must never write to an original media file.
 Do not use personal or client media for this pass unless you intentionally want it catalogued.
 
 Personalization is **experimental**. Nothing in this test is approval to call it “learned.”
-The held-out style proof still needs asset/project-disjoint evaluation and human sign-off.
-Plan crop/grade/pacing fields are stored intent, not rendered output. Full photo/reel recipes,
-manifests and render goldens remain Task 021 work.
+The held-out preference proof still needs asset/project-disjoint evaluation and human sign-off.
+Project crop/grade/pacing fields are stored intent unless the export card explicitly says it can
+reproduce them. Verified photo and selected-clip exports are available; whole-project reel export
+and the formal render-golden approval remain Task 021 work.
 
 ## 20–30 minute test route
 
@@ -55,9 +60,9 @@ make the app pass.
 
 ### 1. Launch and health
 
-1. Open **Crush** from Applications. It is already open after preparation unless it was quit.
+1. Open **Crush** from Applications.
 2. Select **Run Doctor**.
-3. Expect schema 9, `source=Bundled`, FFmpeg 9.0.1 and 5/5 models present.
+3. Expect schema 10, `source=Bundled`, FFmpeg 9.0.1 and 5/5 models present.
 4. Confirm the sidebar reports eight assets. The offline Canon record should remain visibly
    failed rather than disappearing or blocking the seven prepared assets.
 
@@ -80,7 +85,7 @@ Try these one at a time:
 
 The first search can be slower while the local encoder initializes; subsequent searches should
 feel immediate. Open **Why this result?** on both a photo and a video. General quality and any
-style contribution must be separately named. A missing personal profile must not be presented
+preference contribution must be separately named. A missing personal profile must not be presented
 as personalization.
 
 Open a video result, play it, move to the adjacent shot, copy its path/timecodes and reveal the
@@ -92,41 +97,48 @@ source. Open a photo result and confirm that video-only controls are absent.
 2. Add a plain-language description, tags and notes to one photo; mark one prepared asset as a
    standout. Refresh/relaunch and verify those edits persist.
 3. Create a collection named `MacBook user test` and add one photo and one video shot.
-4. Confirm none of those document edits is described as style training.
+4. Confirm none of those document edits is described as preference training.
 
-### 5. Experimental style evidence
+### 5. Experimental preference evidence
 
-1. Open **Style** and inspect the empty/no-profile state.
+1. Open **Preferences** and inspect the empty/no-profile state. The copy should describe creative
+   taste, not filters or color grading.
 2. Create a reference set named `MacBook examples`, add two prepared assets and inspect the
    confirmation boundary before enabling them.
 3. If you confirm/retrain, the resulting copy must remain **Experimental profile · human review
    pending**, never “Learned.”
-4. Make one explicit Pick from a detail view. Ordinary tags, notes, crop intent and plan edits
+4. Make one explicit Pick from a detail view. Ordinary tags, notes, crop intent and project edits
    must not imply that a Pick or Reject was recorded.
 
-### 6. Plans
+### 6. Projects
 
-1. Create `MacBook test plan` with context `user-test`.
+1. Create `MacBook test project` with context `user-test`.
 2. Use a brief such as `short cinematic space sequence with a launch and a quiet ending`.
 3. Refresh candidates. Check the side-by-side General and Personalized/brief columns. With no
    eligible profile, the second column must explicitly say it is General brief matching.
 4. Add at least one photo and two video shots. Confirm the provenance pills are understandable.
-5. Edit video In/Out, pacing, crop intent, grade JSON and rationale; reorder the items.
-6. Save a version, make another edit, restore the saved version, duplicate the plan and relaunch.
+5. Edit video In/Out and rationale; reorder the items. If you add pacing, crop intent, or an
+   unsupported color-treatment object, selected-clip export must explain that it cannot reproduce
+   the edit rather than silently dropping it.
+6. Save a version, make another edit, restore the saved version, duplicate the project and relaunch.
    Verify saved state survives and originals remain untouched.
 
-### 7. Safe clip export
+### 7. Safe photo and clip export
 
 Use a new filename under `~/Desktop/Crush User Test Exports/`.
 
-1. Export one video result and play it in QuickTime. Check beginning, end, orientation and audio.
-2. Try exporting again to that exact existing path. If macOS asks to replace it, continue only
+1. In a Project, preview a selected photo, choose JPEG or PNG, export it, and open the finished
+   copy. Confirm the original remains unchanged and the verification manifest is shown separately.
+2. Preview a selected video shot, choose MP4 or MOV and source sound or mute, then export and play
+   it in QuickTime. Check beginning, end, orientation and audio.
+3. Try exporting again to that exact existing path. If macOS asks to replace it, continue only
    for this generated test export. Crush must refuse to overwrite the existing file.
-3. Exporting to an original, symlink or hard link must also fail. This is automated already;
+4. Exporting to an original, symlink or hard link must also fail. This is automated already;
    manual destructive experiments are not required.
 
-Clip export is the only renderer in this build. Plans cannot yet render photo derivatives or a
-finished reel, and the UI must not imply otherwise.
+Projects can render selected photo derivatives and selected clips. The durable backend can assemble
+the narrow, frozen ordered-video reel contract, but whole-project reel export is not exposed in this
+build and the UI must not imply that advanced Reel Studio intent is supported.
 
 ## Feedback to capture
 
@@ -145,10 +157,9 @@ Those are direct inputs to the next product pass.
 
 ## Known open work (do not file as regressions)
 
-- Style proof remains unapproved; personalization is experimental.
+- Preference proof remains unapproved; personalization is experimental.
 - Automatic sequence/repetition judgment is not implemented.
-- Plan treatments are not render previews.
-- Full non-destructive photo/reel recipes, durable render jobs, manifests, color conversion and
-  render-golden review remain Task 021.
+- Project treatments are not render previews.
+- Advanced mixed-media reel treatments and formal render-golden review remain Task 021.
 - Reel Studio importing is Task 022.
 - Notarized DMG and clean-machine acceptance are Task 023.
