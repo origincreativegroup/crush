@@ -381,6 +381,7 @@
     el.video.load();
     el.photo.removeAttribute("src");
     el.detail.hidden = true;
+    el.shell.classList.remove("detail-open");
     state.detail = null;
     notifyDetailChanged();
     if (state.view === "search") el.input.focus();
@@ -389,6 +390,7 @@
   function renderDetail() {
     const d = state.detail;
     el.detail.hidden = false;
+    el.shell.classList.add("detail-open");
     el.detail.focus();
     const isPhoto = d.kind === "photo";
     el.detailKind.textContent = isPhoto ? "Photo detail" : "Shot detail";

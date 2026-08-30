@@ -238,6 +238,29 @@
   box-shadow: -24px 0 60px rgb(0 0 0 / 40%);
 }
 
+/* Keep Review/Search usable while inspecting an asset. The detail surface is a real third
+   column on desktop rather than an overlay that hides the candidate grid underneath it. */
+.app-shell.detail-open {
+  grid-template-columns: 220px minmax(360px, 1fr) minmax(400px, 520px);
+}
+
+.app-shell.detail-open .workspace:not([hidden]) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.app-shell.detail-open .detail-panel {
+  position: relative;
+  grid-column: 3;
+  grid-row: 1;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  width: 100%;
+  min-width: 0;
+  height: 100vh;
+}
+
 .detail-head {
   display: flex;
   align-items: flex-start;
@@ -252,6 +275,7 @@
 
 .player-box {
   position: relative;
+  flex: 0 0 auto;
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 9px;

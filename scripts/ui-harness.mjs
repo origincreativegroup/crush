@@ -479,6 +479,29 @@ const tests = {
     await frame.locator("#filter-more").click();
     await frame.locator("#filter-reset").click();
     await poll(async () => (await tiles.count()) === 3);
+
+    // Opening a shot keeps a real 16:9 player visible and reflows Review beside the drawer.
+    // This guards the native regression where the flex column collapsed the video to zero
+    // height: audio played, but the detail surface covered the grid and showed no picture.
+    await frame.locator('.review-tile[data-key="shot|shot-1"]').click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    const playerBox = await frame.locator(".player-box").boundingBox();
+    assert.ok(playerBox, "detail player must have a rendered box");
+    assert.ok(playerBox.height >= 200, `detail player collapsed to ${playerBox.height}px`);
+    assert.ok(
+      Math.abs(playerBox.width / playerBox.height - 16 / 9) < 0.08,
+      `detail player lost 16:9 layout (${playerBox.width}x${playerBox.height})`,
+    );
+    assert.equal(await frame.locator("#app-shell").getAttribute("class"), "app-shell detail-open");
+    const reviewBox = await frame.locator("#review-view").boundingBox();
+    const detailBox = await frame.locator("#detail").boundingBox();
+    assert.ok(reviewBox && detailBox, "review and detail panes must both be rendered");
+    assert.ok(
+      reviewBox.x + reviewBox.width <= detailBox.x + 1,
+      "detail pane must not cover the Review grid",
+    );
+    await frame.locator("#detail-close").click();
+    assert.equal(await frame.locator("#app-shell").getAttribute("class"), "app-shell");
   },
 
   async "library-bulk"(page) {
