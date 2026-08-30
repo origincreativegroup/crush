@@ -100,13 +100,22 @@
 
   async function openCompare() {
     try {
-      state.assets = await invoke("library_browse", { filter: {} });
+      const base = window.__crushContext?.reviewFilters || {};
+      state.assets = await invoke("library_browse", { filter: base });
     } catch (error) {
       showStatus("a", String(error));
       return;
     }
+    const MAX_POOL = 300;
+    if (state.assets.length > MAX_POOL) {
+      state.assets = state.assets.slice(0, MAX_POOL);
+      showStatus(
+        "a",
+        `Comparing the first ${MAX_POOL} assets — tighten the Review filters to focus the pool.`,
+      );
+    }
     if (state.assets.length < 2) {
-      showStatus("a", "Need at least two assets in the library to compare.");
+      showStatus("a", "Need at least two assets in this pool to compare.");
       return;
     }
     fillSelects();

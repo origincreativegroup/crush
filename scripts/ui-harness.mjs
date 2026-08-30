@@ -226,6 +226,9 @@ const tests = {
     await items.nth(0).locator(".plans-item-options summary").click();
     await items.nth(0).locator('[name="pacing"]').fill("0.35");
     await items.nth(0).locator('[name="cropX"]').fill("0.6");
+    // Saving intent Crush cannot reproduce must warn inline instead of failing only at export.
+    await poll(async () => (await items.nth(0).locator(".plans-warning").isVisible()) === true);
+    assert.match(await visibleText(items.nth(0).locator(".plans-warning")), /pacing and horizontal crop.*renderer cannot reproduce/);
     await items.nth(0).locator('[name="gradeJson"]').fill('{"exposure":0.1}');
     // An unsaved second item must survive saving the first.
     await items.nth(1).locator('[name="reason"]').fill("A second draft");
@@ -413,7 +416,25 @@ const tests = {
     assert.equal(await visibleText(photoRow.locator(".file-name")), "select.jpg");
     assert.equal(await visibleText(photoRow.locator("td.number-column")), "—");
     await photoRow.click();
-    assert.equal(await frame.locator("#reindex").isDisabled(), true);
+    // Photos are re-indexable like videos now, not stuck in a failed/unreviewed state.
+    assert.equal(await frame.locator("#reindex").isEnabled(), true);
+    await frame.locator("#reindex").click();
+    await poll(async () =>
+      (await mockCalls(page)).some(
+        (call) => call.command === "reindex_asset" && call.args.id === "photo-one",
+      ),
+    );
+    // Removing hides a confirmation before forgetting the index; the original stays on disk.
+    await frame.locator("#remove-asset").click();
+    await frame.locator("#remove-asset-dialog").waitFor({ state: "visible" });
+    assert.match(await visibleText(frame.locator("#remove-asset-copy")), /select\.jpg.*original file on disk is never touched/s);
+    await frame.locator("#remove-asset-confirm").click();
+    await poll(async () =>
+      (await mockCalls(page)).some(
+        (call) => call.command === "remove_asset" && call.args.id === "photo-one",
+      ),
+    );
+    await poll(async () => (await frame.locator("#video-rows tr.video-row").count()) === 1);
   },
 
   async "search-error"(page) {
@@ -428,7 +449,35 @@ const tests = {
     );
   },
 
-  async feedback(page) {
+  async "photo-export-detail"(page) {
+    const frame = page.frameLocator("#app-frame");
+    const input = frame.locator("#search-input");
+    await input.waitFor({ state: "visible" });
+    await input.fill("rocket");
+    await input.press("Enter");
+    const cards = frame.locator(".result-card");
+    await poll(async () => (await cards.count()) === 2);
+    // Open the photo result; the drawer swaps video-only controls for the photo export path.
+    await cards.filter({ hasText: "select.jpg" }).click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    assert.equal(await frame.locator("#export-clip").isHidden(), true);
+    assert.equal(await frame.locator("#photo-export").isVisible(), true);
+    await frame.locator("#photo-export-preset").selectOption("png-srgb-v1");
+    await frame.locator("#export-photo").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "render_photo"
+          && call.args.photoId === "photo-0"
+          && call.args.preset === "png-srgb-v1"
+          && call.args.destination === "/tmp/select_export.png",
+      );
+    });
+    assert.match(await visibleText(frame.locator("#photo-export-status")), /Exported and verified/);
+  },
+
+  async "feedback"(page) {
     const frame = page.frameLocator("#app-frame");
     const input = frame.locator("#search-input");
     await input.waitFor({ state: "visible" });
@@ -463,6 +512,18 @@ const tests = {
       const message = (await frame.locator("#search-message").textContent()) ?? "";
       return message.includes("Rated 4 of 5.");
     });
+    // Reopen-guard: closing the detail drawer must reset the player cache key so a later
+    // reopen actually re-attaches the source (regression: dataset.src survived closeDetail,
+    // the src assignment was skipped, and the player went blank without firing an error).
+    await frame.locator("#detail-close").click();
+    await frame.locator("#detail").waitFor({ state: "hidden" });
+    await card.click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    assert.equal(
+      await frame.locator("#detail-video").evaluate((node) => node.hasAttribute("src")),
+      true,
+      "reopened detail must re-attach the video source",
+    );
   },
 
   async "style-panel"(page) {
@@ -592,6 +653,51 @@ const tests = {
     assert.equal(await frame.locator("#app-shell").getAttribute("class"), "app-shell");
   },
 
+  async "library-feedback"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+
+    // Batch-pick the first two tiles and rate the third ★ 4; the new Editorial filter must
+    // reach library_browse as feedback + qualityMin and narrow the grid accordingly.
+    await frame.locator("#review-grid .review-select input").nth(0).check();
+    await frame.locator("#review-grid .review-select input").nth(1).check();
+    await frame.locator("#batch-pick").click();
+    await poll(async () => !(await frame.locator("#batch-bar").isVisible()));
+
+    await frame.locator("#review-grid .review-select input").nth(2).check();
+    await frame.locator("#batch-rating").selectOption("4");
+    await poll(async () => !(await frame.locator("#batch-bar").isVisible()));
+
+    await frame.locator("#filter-more").click();
+    await frame.locator("#filter-feedback").selectOption("pick");
+    await frame.locator("#filter-apply").click();
+    await poll(async () => (await tiles.count()) === 2);
+    assert.match(
+      await visibleText(frame.locator("#review-active-filters")),
+      /Showing:\s*Picked ×/,
+    );
+    const picked = (await mockCalls(page)).filter((call) => call.command === "library_browse").at(-1);
+    assert.equal(picked.args.filter.feedback, "pick");
+
+    // Minimum rating narrows to the assets rated at least that high (photo-one ★5, shot ★4, photo-two unrated).
+    await frame.locator("#filter-feedback").selectOption("");
+    await frame.locator("#filter-min-rating").selectOption("4");
+    await frame.locator("#filter-apply").click();
+    await poll(async () => (await tiles.count()) === 2);
+    const rated = (await mockCalls(page)).filter((call) => call.command === "library_browse").at(-1);
+    assert.equal(rated.args.filter.qualityMin, 4);
+    await frame.locator("#filter-min-rating").selectOption("5");
+    await frame.locator("#filter-apply").click();
+    await poll(async () => (await tiles.count()) === 1);
+    const top = (await mockCalls(page)).filter((call) => call.command === "library_browse").at(-1);
+    assert.equal(top.args.filter.qualityMin, 5);
+
+    await frame.locator("#filter-reset").click();
+    await poll(async () => (await tiles.count()) === 3);
+  },
+
   async "library-bulk"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-review").click();
@@ -671,6 +777,18 @@ const tests = {
           && call.args.fields.description === undefined,
       );
     });
+    // The standout toggle is an explicit editorial decision, saved through set_annotation
+    // and reflected by the drawer reload (never inferred from ordinary metadata edits).
+    await frame.locator("#detail-standout").check();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "set_annotation"
+          && call.args.fields?.standout === true,
+      );
+    });
+    await poll(async () => (await frame.locator("#detail-standout").isChecked()) === true);
   },
 
   async "library-saved-search"(page) {

@@ -154,17 +154,21 @@
     $("plan-items").replaceChildren(...state.items.map(renderItem));
     $("plan-items-empty").hidden = state.items.length > 0;
     $("plan-item-count").textContent = `(${state.items.length})`;
-    $("plan-revisions").replaceChildren(...state.revisions.map((revision) => {
-      const row = node("div", undefined, "plans-actions");
-      row.append(node("span", `v${revision.revision} · ${revision.label || "Untitled version"}`));
-      row.append(button("Restore…", async () => {
-        if (!await confirmAction(`Restore version ${revision.revision}? This replaces the current working project, including unsaved edits. Saved versions remain unchanged.`)) return;
-        await invoke("plan_restore_revision", { id: state.plan.id, revision: revision.revision });
-        await openPlan(state.plan.id);
-        message(`Restored version ${revision.revision}.`);
+    $("plan-revisions").replaceChildren(...state.revisions
+      // Exports snapshot the frozen sequence for the render job's audit trail; presenting
+      // every export as a Step 3 version would blur the two. Keep those out of the list.
+      .filter((revision) => !String(revision.label || "").startsWith("Export · "))
+      .map((revision) => {
+        const row = node("div", undefined, "plans-actions");
+        row.append(node("span", `v${revision.revision} · ${revision.label || "Untitled version"}`));
+        row.append(button("Restore…", async () => {
+          if (!await confirmAction(`Restore version ${revision.revision}? This replaces the current working project, including unsaved edits. Saved versions remain unchanged.`)) return;
+          await invoke("plan_restore_revision", { id: state.plan.id, revision: revision.revision });
+          await openPlan(state.plan.id);
+          message(`Restored version ${revision.revision}.`);
+        }));
+        return row;
       }));
-      return row;
-    }));
     renderCandidates();
     renderPreview();
     renderReelExport();
@@ -481,6 +485,28 @@
     treatment.append(input("Pacing (0–1)", "pacing", item.pacing, { type: "number", min: 0, max: 1, step: "any" }));
     treatment.append(input("Horizontal crop (0–1)", "cropX", item.cropX, { type: "number", min: 0, max: 1, step: "any" }));
     options.append(treatment, input("Color recipe JSON (advanced)", "gradeJson", item.gradeJson ?? "{}", { multiline: true }));
+    const treatmentWarn = node("p", "", "plans-warning");
+    treatmentWarn.hidden = true;
+    const updateTreatmentWarn = () => {
+      const data = new FormData(form);
+      const pacing = data.get("pacing");
+      const cropX = data.get("cropX");
+      const grade = String(data.get("gradeJson") || "").trim();
+      const notes = [];
+      if (pacing !== null && pacing !== "") notes.push("pacing");
+      if (cropX !== null && cropX !== "") notes.push("horizontal crop");
+      if (grade && grade !== "{}" && grade !== "{\"mode\":\"none\"}") notes.push("color treatment");
+      if (!notes.length) {
+        treatmentWarn.hidden = true;
+        treatmentWarn.textContent = "";
+        return;
+      }
+      treatmentWarn.hidden = false;
+      treatmentWarn.textContent =
+        `Saved ${notes.join(" and ")} is stored intent only. The current renderer cannot reproduce it exactly, so single-clip and reel export will ask you to remove it before rendering.`;
+    };
+    options.append(treatmentWarn);
+    updateTreatmentWarn();
     form.append(options);
     const actions = node("div", undefined, "plans-actions");
     const save = node("button", "Save item", "button primary small"); save.type = "submit";
@@ -516,6 +542,7 @@
     form.append(details);
     form.addEventListener("input", (event) => {
       dirty(key);
+      updateTreatmentWarn();
       if (key === state.previewKey && ["startS", "endS"].includes(event.target.name)) refreshPreviewRange();
     });
     form.addEventListener("submit", (event) => {

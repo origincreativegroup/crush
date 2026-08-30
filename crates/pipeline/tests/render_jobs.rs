@@ -860,3 +860,41 @@ fn frozen_ordered_reel_job_renders_project_order_and_publishes_one_manifest() {
     assert_eq!(manifest["verification"]["item_count"], 2);
     preserve_review_output(&output, "reel-speech-two-cuts.mp4");
 }
+
+#[test]
+fn render_jobs_and_sources_are_owner_scoped() {
+    let directory = tempfile::tempdir().unwrap();
+    let (pipeline, source) = setup_photo_job(
+        directory.path(),
+        "jpeg-srgb-v1",
+        &directory.path().join("exports/owner-a.jpg"),
+        "owner-isolation",
+    );
+
+    // A different owner cannot see or execute the default owner's recipe or job.
+    let owner_b = "owner-b";
+    let other_store = Store::open(directory.path()).unwrap();
+    assert!(other_store
+        .render_job_by_id(owner_b, "owner-isolation")
+        .unwrap()
+        .is_none());
+    assert!(other_store
+        .render_recipe_get(owner_b, "owner-isolation-recipe", 1)
+        .unwrap()
+        .is_none());
+    let blocked = pipeline.execute_render_job(owner_b, "owner-isolation");
+    assert!(blocked.is_err(), "another owner must not start this render");
+    assert!(
+        !directory.path().join("exports/owner-a.jpg").exists(),
+        "no output may be published for a foreign owner"
+    );
+
+    // The owner who created the job publishes a verified derivative and never touches the source.
+    let source_hash = sha256_file(&source).unwrap();
+    let output = pipeline
+        .execute_render_job(DEFAULT_OWNER_ID, "owner-isolation")
+        .unwrap();
+    assert!(Path::new(&output.output_path).is_file());
+    assert!(Path::new(&output.manifest_path).is_file());
+    assert_eq!(sha256_file(&source).unwrap(), source_hash);
+}

@@ -608,6 +608,10 @@ pub struct AssetFilter {
     pub faces_visible: Option<bool>,
     pub blur_required: Option<bool>,
     pub quality_min: Option<i64>,
+    /// Match assets with at least one recorded feedback event of this signal
+    /// ("pick", "reject", or "rating"). Append-only; a later opposite event does not yet
+    /// reverse earlier history, matching the tile's event counts.
+    pub feedback: Option<String>,
     pub collection_id: Option<String>,
     pub stack_id: Option<String>,
     pub context_key: Option<String>,
@@ -1068,6 +1072,16 @@ impl Store {
             owner_id,
             photo_id,
         )
+    }
+
+    pub fn delete_photo_vector(&self, owner_id: &str, photo_id: &str) -> anyhow::Result<()> {
+        self.connection
+            .execute(
+                "DELETE FROM photo_vectors WHERE owner_id = ?1 AND photo_id = ?2",
+                params![owner_id, photo_id],
+            )
+            .context("failed to delete photo vector")?;
+        Ok(())
     }
 
     pub fn load_all_photo_vectors(
@@ -2944,7 +2958,6 @@ impl Store {
                 }
             }
         }
-        }
 
         for (index, source) in sources.iter().enumerate() {
             let source = source
@@ -3790,7 +3803,11 @@ impl Store {
            SELECT 1 FROM collection_items cx
            WHERE cx.owner_id = {owner_col} AND cx.media_kind = '{media}'
              AND cx.media_id = {id_col} AND cx.context_key = ?9))
-     AND (?10 IS NULL OR {path_col} LIKE '%' || ?10 || '%')",
+     AND (?10 IS NULL OR {path_col} LIKE '%' || ?10 || '%')
+     AND (?11 IS NULL OR EXISTS (
+           SELECT 1 FROM feedback_events fe
+           WHERE fe.owner_id = {owner_col} AND fe.media_kind = '{media}'
+             AND fe.media_id = {id_col} AND fe.signal = ?11))",
             )
         };
         let photo_clause = clause("p.owner_id", "p.status", "p.path", "photo", "p.id");
@@ -3854,6 +3871,7 @@ impl Store {
                 filter.stack_id,
                 filter.context_key,
                 filter.search,
+                filter.feedback,
             ],
             library_asset_from_row,
         )?;
@@ -4834,6 +4852,9 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a video and everything that references it: shots, transcripts (FTS), vectors,
+    /// assessments, annotations, feedback, plan items, stacks, collections, and reference-set
+    /// items all cascade through the schema triggers and foreign keys.
     pub fn delete_video_cascade(&mut self, owner_id: &str, video_id: &str) -> anyhow::Result<bool> {
         let transaction = self
             .connection
@@ -4859,6 +4880,17 @@ impl Store {
             params![owner_id, video_id],
         )?;
         transaction.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Delete a photo and everything that references it. The AFTER DELETE triggers on `photos`
+    /// (schema 0002/0007/0009) clean annotations, assessments, feedback, reference-set items,
+    /// plan items, and stack/collection memberships; the vectors/proxy/thumb FKs cascade.
+    pub fn delete_photo_cascade(&mut self, owner_id: &str, photo_id: &str) -> anyhow::Result<bool> {
+        let changed = self.connection.execute(
+            "DELETE FROM photos WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, photo_id],
+        )?;
         Ok(changed == 1)
     }
 

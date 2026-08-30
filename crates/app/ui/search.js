@@ -27,6 +27,7 @@
     message: $("#search-message"),
     nothingIndexed: $("#search-nothing-indexed"),
     idle: $("#search-idle"),
+    busy: $("#search-busy"),
     noMatches: $("#search-no-matches"),
     error: $("#search-error"),
     grid: $("#results-grid"),
@@ -52,6 +53,10 @@
     shotIndex: $("#detail-shot-index"),
     copy: $("#copy-timecodes"),
     exportClip: $("#export-clip"),
+    photoExport: $("#photo-export"),
+    photoExportPreset: $("#photo-export-preset"),
+    exportPhoto: $("#export-photo"),
+    photoExportStatus: $("#photo-export-status"),
     reveal: $("#reveal-file"),
     prev: $("#prev-shot"),
     next: $("#next-shot"),
@@ -190,6 +195,7 @@
     const nothing = state.hasIndexedShots === false;
     el.nothingIndexed.hidden = !nothing;
     el.idle.hidden = nothing || hasResults || state.query.length > 0 || !state.browsing;
+    el.busy.hidden = !state.searching || state.query.length === 0;
     el.noMatches.hidden = nothing || hasResults || !state.query || !state.searched;
     el.grid.hidden = !hasResults;
     el.damHead.hidden = nothing || (!hasResults && !state.query);
@@ -216,6 +222,7 @@
     }
     state.searching = true;
     el.error.hidden = true;
+    renderStates();
     const started = performance.now();
     try {
       const results = await invoke("search", { q: query, top: Number(el.top.value) });
@@ -236,6 +243,7 @@
       el.error.hidden = false;
     } finally {
       state.searching = false;
+      renderStates();
       if (state.pendingQuery && state.pendingQuery !== query) {
         state.pendingQuery = null;
         runSearch();
@@ -477,6 +485,7 @@
     if (el.detail.hidden) return;
     el.video.pause();
     el.video.removeAttribute("src");
+    el.video.removeAttribute("data-src");
     el.video.load();
     el.photo.removeAttribute("src");
     el.detail.hidden = true;
@@ -498,6 +507,8 @@
     el.playerHint.hidden = isPhoto;
     el.playback.hidden = isPhoto;
     el.exportClip.hidden = isPhoto;
+    el.photoExport.hidden = !isPhoto;
+    el.photoExportStatus.hidden = true;
     el.prev.hidden = isPhoto;
     el.next.hidden = isPhoto;
     el.notesLabel.textContent = isPhoto ? "Editorial context" : "Transcript";
@@ -718,6 +729,46 @@
     }
   }
 
+  async function exportPhoto() {
+    const d = state.detail;
+    if (!d || d.kind !== "photo") return;
+    const preset = photoPresetFor(el.photoExportPreset.value);
+    const stem = fileName(d.photoPath).replace(/\.[^.]+$/, "") || "photo";
+    try {
+      const out = await bridge.dialog.save({
+        title: "Export photo",
+        defaultPath: `${stem}_export.${preset.extension}`,
+        filters: [preset.filter],
+      });
+      if (!out) return;
+      el.exportPhoto.disabled = true;
+      el.exportPhoto.textContent = "Exporting…";
+      el.photoExportStatus.hidden = true;
+      const exported = await invoke("render_photo", {
+        photoId: d.id,
+        preset: el.photoExportPreset.value,
+        destination: out,
+      });
+      el.photoExportStatus.hidden = false;
+      el.photoExportStatus.textContent = `Exported and verified · ${exported.outputSha256.slice(0, 12)}…`;
+      showMessage("Photo exported and verified. Your original was not changed.", {
+        action: { label: "Reveal", run: () => invoke("open_in_finder", { path: out }).catch(() => {}) },
+      });
+    } catch (error) {
+      el.photoExportStatus.hidden = false;
+      el.photoExportStatus.textContent = `Photo export failed: ${String(error)}`;
+    } finally {
+      el.exportPhoto.disabled = false;
+      el.exportPhoto.textContent = "Export photo…";
+    }
+  }
+
+  const photoPresetFor = (value) => ({
+    "jpeg-srgb-v1": { extension: "jpg", filter: { name: "JPEG image", extensions: ["jpg", "jpeg"] } },
+    "png-srgb-v1": { extension: "png", filter: { name: "PNG image", extensions: ["png"] } },
+    "tiff-srgb-v1": { extension: "tif", filter: { name: "TIFF image", extensions: ["tif", "tiff"] } },
+  }[value]);
+
   async function revealFile() {
     const d = state.detail;
     if (!d) return;
@@ -847,6 +898,7 @@
   el.loop.addEventListener("click", () => setLoop(!state.loop));
   el.copy.addEventListener("click", copyTimecodes);
   el.exportClip.addEventListener("click", exportClip);
+  el.exportPhoto.addEventListener("click", exportPhoto);
   el.reveal.addEventListener("click", revealFile);
   el.feedbackPick.addEventListener("click", () => recordFeedback("pick", 1));
   el.feedbackReject.addEventListener("click", () => recordFeedback("reject", -1));

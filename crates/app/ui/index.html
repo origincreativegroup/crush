@@ -84,8 +84,9 @@
             <p class="eyebrow">Photo + video index</p>
             <h1 id="library-title">Library</h1>
           </div>
-          <div class="toolbar-actions">
+<div class="toolbar-actions">
             <button id="reindex" class="button secondary" type="button" disabled>Re-index selected</button>
+            <button id="remove-asset" class="button danger" type="button" disabled>Remove from library…</button>
             <button id="cancel" class="button danger" type="button" hidden>Cancel</button>
             <button id="import-reel-studio" class="button secondary" type="button">Import Reel Studio…</button>
             <button id="add-folder" class="button primary" type="button">Add Folder…</button>
@@ -98,7 +99,7 @@
           <div id="empty-library" class="empty-state" hidden>
             <div class="empty-icon" aria-hidden="true">＋</div>
             <h2>No media yet</h2>
-            <p>No photos or footage indexed yet. Add a folder to start indexing, or run <span class="mono">crushctl ingest</span>.</p>
+            <p>No photos or footage indexed yet. Add a folder to start indexing.</p>
             <button id="empty-add-folder" class="button primary" type="button">Add Folder…</button>
           </div>
 
@@ -248,7 +249,7 @@
                   <button class="button secondary" type="submit">Save version</button>
                 </form>
                 <div id="plan-revisions" class="plans-stack"></div>
-                <p class="plans-muted">A saved version preserves this edit document. It is not a rendered file or publication approval.</p>
+                <p class="plans-muted">A saved version preserves this edit document. It is not a rendered file or publication approval. Exports snapshot their sequence automatically for the render manifest; those audit snapshots stay out of this list.</p>
               </section>
               <section id="project-reel-export" class="project-reel-export" aria-labelledby="project-reel-export-title">
                 <p class="workflow-step">Step 4</p>
@@ -314,6 +315,19 @@
         </header>
         <h1 id="search-title" class="sr-only">Search</h1>
         <div id="search-message" class="library-message search-message" role="status" hidden></div>
+        <details class="shortcut-help">
+          <summary>Keyboard shortcuts</summary>
+          <dl>
+            <div><dt>⌘F</dt><dd>Focus search</dd></div>
+            <div><dt>Esc</dt><dd>Clear search / close detail</dd></div>
+            <div><dt>↑ ↓ ← →</dt><dd>Move through results</dd></div>
+            <div><dt>Enter</dt><dd>Open detail</dd></div>
+            <div><dt>Space</dt><dd>Play / pause clip</dd></div>
+            <div><dt>L</dt><dd>Loop clip</dd></div>
+            <div><dt>← → (detail)</dt><dd>Previous / next shot</dd></div>
+            <div><dt>p / x / 1–5 (compare)</dt><dd>Pick / reject / rate the focused side</dd></div>
+          </dl>
+        </details>
         <section id="search-content" class="search-content">
           <div id="search-nothing-indexed" class="empty-state" hidden>
             <div class="empty-icon" aria-hidden="true">▦</div>
@@ -323,6 +337,9 @@
           </div>
           <div id="search-idle" class="empty-state muted" hidden>
             <p>Loading your local media library…</p>
+          </div>
+          <div id="search-busy" class="empty-state muted" hidden>
+            <p>Searching your library…</p>
           </div>
           <div id="search-no-matches" class="empty-state muted" hidden>
             <h2>No matches</h2>
@@ -421,12 +438,12 @@
             <div id="review-advanced-filters" class="review-advanced-filters" hidden>
               <label class="filter-control"><span class="sr-only">Status</span>
               <select id="filter-status" aria-label="Status">
-                <option value="">Any status</option>
-                <option value="done">Done</option>
-                <option value="pending">Pending</option>
-                <option value="embedded">Embedded</option>
-                <option value="split">Split</option>
-                <option value="transcribed">Transcribed</option>
+                <option value="">Ready any</option>
+                <option value="done">Ready</option>
+                <option value="pending">Waiting</option>
+                <option value="split">Indexing</option>
+                <option value="embedded">Indexing</option>
+                <option value="transcribed">Indexing</option>
                 <option value="failed">Failed</option>
               </select>
               </label>
@@ -435,6 +452,24 @@
                 <option value="">Usable any</option>
                 <option value="true">Usable</option>
                 <option value="false">Unusable</option>
+              </select>
+              </label>
+              <label class="filter-control"><span class="sr-only">Editorial</span>
+              <select id="filter-feedback" aria-label="Editorial status">
+                <option value="">Editorial any</option>
+                <option value="pick">Picked</option>
+                <option value="reject">Rejected</option>
+                <option value="rating">Rated</option>
+              </select>
+              </label>
+              <label class="filter-control"><span class="sr-only">Minimum rating</span>
+              <select id="filter-min-rating" aria-label="Minimum rating">
+                <option value="">Rating any</option>
+                <option value="1">★ 1 or more</option>
+                <option value="2">★ 2 or more</option>
+                <option value="3">★ 3 or more</option>
+                <option value="4">★ 4 or more</option>
+                <option value="5">★ 5</option>
               </select>
               </label>
               <label class="filter-control"><span class="sr-only">Blur required</span>
@@ -531,9 +566,18 @@
         <div class="detail-actions">
           <button id="copy-timecodes" class="button secondary" type="button">Copy path + timecodes</button>
           <button id="export-clip" class="button secondary" type="button">Export clip…</button>
+          <div id="photo-export" class="photo-detail-export" hidden>
+            <select id="photo-export-preset" aria-label="Photo file type">
+              <option value="jpeg-srgb-v1">JPEG — smaller, easy to share</option>
+              <option value="png-srgb-v1">PNG — lossless</option>
+              <option value="tiff-srgb-v1">TIFF — lossless 8-bit copy</option>
+            </select>
+            <button id="export-photo" class="button secondary" type="button">Export photo…</button>
+          </div>
           <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>
           <button id="compare-open" class="button secondary" type="button">Compare…</button>
         </div>
+        <p id="photo-export-status" class="detail-export-status" role="status" hidden></p>
         <div class="detail-feedback" aria-label="Editorial feedback">
           <span class="eyebrow">Editorial feedback</span>
           <button id="feedback-pick" class="button secondary" type="button">Pick</button>
@@ -544,6 +588,7 @@
               <option value="3">★ 3</option><option value="4">★ 4</option><option value="5">★ 5</option>
             </select>
           </label>
+          <label class="standout-control"><input id="detail-standout" type="checkbox" /> Standout</label>
         </div>
         <div class="detail-style" aria-label="Preference evidence">
           <span class="eyebrow">Preference evidence</span>
@@ -691,6 +736,15 @@
         </details>
         <p id="import-candidates" class="plans-muted" hidden></p>
       </section>
+    </dialog>
+
+    <dialog id="remove-asset-dialog" class="doctor-dialog" aria-labelledby="remove-asset-title">
+      <h2 id="remove-asset-title">Remove from library?</h2>
+      <p id="remove-asset-copy" class="plans-muted"></p>
+      <div class="plans-actions">
+        <button id="remove-asset-cancel" class="button secondary" type="button">Keep it</button>
+        <button id="remove-asset-confirm" class="button danger" type="button">Remove</button>
+      </div>
     </dialog>
 
     <dialog id="doctor-dialog" class="doctor-dialog">

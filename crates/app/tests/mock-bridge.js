@@ -76,6 +76,7 @@
     "style-panel": () => [{ ...video }, { ...photo }],
     "style-add-item": () => [{ ...video }],
   }[scenario]?.() ?? [];
+  let libraryList = library;
 
   const pipeline = [];
   const background = [];
@@ -386,6 +387,7 @@
     "library-grid",
     "dam-home",
     "library-bulk",
+    "library-feedback",
     "library-flags",
     "library-saved-search",
     "compare-view",
@@ -480,6 +482,10 @@
       }]
     : [];
   const annotationEdits = new Map();
+  // Latest editorial outcome per media id, keyed by `photo|<id>` / `shot|<id>`. The mock's
+  // review_batch and record_feedback settle these the way the real store appends feedback
+  // events, so the new feedback filter has an observable, stateful target.
+  const feedbackState = new Map();
 
   const findReviewAsset = (assetType, mediaId) => {
     const kind = assetType === "photo" ? "photo" : "shot";
@@ -489,6 +495,9 @@
     if (!asset) throw `No ${kind} ${mediaId}`;
     return asset;
   };
+
+  const reviewFeedback = (asset) =>
+    feedbackState.get(`${asset.mediaKind}|${asset.mediaId}`) || null;
 
   const reviewBrowse = (filter = {}) =>
     reviewAssets
@@ -505,6 +514,10 @@
           && filter.blurRequired !== null
           && asset.blurRequired !== filter.blurRequired
         ) {
+          return false;
+        }
+        if (filter.feedback && reviewFeedback(asset) !== filter.feedback) return false;
+        if (filter.qualityMin != null && (asset.quality == null || asset.quality < filter.qualityMin)) {
           return false;
         }
         if (filter.collectionId && !asset.collectionIds.includes(filter.collectionId)) return false;
@@ -528,10 +541,11 @@
       action: edits.action ?? "",
       tags: edits.tags ?? asset.tags,
       notes: edits.notes ?? "",
-      usable: asset.usable,
-      facesVisible: asset.facesVisible,
-      nametagsVisible: asset.nametagsVisible,
-      blurRequired: asset.blurRequired,
+      standout: edits.standout ?? asset.standout ?? false,
+      usable: edits.usable ?? asset.usable,
+      facesVisible: edits.facesVisible ?? asset.facesVisible,
+      nametagsVisible: edits.nametagsVisible ?? asset.nametagsVisible,
+      blurRequired: edits.blurRequired ?? asset.blurRequired,
     };
   };
 
@@ -639,6 +653,21 @@
         plans.set(plan.id, plan); return clone(planView(plan));
       }
       case "plan_delete": return plans.delete(args.id);
+      case "render_photo": {
+        return {
+          jobId: "render-job-detail-photo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "d".repeat(64),
+          manifestSha256: "e".repeat(64),
+          sizeBytes: 2097152,
+          mediaType: args.preset.startsWith("jpeg") ? "image/jpeg" : args.preset.startsWith("tiff") ? "image/tiff" : "image/png",
+          width: 6000,
+          height: 4000,
+          durationS: null,
+          completedAt: "2026-08-29T12:40:00Z",
+        };
+      }
       case "render_project_photo": {
         if (scenario === "plans-errors") throw "Source photo changed after it was selected";
         return {
@@ -702,7 +731,14 @@
       case "models_download":
         return modelsDownload();
       case "list_videos":
-        return library.map((asset) => ({ ...asset }));
+        return libraryList.map((asset) => ({ ...asset }));
+      case "remove_asset": {
+        const index = libraryList.findIndex((asset) => asset.id === args.id);
+        if (index === -1) throw `No asset ${args.id}`;
+        const [removed] = libraryList.splice(index, 1);
+        emit("ingest-progress", snapshot());
+        return { removed: true, kind: removed.assetType };
+      }
       case "job_status":
         return snapshot();
       case "doctor":
@@ -736,6 +772,7 @@
       }
       case "add_folder":
       case "reindex_video":
+      case "reindex_asset":
         return { jobId: "background-test" };
       case "search": {
         const q = String(args.q || "");
@@ -750,8 +787,23 @@
         return photoDetail(args.id);
       case "shot_at_index":
         return `shot-${args.idx}`;
-      case "record_feedback":
+      case "record_feedback": {
+        const asset = reviewAssets.find(
+          (candidate) =>
+            candidate.mediaKind === (args.assetType === "photo" ? "photo" : "shot")
+            && candidate.mediaId === args.id,
+        );
+        if (asset) {
+          const signal =
+            args.signal === "prefer" ? "prefer"
+            : args.signal === "pick" ? "pick"
+            : args.signal === "reject" ? "reject"
+            : args.signal === "rating" ? "rating"
+            : args.signal;
+          feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, signal);
+        }
         return "feedback-test";
+      }
       case "reference_set_list":
         return styleState.sets.map((set) => ({ ...set }));
       case "reference_set_create": {
@@ -920,14 +972,22 @@
         const ops = Array.isArray(args.ops) ? args.ops : [];
         for (const op of ops) {
           if (op.op === "rate") {
-            findReviewAsset(op.assetType, op.mediaId).quality = op.rating;
+            const asset = findReviewAsset(op.assetType, op.mediaId);
+            asset.quality = op.rating;
+            feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, "rating");
+          } else if (op.op === "pick") {
+            const asset = findReviewAsset(op.assetType, op.mediaId);
+            feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, "pick");
+          } else if (op.op === "reject") {
+            const asset = findReviewAsset(op.assetType, op.mediaId);
+            feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, "reject");
           } else if (op.op === "add_to_collection") {
             const asset = findReviewAsset(op.assetType, op.mediaId);
             if (!asset.collectionIds.includes(op.collectionId)) {
               asset.collectionIds.push(op.collectionId);
             }
           }
-          // pick/reject/flag append feedback events; the mock records the call itself.
+          // flag appends a feedback event; the mock records the call itself.
         }
         return ops.length;
       }

@@ -32,17 +32,43 @@ render-golden review in Task 021, and clean-machine acceptance before release in
 
 **Branch:** `task/NN-short-name`. One task per PR.
 
-## Current implementation state (2026-08-29, agent-team session)
+**Next team:** `docs/next-stretch-team-handoff.md` assigns the 021 closeout, 022 integration, 023
+release and 028–031 Windows lanes, their merge order and human gates. Use it for the next stretch;
+this file remains the deeper implementation history and standing engineering rules.
 
-**Fresh-eyes continuation:** see `docs/review-2026-08-29.md` and Task 020b. The missing
-`TASK-020-impl-plan.md` is now explicitly reconstructed. 018b was merged in #29; its automatic
-“Learned” claim is replaced with experimental/review-pending copy. Style proof remains OPEN
-(pair/asset leakage, residual-vs-composed evaluation, evidence withdrawal require follow-up).
-020b is merged in #36 and provides plans UI, frozen profile provenance and truly
-context-scoped explicit picks. Task 021 has begun with private no-clobber clip export staging;
-the full renderer and render-golden human review remain open.
-Task 020 overall still lacks automatic sequence/repetition judgment; do not claim it exists.
-Historical statements below describe the incoming handoff, not fresh acceptance of those claims.
+## Current implementation state (2026-08-30)
+
+Task 022 (Reel Studio importer) is merged onto the Task 021 render branch as a single squash merge:
+schema v11 manual spans + import ledger, dry-run/idempotent importer, `crushctl import`, the Library
+import dialog, and span rendering through the reel executor with honest Historical/Imported
+provenance pills. The 2026-08-30 editor-review pass is implemented and browser-harness covered:
+detail-player reopen fix, Standout control, Pick/Reject/Min-rating Review filters, photo export from
+the detail drawer, photo re-index + remove-from-library, an inline "stored intent, not yet
+renderable" treatment warning, a searching state, editor-language status labels, audit-only export
+snapshots, shortcut help, and consistent timecodes. Release tooling for Task 023 landed too:
+`scripts/verify-release.sh`, `crushctl doctor --deep`, and `docs/release.md`.
+
+Task 021 render engineering is complete on this branch and the recognized retry gap is closed:
+the pipeline re-executes a Failed render in place (same durable job, attempt+1, no-clobber staging)
+and 2026-08-30 adds a render owner-isolation golden plus the existing stale-source, pre-cancelled,
+collision, recovery, clip and ordered-reel goldens. What remains for 021 to be *accepted* is
+exactly the human render-golden review (`docs/task-021-render-review.md`); nothing automated can
+close it. Render-golden artifacts are produced only by the renderer.
+
+Task 023 has no automated gate that is release approval either: clean-machine acceptance in
+`docs/smoke.md` stays human, along with the Task 018 held-out style proof and the Task 021 visual
+review. Do not let a green Linux/macOS CI, a passing harness, or a successful `verify-release.sh`
+be written up as a release.
+
+Older entries below (2026-08-28 → 2026-08-29) remain the recorded task history; the branch note
+about `generate_handler!` conflict-prone lists is unchanged (rebase onto the merged branch and run
+rustfmt before opening a PR).
+
+Historical continuation notes (2026-08-29): the fresh-eyes review (`docs/review-2026-08-29.md`)
+documented that the missing `TASK-020-impl-plan.md` was reconstructed, that 018b replaces the
+automatic “Learned” claim with experimental/review-pending copy, that the held-out style proof
+remains OPEN, and that Task 020 still lacks automatic sequence/repetition judgment. Those findings
+stand today and are not superseded by any later UI work.
 
 Tasks 000–019 are COMPLETE and merged; TASK-020a and TASK-020b are merged. Task 020's
 automatic sequence/repetition follow-up remains explicit rather than being misreported as shipped.
@@ -51,9 +77,10 @@ Every task landed as its own squash PR gated by Linux + macOS CI: #14–#19 (ori
 ops), #24+#27 (027 app robustness + integration repair), #25 (018a style learner), #29 (018b style
 UI), #30 (019a DAM organization), #31 (019b review UI), #33+#34 (020a editorial plans core).
 
-Schema is at v9 (0009_plans.sql: plans / plan_items / plan_revisions with boundary-safe shot clamps,
-append-only revisions, and a provenance invariant recording origin/rank/profile_version so baseline
-and personalized results stay distinguishable in data). App command surface is 63 registered commands.
+Schema is at v11 (0009 plans with boundary-safe shot clamps and selection provenance; 0010 durable
+render recipes/jobs/attempts/manifests; 0011 Reel Studio manual spans + import ledger). App command
+surface is 71 registered commands.
+
 Branching note for future agents: the app `generate_handler!` list and the big command block in
 `crates/app/src-tauri/src/lib.rs` conflict-prone across parallel branches — rebase onto main before
 opening the PR and run rustfmt (it is the local syntax referee when no toolchain compiles).
@@ -67,15 +94,12 @@ Known caveats carried forward:
   before any UI may claim "learned"), Task 021 render-golden review, Task 023 clean-machine
   acceptance. Plan files and per-task acceptance records live in `.tasks/done/`.
 
-Current: **TASK-021** non-destructive recipes and media rendering per
-`.tasks/backlog/TASK-021-impl-plan.md`. PR #37 has functional photo, selected-clip, and ordered
-clip-reel rendering, durable recovery/no-clobber publication, a Projects export workflow, active
-reel cancellation, and direct retry. The 2026-08-30 review findings owned by 021 are fixed:
-published checksummed pairs stay verifying ahead of late cancellation; durable failure-transition
-errors are surfaced; one-off clip recipes and jobs queue atomically; and reel v1 rejects photo
-sources before creating an unrenderable job. Whole-reel photo holds remain an explicit capability
-error until duration/framing intent is versioned. Do not call 021 complete until John's
-render-golden review; 023 retains its clean-machine human stop.
+Current: **TASK-021 + TASK-022 on one branch**, with Task 023 tooling. The render and importer
+engineering is implemented (durable no-clobber photo/clip/ordered-reel jobs, schema v11 spans,
+dry-run importer, span rendering, the editor-review pass listed above) and green on the local gates.
+The `Current implementation state (2026-08-30)` section is the authoritative status. Only the human
+gates remain: 021 render-golden review, 023 clean-machine acceptance, and the 018 held-out style
+proof.
 
 The 2026-08-29 user review is part of acceptance for this continuation: user-facing Plans becomes
 Projects with a guided selects -> sequence -> preview -> export flow; Style becomes Preferences

@@ -95,6 +95,13 @@ mod macos {
 
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
+    struct RemoveOutcome {
+        removed: bool,
+        kind: String,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct ModelFileStatus {
         name: String,
         bytes: u64,
@@ -205,6 +212,7 @@ mod macos {
         faces_visible: Option<bool>,
         blur_required: Option<bool>,
         quality_min: Option<i64>,
+        feedback: Option<String>,
         collection_id: Option<String>,
         stack_id: Option<String>,
         context_key: Option<String>,
@@ -256,6 +264,7 @@ mod macos {
         action: String,
         tags: String,
         notes: String,
+        standout: bool,
         usable: bool,
         faces_visible: bool,
         nametags_visible: bool,
@@ -590,7 +599,99 @@ mod macos {
                 .video_by_id(DEFAULT_OWNER_ID, &id)?
                 .with_context(|| format!("video {id} was not found"))?;
             drop(store);
+            let target = id.clone();
+            start_reindex(app, state, video.path, move |pipeline| {
+                pipeline.resplit(&target, false)
+            })
+        })())
+    }
 
+    #[tauri::command]
+    fn reindex_asset(
+        id: String,
+        app: AppHandle,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<TaskStarted> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            if let Some(photo) = store.photo_by_id(DEFAULT_OWNER_ID, &id)? {
+                drop(store);
+                let path = photo.path.clone();
+                let target = id.clone();
+                return start_reindex(app, state, path, move |pipeline| {
+                    pipeline.reprocess_photo(&target, false)
+                });
+            }
+            let video = store
+                .video_by_id(DEFAULT_OWNER_ID, &id)?
+                .with_context(|| format!("asset {id} was not found"))?;
+            drop(store);
+            let target = id.clone();
+            start_reindex(app, state, video.path.clone(), move |pipeline| {
+                pipeline.resplit(&target, false)
+            })
+        })())
+    }
+
+    #[tauri::command]
+    fn remove_asset(id: String, state: State<'_, RuntimeState>) -> CommandResult<RemoveOutcome> {
+        command_result((|| {
+            let mut store = Store::open(&state.paths.root)?;
+            if let Some(photo) = store.photo_by_id(DEFAULT_OWNER_ID, &id)? {
+                let mut files = Vec::new();
+                if let Some(metadata) = store.photo_source_metadata(DEFAULT_OWNER_ID, &photo.id)? {
+                    if let Some(rel) = metadata.proxy_rel {
+                        files.push(store.proxy_path(&rel)?);
+                    }
+                }
+                if let Some(rel) = &photo.thumb_rel {
+                    files.push(store.thumbnail_path(rel)?);
+                }
+                if store.delete_photo_cascade(DEFAULT_OWNER_ID, &photo.id)? {
+                    for path in files {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Ok(RemoveOutcome {
+                        removed: true,
+                        kind: "photo".to_owned(),
+                    });
+                }
+            }
+            if let Some(video) = store.video_by_id(DEFAULT_OWNER_ID, &id)? {
+                let mut files = Vec::new();
+                if let Some(metadata) = store.video_source_metadata(DEFAULT_OWNER_ID, &video.id)? {
+                    if let Some(relative) = metadata.proxy_rel {
+                        files.push(store.proxy_path(&relative)?);
+                    }
+                }
+                for shot in store.shots_for_video(DEFAULT_OWNER_ID, &video.id)? {
+                    if let Some(rel) = shot.thumb_rel {
+                        if let Ok(path) = store.thumbnail_path(&rel) {
+                            files.push(path);
+                        }
+                    }
+                }
+                if store.delete_video_cascade(DEFAULT_OWNER_ID, &video.id)? {
+                    for path in files {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Ok(RemoveOutcome {
+                        removed: true,
+                        kind: "video".to_owned(),
+                    });
+                }
+            }
+            anyhow::bail!("asset {id} was not found in the library")
+        })())
+    }
+
+    fn start_reindex(
+        app: AppHandle,
+        state: State<'_, RuntimeState>,
+        path: String,
+        run: impl FnOnce(&Pipeline) -> anyhow::Result<()> + Send + 'static,
+    ) -> anyhow::Result<TaskStarted> {
+        {
             let job_id = Uuid::new_v4().to_string();
             let cancellation = CancellationToken::default();
             {
@@ -609,7 +710,7 @@ mod macos {
                     job_id: job_id.clone(),
                     kind: BackgroundKind::Ingest,
                     status: BackgroundStatus::Running,
-                    detail: Some(format!("re-indexing {}", video.path)),
+                    detail: Some(format!("re-indexing {path}")),
                     error: None,
                 },
             )
@@ -626,9 +727,8 @@ mod macos {
             let spawned_job_id = job_id.clone();
             let spawned_cancellation = cancellation.clone();
             drop(tauri::async_runtime::spawn_blocking(move || {
-                let result = Pipeline::new(config, paths, spawned_cancellation.clone())
-                    .resplit(&id, false)
-                    .map(|()| "re-index complete".to_owned());
+                let pipeline = Pipeline::new(config, paths, spawned_cancellation.clone());
+                let result = run(&pipeline).map(|()| "re-index complete".to_owned());
                 let cancelled = spawned_cancellation.is_cancelled();
                 let completed = complete_background(&tasks, &spawned_job_id, result, cancelled);
                 release_ingest_slot(&active_ingest, &spawned_job_id);
@@ -639,7 +739,7 @@ mod macos {
                 }
             }));
             Ok(TaskStarted { job_id })
-        })())
+        }
     }
 
     #[derive(Debug, Clone, serde::Deserialize)]
@@ -1412,6 +1512,7 @@ mod macos {
                 faces_visible: args.faces_visible,
                 blur_required: args.blur_required,
                 quality_min: args.quality_min,
+                feedback: args.feedback,
                 collection_id: args.collection_id,
                 stack_id: args.stack_id,
                 context_key: args.context_key,
@@ -2112,6 +2213,91 @@ mod macos {
                         "origin": origin,
                         "rank": selected.rank,
                         "profile_version": selected.profile_version,
+                    },
+                    "sources": [{
+                        "media_kind": "photo",
+                        "media_id": photo.id,
+                        "source_id": photo.id,
+                        "sha256": photo.sha256,
+                        "path": photo.path,
+                    }],
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used",
+                    },
+                })
+                .to_string(),
+                destination_path: destination_path.to_string_lossy().into_owned(),
+                created_at: chrono::Utc::now(),
+            },
+        )?;
+        drop(store);
+
+        let output = Pipeline::new(config.clone(), paths.clone(), CancellationToken::default())
+            .execute_render_job(DEFAULT_OWNER_ID, &job_id)?;
+        ensure!(
+            Path::new(&output.output_path).is_file() && Path::new(&output.manifest_path).is_file(),
+            "render completed without both verified files"
+        );
+        Ok(render_output_view(output))
+    }
+
+    /// Standalone photo derivative export from the Search/Review detail drawer, without a
+    /// project. Keeps the same verified render contract as the project photo export and records
+    /// `detail` provenance so the manifest never implies a project choice.
+    fn render_photo_job(
+        config: &Config,
+        paths: &AppPaths,
+        photo_id: &str,
+        preset: &str,
+        destination: &str,
+    ) -> anyhow::Result<PhotoRenderView> {
+        let spec = photo_preset_spec(preset)?;
+        let destination_path = PathBuf::from(destination);
+        ensure!(
+            destination_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| spec
+                    .extensions
+                    .iter()
+                    .any(|allowed| value.eq_ignore_ascii_case(allowed))),
+            "the selected file type requires a .{} destination",
+            spec.extensions[0]
+        );
+
+        let mut store = Store::open(&paths.root)?;
+        let photo = store
+            .photo_by_id(DEFAULT_OWNER_ID, photo_id)?
+            .with_context(|| format!("photo {photo_id} was not found"))?;
+        let annotation =
+            store.editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, photo_id)?;
+        ensure!(
+            !annotation.is_some_and(|value| !value.usable || value.blur_required),
+            "this photo is flagged unusable or blur-required and cannot be rendered"
+        );
+
+        ensure_photo_render_recipe(&store, spec)?;
+        let job_id = format!("render-job-{}", Uuid::new_v4());
+        store.render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: job_id.clone(),
+                recipe_id: spec.id.to_owned(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "default",
+                    "selection_provenance": {
+                        "origin": "detail_export",
+                        "profile_version": null,
                     },
                     "sources": [{
                         "media_kind": "photo",
@@ -2863,6 +3049,7 @@ mod macos {
                 notes: annotation
                     .as_ref()
                     .map_or_else(String::new, |value| value.notes.clone()),
+                standout: annotation.as_ref().is_some_and(|value| value.standout),
                 usable: annotation.as_ref().is_none_or(|value| value.usable),
                 faces_visible: annotation.as_ref().is_some_and(|value| value.faces_visible),
                 nametags_visible: annotation
@@ -3125,6 +3312,28 @@ mod macos {
                 &config,
                 &paths,
                 &project_id,
+                &photo_id,
+                &preset,
+                &destination,
+            ))
+        })
+        .await
+        .map_err(|error| format!("photo render worker failed: {error}"))?
+    }
+
+    #[tauri::command]
+    async fn render_photo(
+        photo_id: String,
+        preset: String,
+        destination: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PhotoRenderView> {
+        let config = state.config.clone();
+        let paths = state.paths.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result(render_photo_job(
+                &config,
+                &paths,
                 &photo_id,
                 &preset,
                 &destination,
@@ -3490,6 +3699,8 @@ mod macos {
                 job_status,
                 cancel_ingest,
                 reindex_video,
+                reindex_asset,
+                remove_asset,
                 import_reel_studio,
                 search,
                 shot_detail,
@@ -3545,6 +3756,7 @@ mod macos {
                 plan_duplicate,
                 selects_candidates,
                 render_project_photo,
+                render_photo,
                 render_project_clip,
                 render_project_reel,
                 cancel_project_render,

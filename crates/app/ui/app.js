@@ -12,6 +12,11 @@ const elements = {
   addFolder: document.querySelector("#add-folder"),
   emptyAddFolder: document.querySelector("#empty-add-folder"),
   reindex: document.querySelector("#reindex"),
+  removeAsset: document.querySelector("#remove-asset"),
+  removeDialog: document.querySelector("#remove-asset-dialog"),
+  removeCancel: document.querySelector("#remove-asset-cancel"),
+  removeConfirm: document.querySelector("#remove-asset-confirm"),
+  removeCopy: document.querySelector("#remove-asset-copy"),
   cancel: document.querySelector("#cancel"),
   emptyLibrary: document.querySelector("#empty-library"),
   videoTableWrap: document.querySelector("#video-table-wrap"),
@@ -35,6 +40,7 @@ const state = {
   jobs: { background: [], pipeline: [] },
   selectedVideoId: null,
   expandedVideoIds: new Set(),
+  pendingRemoveId: null,
   poll: null,
   messageTimer: null,
 };
@@ -228,7 +234,8 @@ function renderVideos() {
     state.selectedVideoId = null;
   }
   const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  elements.reindex.disabled = !selectedAsset || selectedAsset.assetType === "photo" || isIngestActive();
+  elements.reindex.disabled = !selectedAsset || isIngestActive();
+  elements.removeAsset.disabled = !selectedAsset || isIngestActive();
 
   for (const video of state.videos) {
     const presentation = videoPresentation(video);
@@ -365,7 +372,8 @@ function renderIndexingStatus() {
   elements.cancel.hidden = !active;
   elements.addFolder.disabled = active;
   const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  elements.reindex.disabled = !selectedAsset || selectedAsset.assetType === "photo" || active;
+  elements.reindex.disabled = !selectedAsset || active;
+  elements.removeAsset.disabled = !selectedAsset || active;
   const dot = document.createElement("span");
   dot.className = `status-dot${active ? "" : " idle"}`;
   dot.setAttribute("aria-hidden", "true");
@@ -449,13 +457,42 @@ async function cancelIngest() {
 
 async function reindexSelected() {
   const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  if (!selectedAsset || selectedAsset.assetType === "photo" || isIngestActive()) return;
+  if (!selectedAsset || isIngestActive()) return;
   try {
-    const started = await invoke("reindex_video", { id: state.selectedVideoId });
+    const started = await invoke("reindex_asset", { id: state.selectedVideoId });
     showMessage(`Re-index started · job ${started.jobId.slice(0, 8)}`);
     await refreshLibrary();
   } catch (error) {
     showMessage(String(error), true);
+  }
+}
+
+function confirmRemove() {
+  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
+  if (!selectedAsset || isIngestActive()) return;
+  const kind = selectedAsset.assetType === "photo" ? "photo" : "video";
+  state.pendingRemoveId = selectedAsset.id;
+  elements.removeCopy.textContent =
+    `Remove “${fileParts(selectedAsset.path).name}” from the Crush library?` +
+    " The original file on disk is never touched. Crush forgets its index, previews, " +
+    "analysis, choices and project references to it.";
+  elements.removeDialog.showModal();
+}
+
+async function removeConfirmed() {
+  const id = state.pendingRemoveId;
+  state.pendingRemoveId = null;
+  elements.removeDialog.close();
+  if (!id) return;
+  elements.removeConfirm.disabled = true;
+  try {
+    const outcome = await invoke("remove_asset", { id });
+    showMessage(`Removed the ${outcome.kind} from your library. The original file was not changed.`);
+    await refreshLibrary();
+  } catch (error) {
+    showMessage(String(error), true);
+  } finally {
+    elements.removeConfirm.disabled = false;
   }
 }
 
@@ -514,6 +551,18 @@ function bindActions() {
   elements.emptyAddFolder.addEventListener("click", chooseFolder);
   elements.cancel.addEventListener("click", cancelIngest);
   elements.reindex.addEventListener("click", reindexSelected);
+  elements.removeAsset.addEventListener("click", confirmRemove);
+  elements.removeCancel.addEventListener("click", () => {
+    state.pendingRemoveId = null;
+    elements.removeDialog.close();
+  });
+  elements.removeConfirm.addEventListener("click", removeConfirmed);
+  elements.removeDialog.addEventListener("click", (event) => {
+    if (event.target === elements.removeDialog) {
+      state.pendingRemoveId = null;
+      elements.removeDialog.close();
+    }
+  });
   elements.doctorLink.addEventListener("click", () => elements.doctorDialog.showModal());
   elements.closeDoctor.addEventListener("click", () => elements.doctorDialog.close());
   elements.runDoctor.addEventListener("click", runDoctor);

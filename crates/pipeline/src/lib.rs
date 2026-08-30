@@ -435,6 +435,30 @@ impl Pipeline {
         self.process_video(&mut store, &video.id, debug)
     }
 
+    /// Re-run the full photo pipeline for one stored photo: decode, rebuild the working proxy
+    /// and thumbnail, re-embed, verify the source stayed byte-identical, and backfill any stale
+    /// analysis. The deterministic photo id is derived from the content hash, so a source that
+    /// changed on disk will surface as a different photo rather than overwriting this one.
+    pub fn reprocess_photo(&self, target: &str, debug: bool) -> anyhow::Result<()> {
+        let _ = debug;
+        lower_priority();
+        let store = Store::open(&self.paths.root)?;
+        store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
+        ensure_embedding_metadata(&store)?;
+        let photo = store
+            .photo_by_id(DEFAULT_OWNER_ID, target)?
+            .with_context(|| format!("photo {target} was not found"))?;
+        let path = Path::new(&photo.path);
+        let sha256 = sha256_file(path)?;
+        let preference = ProviderPreference::parse(&self.config.embed.provider)?;
+        let mut embedder =
+            Embedder::new(self.paths.models(), preference, self.config.limits.threads)?;
+        store.delete_photo_vector(DEFAULT_OWNER_ID, &photo.id)?;
+        self.index_photo(&store, path, &photo.id, &sha256, &mut embedder)?;
+        self.analyze_photos(&store)?;
+        Ok(())
+    }
+
     pub fn reembed(&self, target: Option<&str>, all: bool, debug: bool) -> anyhow::Result<usize> {
         ensure!(all ^ target.is_some(), "choose either --all or one video");
         lower_priority();

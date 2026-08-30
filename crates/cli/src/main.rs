@@ -33,7 +33,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Check ffmpeg, models, acceleration, database. Run this first when anything is wrong.
-    Doctor,
+    Doctor {
+        /// Also run the deep library-integrity scan (missing vectors, transcripts, thumbnails,
+        /// foreign-key orphans) and report every problem found.
+        #[arg(long)]
+        deep: bool,
+    },
     /// Download and verify the pinned model release.
     Models {
         #[command(subcommand)]
@@ -107,6 +112,12 @@ enum Cmd {
         /// Case-insensitive file-name substring over the stored path.
         #[arg(long)]
         search: Option<String>,
+        /// Match assets with at least one recorded editorial action: pick, reject, or rating.
+        #[arg(long, value_name = "pick|reject|rating")]
+        feedback: Option<String>,
+        /// Only assets rated at least this many stars (1–5).
+        #[arg(long, value_name = "N")]
+        min_rating: Option<i64>,
         /// Print JSON rows instead of a table.
         #[arg(long)]
         json: bool,
@@ -225,7 +236,7 @@ fn main() -> anyhow::Result<()> {
         .context("failed to install Ctrl-C handler")?;
 
     match cli.cmd {
-        Cmd::Doctor => doctor(&cfg, &paths),
+        Cmd::Doctor { deep } => doctor(&cfg, &paths, deep),
         Cmd::Models {
             command: ModelsCommand::Ensure { manifest_url },
         } => ensure_models(&paths, &manifest_url),
@@ -278,8 +289,12 @@ fn main() -> anyhow::Result<()> {
             stack,
             context,
             search,
+            feedback,
+            min_rating,
             json,
-        } => library(&paths, kind, collection, stack, context, search, json),
+        } => library(
+            &paths, kind, collection, stack, context, search, feedback, min_rating, json,
+        ),
         Cmd::Selects {
             brief,
             context,
@@ -754,6 +769,7 @@ fn style_reset(paths: &AppPaths) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // flat positional CLI handler mirrors the subcommand fields
 fn library(
     paths: &AppPaths,
     kind: Option<String>,
@@ -761,6 +777,8 @@ fn library(
     stack: Option<String>,
     context: Option<String>,
     search: Option<String>,
+    feedback: Option<String>,
+    min_rating: Option<i64>,
     json: bool,
 ) -> anyhow::Result<()> {
     let parsed_kind = match kind.as_deref() {
@@ -775,6 +793,8 @@ fn library(
         stack_id: stack,
         context_key: context,
         search,
+        feedback,
+        quality_min: min_rating,
         ..AssetFilter::default()
     };
     let store = Store::open(&paths.root)?;
@@ -1093,7 +1113,7 @@ fn debug_scenes(cfg: &Config, paths: &AppPaths, video: &Path) -> anyhow::Result<
     Ok(())
 }
 
-fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
+fn doctor(cfg: &Config, paths: &AppPaths, deep: bool) -> anyhow::Result<()> {
     tracing::info!(job_id = "doctor", stage = "doctor", "doctor started");
     println!("Crush doctor");
     println!("  data dir      {}", paths.root.display());
@@ -1209,6 +1229,20 @@ fn doctor(cfg: &Config, paths: &AppPaths) -> anyhow::Result<()> {
         }
     );
     println!("  threads       {} (0 = cores-2)", cfg.limits.threads);
+    if deep {
+        let store = Store::open(&paths.root)?;
+        let problems = store.integrity()?;
+        if problems.is_empty() {
+            println!("  integrity     clean");
+        } else {
+            for problem in &problems {
+                println!(
+                    "  integrity     {:?} {}: {}",
+                    problem.kind, problem.entity_id, problem.detail
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1409,6 +1443,10 @@ mod tests {
             "homepage-hero",
             "--search",
             "rocket",
+            "--feedback",
+            "pick",
+            "--min-rating",
+            "4",
             "--json",
         ])
         .unwrap();
@@ -1420,12 +1458,16 @@ mod tests {
                 stack: Some(stack),
                 context: Some(context),
                 search: Some(search),
+                feedback: Some(feedback),
+                min_rating: Some(min_rating),
                 json: true,
             } if kind == "shot"
                 && collection == "col-1"
                 && stack == "stack-1"
                 && context == "homepage-hero"
                 && search == "rocket"
+                && feedback == "pick"
+                && min_rating == 4
         ));
     }
 
