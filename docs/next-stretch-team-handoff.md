@@ -137,6 +137,10 @@ must never be described as Windows support.
 
 ## Product-intelligence follow-up after the first Mac user test
 
+These are now numbered for OpenCode as TASK-032 (evaluation remediation), TASK-033 (sequence/
+repetition judgment), TASK-034 (imported-evidence search + explicit confirmation bridge) and
+TASK-035 (render engineering follow-ups) — see `.tasks/backlog/` and the TASKS.md board.
+
 These items are foundational product work, not optional DAM polish, but they should be informed by
 the first end-to-end test rather than destabilizing the release candidate:
 
