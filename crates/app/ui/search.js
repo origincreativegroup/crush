@@ -22,6 +22,7 @@
     navPlans: $("#nav-plans"),
     input: $("#search-input"),
     top: $("#top-select"),
+    topControl: $("#top-control"),
     count: $("#result-count"),
     message: $("#search-message"),
     nothingIndexed: $("#search-nothing-indexed"),
@@ -29,6 +30,10 @@
     noMatches: $("#search-no-matches"),
     error: $("#search-error"),
     grid: $("#results-grid"),
+    damHead: $("#dam-browser-head"),
+    damContext: $("#dam-context"),
+    damTitle: $("#dam-title"),
+    damKinds: [...document.querySelectorAll(".dam-kind")],
     goLibrary: $("#go-library"),
     detail: $("#detail"),
     detailKind: $("#detail-kind"),
@@ -61,6 +66,12 @@
     view: "library",
     query: "",
     results: [],
+    browseResults: [],
+    searchResults: [],
+    mode: "browse",
+    assetKind: "",
+    browseLoaded: false,
+    browsing: false,
     selected: -1,
     searching: false,
     searched: false,
@@ -138,6 +149,7 @@
       el.input.focus();
       el.input.select();
       refreshIndexedState();
+      if (!el.input.value.trim()) refreshBrowse();
     } else if (view === "review") {
       // library.js owns the review panel contents; it refreshes on this event. The shared
       // detail drawer stays usable from the review grid, so the detail is not closed here.
@@ -177,10 +189,12 @@
     const hasResults = state.results.length > 0;
     const nothing = state.hasIndexedShots === false;
     el.nothingIndexed.hidden = !nothing;
-    el.idle.hidden = nothing || hasResults || state.query.length > 0;
+    el.idle.hidden = nothing || hasResults || state.query.length > 0 || !state.browsing;
     el.noMatches.hidden = nothing || hasResults || !state.query || !state.searched;
     el.grid.hidden = !hasResults;
-    if (!hasResults) el.count.textContent = "";
+    el.damHead.hidden = nothing || (!hasResults && !state.query);
+    el.topControl.hidden = state.mode !== "search";
+    if (!hasResults && !state.query && !state.browsing) el.count.textContent = "";
   }
 
   // ---------- search ----------
@@ -193,9 +207,7 @@
     const query = el.input.value.trim();
     state.query = query;
     if (!query) {
-      state.results = [];
-      state.searched = false;
-      renderResults();
+      refreshBrowse();
       return;
     }
     if (state.searching) {
@@ -208,13 +220,15 @@
     try {
       const results = await invoke("search", { q: query, top: Number(el.top.value) });
       if (el.input.value.trim() === query) {
-        state.results = results;
+        state.mode = "search";
+        state.searchResults = results;
+        state.results = filterByKind(results);
         state.searched = true;
-        state.selected = results.length ? Math.min(Math.max(state.selected, 0), results.length - 1) : -1;
+        state.selected = state.results.length ? Math.min(Math.max(state.selected, 0), state.results.length - 1) : -1;
         renderResults();
         const ms = Math.round(performance.now() - started);
-        el.count.textContent = results.length
-          ? `${results.length} result${results.length === 1 ? "" : "s"} · ${ms} ms`
+        el.count.textContent = state.results.length
+          ? `${state.results.length} match${state.results.length === 1 ? "" : "es"} · ${ms} ms`
           : "";
       }
     } catch (error) {
@@ -228,6 +242,74 @@
       } else {
         state.pendingQuery = null;
       }
+    }
+  }
+
+  const browseResult = (asset) => ({
+    asset_type: asset.mediaKind === "photo" ? "photo" : "video",
+    asset_id: asset.mediaId,
+    path: asset.path,
+    start_s: asset.startS,
+    end_s: asset.endS,
+    thumb_path: asset.thumbPath,
+    editorial_quality: asset.quality,
+    browse: true,
+    width: asset.width,
+    height: asset.height,
+    tags: asset.tags,
+    standout: asset.standout,
+    usable: asset.usable,
+  });
+
+  function filterByKind(results) {
+    if (!state.assetKind) return [...results];
+    return results.filter((result) => result.asset_type === state.assetKind);
+  }
+
+  function updateDamHeading() {
+    const kindLabel = state.assetKind === "photo" ? "Photos" : state.assetKind === "video" ? "Video" : "All assets";
+    el.damContext.textContent = state.mode === "search" ? "Semantic search" : "Local library";
+    el.damTitle.textContent = state.mode === "search" ? `Results for “${state.query}”` : kindLabel;
+    for (const button of el.damKinds) {
+      const active = button.dataset.kind === state.assetKind;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    el.grid.setAttribute("aria-label", state.mode === "search" ? "Search results" : "DAM assets");
+  }
+
+  async function refreshBrowse(force = false) {
+    state.query = "";
+    state.mode = "browse";
+    state.searched = false;
+    el.error.hidden = true;
+    if (state.browseLoaded && !force) {
+      state.results = filterByKind(state.browseResults);
+      state.selected = state.results.length ? Math.min(Math.max(state.selected, 0), state.results.length - 1) : -1;
+      renderResults();
+      el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+      return;
+    }
+    if (state.browsing) return;
+    state.browsing = true;
+    state.results = [];
+    renderResults();
+    try {
+      const assets = await invoke("library_browse", { filter: {} });
+      if (el.input.value.trim()) return;
+      state.browseResults = assets.map(browseResult);
+      state.browseLoaded = true;
+      state.results = filterByKind(state.browseResults);
+      state.selected = state.results.length ? 0 : -1;
+      if (!assets.length) state.hasIndexedShots = false;
+      renderResults();
+      el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+    } catch (error) {
+      el.error.textContent = String(error);
+      el.error.hidden = false;
+    } finally {
+      state.browsing = false;
+      renderStates();
     }
   }
 
@@ -273,7 +355,7 @@
     el.grid.replaceChildren();
     state.results.forEach((result, index) => {
       const card = document.createElement("div");
-      card.className = "result-card";
+      card.className = `result-card${result.browse ? " browse-card" : ""}`;
       card.dataset.index = String(index);
       card.tabIndex = -1;
       card.setAttribute("role", "option");
@@ -300,11 +382,19 @@
       duration.textContent = result.asset_type === "photo"
         ? (result.editorial_quality ? `★ ${result.editorial_quality}` : "STILL")
         : durationBadge(result.end_s - result.start_s);
-      const score = document.createElement("span");
-      score.className = "badge badge-score mono";
-      score.textContent = String(displayScore(result.score));
-      score.title = breakdownSummary(result);
-      thumb.append(play, duration, score);
+      thumb.append(play, duration);
+      if (result.browse && result.standout) {
+        const standout = document.createElement("span");
+        standout.className = "badge badge-standout";
+        standout.textContent = "Standout";
+        thumb.append(standout);
+      } else if (!result.browse) {
+        const score = document.createElement("span");
+        score.className = "badge badge-score mono";
+        score.textContent = String(displayScore(result.score));
+        score.title = breakdownSummary(result);
+        thumb.append(score);
+      }
 
       const name = document.createElement("div");
       name.className = "file-name result-name";
@@ -314,6 +404,13 @@
       transcript.className = "result-snippet";
       transcript.textContent = result.transcript_snippet || "";
       transcript.hidden = !result.transcript_snippet;
+      const browseMeta = result.browse
+        ? [
+            result.asset_type === "photo" && result.width && result.height ? `${result.width} × ${result.height}` : "",
+            result.tags || "",
+            result.usable === false ? "Needs review" : "",
+          ].filter(Boolean).join(" · ")
+        : "";
       const aesthetic = Number.isFinite(result.aesthetic_score)
         ? `Strong ${Math.round(result.aesthetic_score * 100)}`
         : "";
@@ -322,16 +419,18 @@
         : "";
       const styleLine = document.createElement("div");
       styleLine.className = "result-style";
-      styleLine.textContent = [personal, aesthetic].filter(Boolean).join(" · ");
+      styleLine.textContent = browseMeta || [personal, aesthetic].filter(Boolean).join(" · ");
       styleLine.hidden = !styleLine.textContent;
 
-      card.append(thumb, name, transcript, styleLine, buildBreakdown(result));
+      card.append(thumb, name, transcript, styleLine);
+      if (!result.browse) card.append(buildBreakdown(result));
       card.addEventListener("click", () => {
         selectResult(index);
         openAssetDetail(result);
       });
       el.grid.append(card);
     });
+    updateDamHeading();
     renderStates();
   }
 
@@ -721,6 +820,18 @@
     }
   });
   el.top.addEventListener("change", () => state.query && runSearch());
+  for (const button of el.damKinds) {
+    button.addEventListener("click", () => {
+      state.assetKind = button.dataset.kind || "";
+      const source = state.mode === "search" ? state.searchResults : state.browseResults;
+      state.results = filterByKind(source);
+      state.selected = state.results.length ? 0 : -1;
+      renderResults();
+      el.count.textContent = state.mode === "search"
+        ? `${state.results.length} match${state.results.length === 1 ? "" : "es"}`
+        : `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+    });
+  }
   el.detailClose.addEventListener("click", closeDetail);
   el.play.addEventListener("click", toggleDetailPlayback);
   el.goIn.addEventListener("click", () => {
@@ -755,7 +866,11 @@
 
   // Search is the launch view once the shell is visible (app.js shows it after model checks).
   bridge.event.listen("ingest-progress", () => {
-    if (state.view === "search" && state.hasIndexedShots === false) refreshIndexedState();
+    if (state.view === "search" && !el.input.value.trim()) {
+      state.browseLoaded = false;
+      refreshIndexedState();
+      refreshBrowse(true);
+    }
   });
   const observer = new MutationObserver(() => {
     if (!el.shell.hidden) {

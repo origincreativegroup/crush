@@ -299,12 +299,12 @@
           <div class="search-box">
             <span class="search-icon" aria-hidden="true">⌕</span>
             <input id="search-input" type="search" autocomplete="off" spellcheck="false"
-              placeholder="Describe the shot… e.g. wide shot of the storefront at dusk" aria-label="Search footage" />
+              placeholder="Search subjects, actions, places, or mood…" aria-label="Search media" />
             <kbd class="search-kbd" aria-hidden="true">⌘F</kbd>
           </div>
           <div class="search-meta">
             <span id="result-count" class="result-count" aria-live="polite"></span>
-            <label class="top-select"><span class="sr-only">Results to show</span>
+            <label id="top-control" class="top-select" hidden><span class="sr-only">Results to show</span>
               <select id="top-select"><option value="25">Top 25</option><option value="50" selected>Top 50</option><option value="100">Top 100</option></select>
             </label>
           </div>
@@ -319,14 +319,25 @@
             <button id="go-library" class="button primary" type="button">Open Library</button>
           </div>
           <div id="search-idle" class="empty-state muted" hidden>
-            <p>Type what you're looking for and press Enter.</p>
+            <p>Loading your local media library…</p>
           </div>
           <div id="search-no-matches" class="empty-state muted" hidden>
             <h2>No matches</h2>
             <p>Try broader words — CLIP understands objects, scenes, and actions better than names.</p>
           </div>
           <div id="search-error" class="error-message search-error" role="alert" hidden></div>
-          <div id="results-grid" class="results-grid" role="listbox" aria-label="Search results" hidden></div>
+          <div id="dam-browser-head" class="dam-browser-head" hidden>
+            <div>
+              <p id="dam-context" class="eyebrow">Local library</p>
+              <h2 id="dam-title">All assets</h2>
+            </div>
+            <div class="dam-kind-switch" role="group" aria-label="Media type">
+              <button class="dam-kind active" type="button" data-kind="" aria-pressed="true">All</button>
+              <button class="dam-kind" type="button" data-kind="photo" aria-pressed="false">Photos</button>
+              <button class="dam-kind" type="button" data-kind="video" aria-pressed="false">Video</button>
+            </div>
+          </div>
+          <div id="results-grid" class="results-grid" role="listbox" aria-label="DAM assets" hidden></div>
         </section>
       </main>
 

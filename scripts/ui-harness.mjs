@@ -50,6 +50,36 @@ async function createPlan(page, name = "Launch selects") {
 }
 
 const tests = {
+  async "dam-home"(page) {
+    const frame = page.frameLocator("#app-frame");
+    const cards = frame.locator("#results-grid .result-card");
+    await poll(async () => (await cards.count()) === 3);
+    assert.equal(await visibleText(frame.locator("#dam-context")), "Local library");
+    assert.equal(await visibleText(frame.locator("#dam-title")), "All assets");
+    assert.equal(await visibleText(frame.locator("#result-count")), "3 assets");
+    assert.equal(await frame.locator("#top-control").isHidden(), true);
+    assert.equal(await cards.filter({ hasText: "select.jpg" }).count(), 1);
+    assert.equal(await cards.filter({ hasText: "rocket-launch.mov" }).count(), 1);
+
+    await frame.locator('.dam-kind[data-kind="photo"]').click();
+    await poll(async () => (await cards.count()) === 2);
+    assert.equal(await visibleText(frame.locator("#dam-title")), "Photos");
+    assert.equal(await visibleText(frame.locator("#result-count")), "2 assets");
+
+    await frame.locator('.dam-kind[data-kind=""]').click();
+    await frame.locator("#search-input").fill("rocket at dusk");
+    await frame.locator("#search-input").press("Enter");
+    await poll(async () => (await visibleText(frame.locator("#dam-context"))) === "Semantic search");
+    assert.equal(await visibleText(frame.locator("#dam-title")), "Results for “rocket at dusk”");
+    assert.equal(await frame.locator("#top-control").isVisible(), true);
+    assert.equal((await mockCalls(page)).some((call) => call.command === "search"), true);
+
+    await frame.locator("#search-input").fill("");
+    await poll(async () => (await visibleText(frame.locator("#dam-title"))) === "All assets");
+    await poll(async () => (await cards.count()) === 3);
+    assert.equal(await frame.locator("#top-control").isHidden(), true);
+  },
+
   async "plans-editor"(page) {
     const frame = await createPlan(page);
     await frame.locator("#plan-brief").fill("Quiet launch portraits");

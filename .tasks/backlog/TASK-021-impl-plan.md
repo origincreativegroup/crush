@@ -20,6 +20,11 @@ These are release acceptance requirements, not optional follow-up polish:
   decision and search controls visible; move collection, version-stack, privacy and saved-search
   controls behind a clearly labeled secondary surface; show active filters as removable summaries
   and make reset behavior obvious.
+- Make the launch/Search surface a media-first DAM browser rather than an empty query canvas.
+  Indexed photos and video shots must be visible before a query, simple kind filters must not expose
+  internal schema terms, semantic search must refine the same workspace, and opening the inspector
+  must reflow rather than cover the candidate grid. The target interaction quality is a professional
+  Bridge/Photos-style creative workspace, not a diagnostic search form.
 - Rename the user-facing **Style** area to **Preferences** (with “creative taste” explanatory copy).
   “Style” is reserved for visual treatment such as filters and color grading, and the learning
   surface must not imply that it edits media appearance.

@@ -76,6 +76,10 @@ make the app pass.
 
 ### 3. Search and explanations
 
+Search should open on the populated **All assets** DAM browser, not a blank prompt. Switch between
+All, Photos and Video; opening a detail must preserve useful thumbnails beside the inspector. Clear
+any semantic query and confirm the complete local library returns immediately.
+
 Try these one at a time:
 
 - `a rocket launching into the sky`

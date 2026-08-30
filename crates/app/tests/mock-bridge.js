@@ -71,6 +71,7 @@
     ],
     "photo-row": () => [{ ...video }, { ...photo }],
     "search-error": () => [{ ...video }],
+    "dam-home": () => [{ ...video }, { ...photo }],
     feedback: () => [{ ...video }],
     "style-panel": () => [{ ...video }, { ...photo }],
     "style-add-item": () => [{ ...video }],
@@ -383,6 +384,7 @@
   // where set: photo-two carries the flagged profile (unusable + blur required + faces).
   const reviewScenario = [
     "library-grid",
+    "dam-home",
     "library-bulk",
     "library-flags",
     "library-saved-search",
