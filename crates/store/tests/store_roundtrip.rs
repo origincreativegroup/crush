@@ -9,13 +9,14 @@ use crush_core::{
     DEFAULT_OWNER_ID,
 };
 use crush_store::{
-    AestheticAssessment, AssetFilter, Collection, CollectionItem, EditorialAnnotation,
-    EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, NewRenderJob,
-    Photo, PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, Plan, PlanItem, PlanItemPatch,
-    PlanOrigin, ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
-    ReferenceSetStatus, RenderJobStatus, RenderOutput, RenderRecipe, RenderRecipeKind, ReviewOp,
-    SafetyFlags, SavedSearch, Shot, StackItem, StackItemRole, StackMediaKind, Store, StyleProfile,
-    TranscriptSegment, VersionStack, Video, VideoSourceMetadata, VideoStatus,
+    AestheticAssessment, AssetFilter, CatalogueImport, Collection, CollectionItem,
+    EditorialAnnotation, EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, ManualSpan,
+    MediaKind, NewJob, NewRenderJob, Photo, PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus,
+    Plan, PlanItem, PlanItemPatch, PlanOrigin, ProblemKind, ReferenceItemRole, ReferenceSet,
+    ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, RenderJobStatus, RenderOutput,
+    RenderRecipe, RenderRecipeKind, ReviewOp, SafetyFlags, SavedSearch, Shot, SpanBoundaryBasis,
+    StackItem, StackItemRole, StackMediaKind, Store, StyleProfile, TranscriptSegment, VersionStack,
+    Video, VideoSourceMetadata, VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -139,7 +140,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -150,7 +151,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 10);
+    assert_eq!(reopened.schema_version().unwrap(), 11);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -207,7 +208,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -270,7 +271,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -1700,7 +1701,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -2267,6 +2268,7 @@ fn plan_item(plan_id: &str, media_kind: MediaKind, media_id: &str) -> PlanItem {
         origin: PlanOrigin::General,
         rank: None,
         profile_version: None,
+        provenance_json: "{}".to_owned(),
         added_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
     }
 }
@@ -3356,7 +3358,7 @@ fn schema_v7_upgrades_to_collections_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(
         store
@@ -3974,7 +3976,7 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
     drop(connection);
 
     let mut store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
     // The v9 plan surfaces are live on the upgraded database.
@@ -4776,4 +4778,199 @@ fn render_contract_rejects_unsupported_or_cross_owner_intent_and_retries_safely(
             [],
         )
         .is_err());
+}
+
+fn manual_span(
+    id: &str,
+    video_id: &str,
+    external_id: &str,
+    start_s: f64,
+    end_s: f64,
+) -> ManualSpan {
+    ManualSpan {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        video_id: video_id.to_owned(),
+        source: "reel_studio".to_owned(),
+        external_id: external_id.to_owned(),
+        start_s,
+        end_s,
+        boundary_basis: SpanBoundaryBasis::CatalogueTc,
+        boundary_tolerance_s: 0.5,
+        library_relative_offset_s: 0.0,
+        description: "girl laughing at the water table".to_owned(),
+        shot_type: "medium".to_owned(),
+        camera_move: "static".to_owned(),
+        subjects: "child".to_owned(),
+        action: "laughing".to_owned(),
+        tags: "water,exhibit".to_owned(),
+        quality: Some(4),
+        standout: true,
+        usable: true,
+        faces_visible: true,
+        nametags_visible: false,
+        blur_required: false,
+        used_in: "reel-01".to_owned(),
+        crop_x: Some(0.42),
+        notes: String::new(),
+        import_id: Some("import-1".to_owned()),
+        imported_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+        updated_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+    }
+}
+
+#[test]
+fn imported_spans_survive_resplit_and_carry_historical_plan_provenance() {
+    let directory = TestDir::new("imported-spans");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-rs", "rs-sha"))
+        .unwrap();
+    store
+        .insert_shots(DEFAULT_OWNER_ID, &[shot("shot-rs-0", "video-rs", 0)])
+        .unwrap();
+
+    // A segment that crosses Crush's own scene cut is stored on the original timeline.
+    let stored = store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-a", "video-rs", "V1-0001_S1", 2.0, 9.0),
+        )
+        .unwrap();
+    assert_eq!(stored.id, "span-a");
+    assert_eq!(stored.boundary_basis, SpanBoundaryBasis::CatalogueTc);
+
+    // Re-importing the same external id keeps the id and refreshes evidence.
+    let mut refreshed = manual_span("span-ignored", "video-rs", "V1-0001_S1", 2.0, 9.5);
+    refreshed.quality = Some(5);
+    let refreshed = store
+        .manual_span_upsert(DEFAULT_OWNER_ID, &refreshed)
+        .unwrap();
+    assert_eq!(refreshed.id, "span-a");
+    assert_eq!(refreshed.quality, Some(5));
+    assert_eq!(
+        store
+            .manual_spans_for_video(DEFAULT_OWNER_ID, "video-rs")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Spans cannot exceed the known source duration (12.5 s) and must be well-formed.
+    assert!(store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-late", "video-rs", "V1-0001_S9", 10.0, 13.0),
+        )
+        .is_err());
+    assert!(store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-bad", "video-rs", "V1-0001_S8", 3.0, 3.0),
+        )
+        .is_err());
+
+    // A plan may sequence the span with honest historical provenance.
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-rs", "imported reel"))
+        .unwrap();
+    let mut item = plan_item("plan-rs", MediaKind::Span, "span-a");
+    item.start_s = Some(2.5);
+    item.end_s = Some(6.0);
+    item.origin = PlanOrigin::Historical;
+    item.provenance_json = serde_json::json!({
+        "source": "reel_studio",
+        "external_id": "V1-0001_S1",
+        "import_id": "import-1",
+        "boundary_basis": "catalogue_tc",
+        "boundary_tolerance_s": 0.5,
+    })
+    .to_string();
+    store.plan_add_item(DEFAULT_OWNER_ID, &item).unwrap();
+
+    // Historical/imported items need provenance and never a profile version.
+    let mut bare = plan_item("plan-rs", MediaKind::Span, "span-a");
+    bare.media_id = "span-a".to_owned();
+    bare.start_s = Some(2.5);
+    bare.end_s = Some(3.0);
+    bare.origin = PlanOrigin::Imported;
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &bare).is_err());
+    let mut profiled = item.clone();
+    profiled.profile_version = Some(1);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &profiled).is_err());
+    // Outside the span is refused.
+    let mut wide = item.clone();
+    wide.end_s = Some(11.0);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &wide).is_err());
+
+    // Revisions carry the provenance through a restore.
+    let revision = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-rs", "imported")
+        .unwrap();
+    store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-rs", revision.revision)
+        .unwrap();
+    let items = store.plan_items(DEFAULT_OWNER_ID, "plan-rs").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].origin, PlanOrigin::Historical);
+    assert_eq!(items[0].media_kind, MediaKind::Span);
+    assert!(items[0].provenance_json.contains("V1-0001_S1"));
+
+    // Rebuilding shots (resplit) must not erase the imported span or its plan item.
+    store
+        .replace_shots(
+            DEFAULT_OWNER_ID,
+            "video-rs",
+            &[shot("shot-rs-new", "video-rs", 0)],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .manual_spans_for_video(DEFAULT_OWNER_ID, "video-rs")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.plan_items(DEFAULT_OWNER_ID, "plan-rs").unwrap().len(),
+        1
+    );
+
+    // Owner isolation.
+    assert!(store
+        .manual_span_by_id("someone-else", "span-a")
+        .unwrap()
+        .is_none());
+
+    // Ledger is append-only.
+    let import = CatalogueImport {
+        id: "import-1".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        source: "reel_studio".to_owned(),
+        mode: "apply".to_owned(),
+        catalogue_path: "/private/clips.db".to_owned(),
+        catalogue_sha256: "abc".to_owned(),
+        recipes_json: "[]".to_owned(),
+        report_json: "{}".to_owned(),
+        started_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+        finished_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 1).unwrap(),
+    };
+    store
+        .catalogue_import_append(DEFAULT_OWNER_ID, &import)
+        .unwrap();
+    assert_eq!(store.catalogue_imports(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    let connection = Connection::open(store.db_path()).unwrap();
+    assert!(connection
+        .execute("UPDATE catalogue_imports SET mode = 'dry_run'", [])
+        .is_err());
+
+    // Deleting the video cascades spans and their plan items.
+    store
+        .delete_video_cascade(DEFAULT_OWNER_ID, "video-rs")
+        .unwrap();
+    assert!(store.manual_spans(DEFAULT_OWNER_ID).unwrap().is_empty());
+    assert!(store
+        .plan_items(DEFAULT_OWNER_ID, "plan-rs")
+        .unwrap()
+        .is_empty());
 }

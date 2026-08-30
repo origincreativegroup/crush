@@ -642,6 +642,65 @@ mod macos {
         })())
     }
 
+    #[derive(Debug, Clone, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReelStudioImportRequest {
+        catalogue: String,
+        #[serde(default)]
+        originals: Vec<String>,
+        #[serde(default)]
+        library: Option<String>,
+        #[serde(default)]
+        recipes: Vec<String>,
+        #[serde(default)]
+        context_key: Option<String>,
+        #[serde(default)]
+        match_by_hash: bool,
+        #[serde(default)]
+        keyframe_tolerance_s: Option<f64>,
+        #[serde(default)]
+        apply: bool,
+    }
+
+    /// Task 022: dry-run or apply a Reel Studio catalogue/recipe import. Long-running (hashes the
+    /// catalogue and, with `matchByHash`, original footage), so it leaves the UI thread.
+    #[tauri::command]
+    async fn import_reel_studio(
+        request: ReelStudioImportRequest,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<crush_pipeline::reel_studio_import::ImportReport> {
+        let config = state.config.clone();
+        let paths = state.paths.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result((|| {
+                ensure!(
+                    !request.catalogue.trim().is_empty(),
+                    "choose the Reel Studio clips.db first"
+                );
+                let options = crush_pipeline::reel_studio_import::ImportOptions {
+                    catalogue: PathBuf::from(&request.catalogue),
+                    originals: request.originals.iter().map(PathBuf::from).collect(),
+                    library: request.library.as_deref().map(PathBuf::from),
+                    recipes: request.recipes.iter().map(PathBuf::from).collect(),
+                    context_key: request
+                        .context_key
+                        .filter(|key| !key.trim().is_empty())
+                        .unwrap_or_else(|| "default".to_owned()),
+                    apply: request.apply,
+                    match_by_hash: request.match_by_hash,
+                    keyframe_tolerance_s: request.keyframe_tolerance_s.unwrap_or(
+                        crush_pipeline::reel_studio_import::DEFAULT_KEYFRAME_TOLERANCE_S,
+                    ),
+                    threads: config.limits.threads,
+                };
+                let mut store = Store::open(&paths.root)?;
+                crush_pipeline::reel_studio_import::import_reel_studio(&mut store, &options)
+            })())
+        })
+        .await
+        .map_err(|error| format!("import worker failed: {error}"))?
+    }
+
     #[tauri::command]
     async fn search(
         q: String,
@@ -910,10 +969,12 @@ mod macos {
                 let exists = match media_kind {
                     MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
                     MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
+                    MediaKind::Span => store.manual_span_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
                 };
                 let kind = match media_kind {
                     MediaKind::Photo => "photo",
                     MediaKind::Shot => "shot",
+                    MediaKind::Span => "span",
                 };
                 ensure!(exists, "no {kind} exists with id {id}");
                 if let Some(compared_id) = &compared_id {
@@ -924,6 +985,9 @@ mod macos {
                         Some(MediaKind::Shot) => {
                             store.shot_by_id(DEFAULT_OWNER_ID, compared_id)?.is_some()
                         }
+                        Some(MediaKind::Span) => store
+                            .manual_span_by_id(DEFAULT_OWNER_ID, compared_id)?
+                            .is_some(),
                         None => false,
                     };
                     ensure!(
@@ -1019,6 +1083,7 @@ mod macos {
         match value.trim() {
             "photo" => Ok(MediaKind::Photo),
             "shot" | "video" => Ok(MediaKind::Shot),
+            "span" => Ok(MediaKind::Span),
             other => anyhow::bail!("unsupported media kind {other:?}"),
         }
     }
@@ -1148,10 +1213,14 @@ mod macos {
             let exists = match media_kind {
                 MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
                 MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
+                MediaKind::Span => store
+                    .manual_span_by_id(DEFAULT_OWNER_ID, &media_id)?
+                    .is_some(),
             };
             let kind = match media_kind {
                 MediaKind::Photo => "photo",
                 MediaKind::Shot => "shot",
+                MediaKind::Span => "span",
             };
             ensure!(exists, "no {kind} exists with id {media_id}");
             store.reference_set_add_item(
@@ -1256,6 +1325,7 @@ mod macos {
         match value {
             "photo" => Ok(MediaKind::Photo),
             "video" | "shot" => Ok(MediaKind::Shot),
+            "span" => Ok(MediaKind::Span),
             other => anyhow::bail!("unsupported asset type {other:?}"),
         }
     }
@@ -1281,6 +1351,7 @@ mod macos {
             media_kind: match asset.media_kind {
                 MediaKind::Photo => "photo".to_owned(),
                 MediaKind::Shot => "shot".to_owned(),
+                MediaKind::Span => "span".to_owned(),
             },
             media_id: asset.media_id,
             path: asset.path,
@@ -1494,6 +1565,7 @@ mod macos {
                     media_kind: match item.media_kind {
                         MediaKind::Photo => "photo".to_owned(),
                         MediaKind::Shot => "shot".to_owned(),
+                        MediaKind::Span => "span".to_owned(),
                     },
                     media_id: item.media_id,
                     context_key: item.context_key,
@@ -1729,6 +1801,7 @@ mod macos {
         origin: String,
         rank: Option<f64>,
         profile_version: Option<i64>,
+        provenance_json: String,
         added_at: String,
     }
 
@@ -2018,6 +2091,8 @@ mod macos {
         let origin = match selected.origin {
             PlanOrigin::General => "general",
             PlanOrigin::Personal => "personal",
+            PlanOrigin::Historical => "historical",
+            PlanOrigin::Imported => "imported",
         };
         let job_id = format!("render-job-{}", Uuid::new_v4());
         store.render_job_create(
@@ -2155,6 +2230,8 @@ mod macos {
         let origin = match selected.origin {
             PlanOrigin::General => "general",
             PlanOrigin::Personal => "personal",
+            PlanOrigin::Historical => "historical",
+            PlanOrigin::Imported => "imported",
         };
         let job_id = format!("render-job-{}", Uuid::new_v4());
         let job = NewRenderJob {
@@ -2389,6 +2466,7 @@ mod macos {
             media_kind: match item.media_kind {
                 MediaKind::Photo => "photo".to_owned(),
                 MediaKind::Shot => "shot".to_owned(),
+                MediaKind::Span => "span".to_owned(),
             },
             media_id: item.media_id,
             position: item.position,
@@ -2402,9 +2480,12 @@ mod macos {
             origin: match item.origin {
                 PlanOrigin::General => "general".to_owned(),
                 PlanOrigin::Personal => "personal".to_owned(),
+                PlanOrigin::Historical => "historical".to_owned(),
+                PlanOrigin::Imported => "imported".to_owned(),
             },
             rank: item.rank,
             profile_version: item.profile_version,
+            provenance_json: item.provenance_json,
             added_at: item.added_at.to_rfc3339(),
         }
     }
@@ -2526,6 +2607,7 @@ mod macos {
                 origin: parse_plan_origin(item.origin.as_deref())?,
                 rank: item.rank,
                 profile_version: item.profile_version,
+                provenance_json: "{}".to_owned(),
                 added_at: chrono::Utc::now(),
             };
             let plan_id = plan_item.plan_id.clone();
@@ -3356,13 +3438,19 @@ mod macos {
                 let mut config = Config::load(None)?;
                 config.data_dir = Some(data_dir.clone());
                 let paths = AppPaths::resolve(config.data_dir.as_ref())?;
-                let render_recovery = recover_interrupted_renders(&config, &paths)?;
-                eprintln!(
-                    "startup render recovery: finalized={} failed={} staging_removed={}",
-                    render_recovery.finalized,
-                    render_recovery.failed,
-                    render_recovery.staging_removed
-                );
+                // Recovery touches user-chosen export volumes; a read-only or unmounted volume
+                // must not brick every subsequent launch, so failures are logged, not fatal.
+                match recover_interrupted_renders(&config, &paths) {
+                    Ok(render_recovery) => eprintln!(
+                        "startup render recovery: finalized={} failed={} staging_removed={}",
+                        render_recovery.finalized,
+                        render_recovery.failed,
+                        render_recovery.staging_removed
+                    ),
+                    Err(error) => eprintln!(
+                        "startup render recovery could not complete; interrupted renders stay recoverable: {error:#}"
+                    ),
+                }
                 let store = Store::open(&paths.root)?;
                 store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
                 let scope = app.asset_protocol_scope();
@@ -3402,6 +3490,7 @@ mod macos {
                 job_status,
                 cancel_ingest,
                 reindex_video,
+                import_reel_studio,
                 search,
                 shot_detail,
                 photo_detail,
@@ -3512,7 +3601,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=10"));
+            assert!(report.contains("schema=11"));
         }
 
         #[test]

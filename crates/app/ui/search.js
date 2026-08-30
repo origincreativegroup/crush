@@ -760,6 +760,7 @@
       || event.target instanceof HTMLSelectElement;
     const detailOpen = !el.detail.hidden;
 
+    if (state.view !== "search") return;
     if (event.key === "Escape") {
       event.preventDefault();
       if (detailOpen) closeDetail();
@@ -782,7 +783,6 @@
       }
       return;
     }
-    if (state.view !== "search") return;
     if (!state.results.length) return;
     const columns = 4;
     const moves = { ArrowDown: columns, ArrowUp: -columns, ArrowRight: 1, ArrowLeft: -1 };

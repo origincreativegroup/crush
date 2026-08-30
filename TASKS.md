@@ -26,8 +26,8 @@
 | TASK-019 | Mixed-media review and DAM organization | OpenCode | done — 019a PR #30, 019b PR #31 |
 | TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | OpenCode + Codex | 020a merged (#33/#34); 020b UI merged (#36); automatic sequence/repetition judgment remains open |
 | TASK-020b | Plans UI + selection provenance | Codex (Mac) | done — PR #36; Linux/macOS CI and local/browser acceptance green |
-| TASK-021 | Non-destructive recipes + photo/video render and export | Codex team (Mac) | in progress — functional photo, clip, and ordered clip-reel export with durable no-clobber jobs; review findings fixed; broader goldens + human render review remain |
-| TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | implemented — draft PR #38 stacked on #37; CI/review follow-up remains |
+| TASK-021 | Non-destructive recipes + photo/video render and export | Codex team (Mac) | in progress — durable no-clobber photo/clip/ordered-reel export, schema-v10 recipes + Projects/reel playback UX; broader goldens + John's render-golden review remain |
+| TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | in review — merged onto the Task 021 branch: schema v11 spans/ledger/provenance, dry-run + idempotent importer, CLI, Library import dialog, span rendering; 021 render review still gates acceptance |
 | TASK-023 | DAM release packaging, UI CI, and clean-machine acceptance | Codex (Mac) | backlog — after end-to-end photo/video render workflow |
 | TASK-024 | Source-fidelity truthfulness + ranking breakdown export | OpenCode | done — PR #22; orientation truthful, real ICC tests, plain-language breakdown |
 | TASK-025 | Store hardening (feedback immutability, owner-safe upserts, integrity) | OpenCode | done — PR #21; schema v5 triggers, owner isolation tests |

@@ -11,8 +11,9 @@
     photoExportKey: null, photoExportKind: null, photoExportBusy: false, photoExportResult: null,
     reelExportKey: null, reelExportBusy: false, reelExportResult: null,
   };
-  const kind = (value) => value === "photo" ? "photo" : "video";
+  const kind = (value) => value === "photo" ? "photo" : value === "span" ? "span" : "video";
   const itemKey = (item) => `${kind(item.mediaKind)}:${item.mediaId}`;
+  const isClip = (item) => item.mediaKind === "shot" || item.mediaKind === "span";
   const candidateKey = (item) => `${item.asset_type}:${item.asset_id}`;
   const number = (value) => Number.isFinite(value) ? value.toFixed(3) : "—";
   const shortTime = (seconds) => {
@@ -98,7 +99,11 @@
     return control;
   }
   function pill(origin, version) {
-    return node("span", origin === "personal" ? `Preference-assisted · profile v${version} · experimental` : "General", `plans-pill ${origin}`);
+    const label = origin === "personal" ? `Preference-assisted · profile v${version} · experimental`
+      : origin === "historical" ? "Historical · your earlier Reel Studio choice"
+      : origin === "imported" ? "Imported · catalogue evidence"
+      : "General";
+    return node("span", label, `plans-pill ${origin}`);
   }
   function input(label, name, value, options = {}) {
     const wrapper = node("label", label);
@@ -217,7 +222,7 @@
     return state.items.find((item) => itemKey(item) === state.previewKey) || null;
   }
   function previewRange(item) {
-    if (!item || item.mediaKind !== "shot") return null;
+    if (!item || !isClip(item)) return null;
     const frozen = parse(item.signalsJson);
     const candidate = frozen.candidate || {};
     const form = $("plan-items").querySelector(`[data-asset-key="${CSS.escape(itemKey(item))}"]`);
@@ -241,7 +246,7 @@
     photoExport.render.disabled = true;
   }
   function renderPhotoExport(item) {
-    const exportable = item && ["photo", "shot"].includes(item.mediaKind);
+    const exportable = item && ["photo", "shot", "span"].includes(item.mediaKind);
     photoExport.root.hidden = !exportable;
     if (!exportable) { clearPhotoExport(null); return; }
     const exportKind = item.mediaKind === "photo" ? "photo" : "clip";
@@ -460,8 +465,11 @@
     heading.append(node("strong", `${index + 1}. ${title}`), pill(item.origin, item.profileVersion), previewControl);
     form.append(heading);
     const fields = node("div", undefined, "plans-fields");
-    if (item.mediaKind === "shot") {
-      form.append(node("p", Number.isFinite(candidate.start_s) ? `Available source ${number(candidate.start_s)}–${number(candidate.end_s)} s. Preview and saved edits stay inside it.` : "Clip edits are validated against the source shot by the store.", "plans-muted"));
+    if (isClip(item)) {
+      const basis = item.mediaKind === "span" && candidate.boundary_basis === "catalogue_tc" && candidate.boundary_tolerance_s > 0
+        ? ` Imported boundaries come from the catalogue timecodes and may be off by up to ${number(candidate.boundary_tolerance_s)} s.`
+        : "";
+      form.append(node("p", Number.isFinite(candidate.start_s) ? `Available source ${number(candidate.start_s)}–${number(candidate.end_s)} s. Preview and saved edits stay inside it.${basis}` : "Clip edits are validated against the source shot by the store.", "plans-muted"));
       for (const [label, name, value] of [["In (seconds)", "startS", item.startS], ["Out (seconds)", "endS", item.endS]]) {
         fields.append(input(label, name, value, { type: "number", min: candidate.start_s ?? 0, ...(candidate.end_s != null ? { max: candidate.end_s } : {}), step: "any", required: true }));
       }
@@ -493,10 +501,15 @@
       await invoke("plan_remove_item", { id: state.plan.id, assetType: kind(item.mediaKind), mediaId: item.mediaId });
       await openPlan(state.plan.id, false); message("Removed from the project. No rejection or other feedback was inferred.");
     }));
-    actions.append(button("Use as preference example", async () => {
+    const example = button("Use as preference example", async () => {
       await invoke("record_feedback", { assetType: kind(item.mediaKind), id: item.mediaId, signal: "pick", value: 1, context: state.plan.brief, contextKey: state.plan.contextKey });
       message(`Preference example recorded for “${state.plan.contextKey}”.`);
-    }));
+    });
+    if (item.mediaKind === "span") {
+      example.disabled = true;
+      example.title = "Imported Reel Studio spans are historical evidence; confirm them as examples from Preferences once the catalogue import is reviewed.";
+    }
+    actions.append(example);
     form.append(actions);
     const details = node("details");
     details.append(node("summary", "Why Crush suggested this"), node("pre", JSON.stringify(frozen, null, 2)));
@@ -517,7 +530,7 @@
       run(async () => {
         const grade = JSON.parse(patch.gradeJson);
         if (!grade || Array.isArray(grade) || typeof grade !== "object") throw new Error("Grade must be a JSON object.");
-        if (item.mediaKind === "shot" && patch.endS <= patch.startS) throw new Error("Out must be after In.");
+        if (isClip(item) && patch.endS <= patch.startS) throw new Error("Out must be after In.");
         for (const name of ["pacing", "cropX"]) {
           if (item[name] != null && !(name in patch)) throw new Error("Blank values do not clear saved treatment. Enter a number to change it.");
         }
@@ -626,7 +639,7 @@
   photoExport.choose.addEventListener("click", async () => {
     if (state.photoExportBusy) return;
     const item = previewItem();
-    if (!item || !["photo", "shot"].includes(item.mediaKind)) return;
+    if (!item || !["photo", "shot", "span"].includes(item.mediaKind)) return;
     const isPhoto = item.mediaKind === "photo";
     const preset = photoPresets[photoExport.preset.value];
     const candidate = parse(item.signalsJson).candidate || {};
@@ -652,7 +665,7 @@
   photoExport.render.addEventListener("click", async () => {
     if (state.photoExportBusy || state.busy) return;
     const item = previewItem();
-    if (!state.plan || !item || !["photo", "shot"].includes(item.mediaKind) || !photoExport.destination.value) return;
+    if (!state.plan || !item || !["photo", "shot", "span"].includes(item.mediaKind) || !photoExport.destination.value) return;
     const expectedKey = itemKey(item);
     const isPhoto = item.mediaKind === "photo";
     if (state.dirty.has(expectedKey)) {

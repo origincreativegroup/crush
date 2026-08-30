@@ -80,6 +80,64 @@ const tests = {
     assert.equal(await frame.locator("#top-control").isHidden(), true);
   },
 
+  async "import-reel-studio"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    await frame.locator("#import-reel-studio").click();
+    const dialog = frame.locator("#import-dialog");
+    await dialog.waitFor({ state: "visible" });
+    // Apply stays locked until a dry run of the current inputs has been shown.
+    assert.equal(await frame.locator("#import-apply").isDisabled(), true);
+    assert.equal(await frame.locator("#import-dry-run").isDisabled(), true);
+    await frame.locator("#import-pick-catalogue").click();
+    await frame.locator("#import-pick-originals").click();
+    await frame.locator("#import-pick-recipes").click();
+    assert.match(await frame.locator("#import-catalogue").inputValue(), /clips\.db$/);
+    assert.equal(await frame.locator("#import-dry-run").isDisabled(), false);
+    await frame.locator("#import-dry-run").click();
+    await frame.locator("#import-report").waitFor({ state: "visible" });
+    assert.match(await visibleText(frame.locator("#import-summary")), /^Dry run: 1 of 2 source clips matched · segments new 1.*1 issue\.$/);
+    assert.match(await visibleText(frame.locator("#import-writes")), /Would write: 1 new spans.*No preference feedback and no reference sets/);
+    assert.match(await visibleText(frame.locator("#import-issues")), /missing source V1-0009/);
+    assert.match(await visibleText(frame.locator("#import-candidates")), /Healthy Earth.*did not do this for you/);
+    const dry = (await mockCalls(page)).find((call) => call.command === "import_reel_studio");
+    assert.equal(dry.args.request.apply, false);
+    assert.deepEqual(dry.args.request.originals, ["/Volumes/Footage/2026"]);
+    // Changing an input after the dry run re-locks Apply.
+    assert.equal(await frame.locator("#import-apply").isDisabled(), false);
+    await frame.locator(".import-advanced summary").click();
+    await frame.locator("#import-context").fill("museum");
+    assert.equal(await frame.locator("#import-apply").isDisabled(), true);
+    await frame.locator("#import-dry-run").click();
+    await poll(async () => !(await frame.locator("#import-apply").isDisabled()));
+    await frame.locator("#import-apply").click();
+    await poll(async () => /Import applied/.test(await frame.locator("#import-status").textContent()));
+    const applied = (await mockCalls(page)).filter((call) => call.command === "import_reel_studio").at(-1);
+    assert.equal(applied.args.request.apply, true);
+    assert.equal(applied.args.request.contextKey, "museum");
+    assert.match(await visibleText(frame.locator("#import-summary")), /^Applied:/);
+    assert.equal(await frame.locator("#import-apply").isDisabled(), true);
+  },
+  async "plans-historical"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-plans").click();
+    await frame.locator("#plans-list .plans-list-button", { hasText: "Reel Studio · Healthy Earth" }).click();
+    await frame.locator("#plan-editor").waitFor({ state: "visible" });
+    const item = frame.locator("#plan-items .plans-item").first();
+    assert.equal(await visibleText(item.locator(".plans-pill")), "Historical · your earlier Reel Studio choice");
+    assert.match(await item.locator(".plans-muted").allTextContents().then((t) => t.join(" ")), /Imported boundaries come from the catalogue timecodes and may be off by up to 1(\.0+)? s/);
+    // Imported spans keep In/Out editing and preview, but cannot be turned into preference examples here.
+    assert.equal(await item.locator('input[name="startS"]').inputValue(), "3.45");
+    assert.equal(await item.getByRole("button", { name: "Use as preference example", exact: true }).isDisabled(), true);
+    await frame.locator("#project-preview").waitFor({ state: "visible" });
+    assert.equal(Number(await frame.locator("#project-preview-scrubber").getAttribute("max")), 1);
+    // Saving an edit keeps the historical label and never claims a profile.
+    await item.locator('input[name="endS"]').fill("4.2");
+    await item.getByRole("button", { name: "Save item", exact: true }).click();
+    await poll(async () => (await mockCalls(page)).some((call) => call.command === "plan_update_item" && call.args.assetType === "span"));
+    assert.equal(await visibleText(item.locator(".plans-pill")), "Historical · your earlier Reel Studio choice");
+  },
+
   async "plans-editor"(page) {
     const frame = await createPlan(page);
     await frame.locator("#plan-brief").fill("Quiet launch portraits");

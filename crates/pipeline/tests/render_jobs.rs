@@ -767,6 +767,7 @@ fn frozen_ordered_reel_job_renders_project_order_and_publishes_one_manifest() {
                     origin: PlanOrigin::General,
                     rank: None,
                     profile_version: None,
+                    provenance_json: "{}".to_owned(),
                     added_at: now,
                 },
             )

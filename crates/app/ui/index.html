@@ -6,9 +6,11 @@
     <title>Crush</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="search.css" />
+    <link rel="stylesheet" href="import.css" />
     <link rel="stylesheet" href="plans.css" />
     <script src="app.js" defer></script>
     <script src="search.js" defer></script>
+    <script src="import.js" defer></script>
     <script src="style.js" defer></script>
     <script src="library.js" defer></script>
     <script src="review.js" defer></script>
@@ -85,6 +87,7 @@
           <div class="toolbar-actions">
             <button id="reindex" class="button secondary" type="button" disabled>Re-index selected</button>
             <button id="cancel" class="button danger" type="button" hidden>Cancel</button>
+            <button id="import-reel-studio" class="button secondary" type="button">Import Reel Studio…</button>
             <button id="add-folder" class="button primary" type="button">Add Folder…</button>
           </div>
         </header>
@@ -636,6 +639,58 @@
         <button class="button secondary" value="cancel" autofocus>Keep editing</button>
         <button class="button danger" value="confirm">Confirm</button>
       </form>
+    </dialog>
+
+    <dialog id="import-dialog" class="doctor-dialog import-dialog" aria-labelledby="import-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Historical evidence</p>
+          <h2 id="import-title">Import Reel Studio catalogue</h2>
+        </div>
+        <button id="import-close" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+      <p class="import-copy">Bring your earlier Reel Studio decisions — reviewed segments, quality and safety notes, and exported reels — into this library. Nothing is uploaded and nothing is written until you apply a dry run you have read.</p>
+      <form id="import-form" class="import-form">
+        <div class="import-field">
+          <label for="import-catalogue">Catalogue (clips.db)</label>
+          <div class="import-picker"><input id="import-catalogue" class="mono" type="text" readonly placeholder="Choose the Reel Studio clips.db" /><button id="import-pick-catalogue" class="button secondary small" type="button">Choose…</button></div>
+        </div>
+        <div class="import-field">
+          <label for="import-originals">Original footage folders (already indexed in Crush)</label>
+          <div class="import-picker"><input id="import-originals" class="mono" type="text" readonly placeholder="No folder chosen" /><button id="import-pick-originals" class="button secondary small" type="button">Add folder…</button></div>
+        </div>
+        <div class="import-field">
+          <label for="import-recipes">Exported reel recipes (JSON, optional)</label>
+          <div class="import-picker"><input id="import-recipes" class="mono" type="text" readonly placeholder="No recipes chosen" /><button id="import-pick-recipes" class="button secondary small" type="button">Add files…</button></div>
+        </div>
+        <details class="import-advanced">
+          <summary>More options</summary>
+          <div class="import-field">
+            <label for="import-library">Reel Studio library folder (improves boundary accuracy)</label>
+            <div class="import-picker"><input id="import-library" class="mono" type="text" readonly placeholder="Optional" /><button id="import-pick-library" class="button secondary small" type="button">Choose…</button></div>
+          </div>
+          <div class="import-field">
+            <label for="import-context">Purpose / context key for imported projects</label>
+            <input id="import-context" type="text" value="default" />
+          </div>
+          <label class="import-check"><input id="import-hash" type="checkbox" /> Also match originals by content hash (slow on 4K footage)</label>
+        </details>
+        <div class="import-actions">
+          <button id="import-dry-run" class="button primary" type="submit">Dry run</button>
+          <button id="import-apply" class="button danger" type="button" disabled>Apply this import</button>
+        </div>
+      </form>
+      <div id="import-status" class="import-status" role="status"></div>
+      <section id="import-report" class="import-report" aria-live="polite" hidden>
+        <p id="import-summary" class="import-summary"></p>
+        <p id="import-writes" class="plans-muted"></p>
+        <div id="import-issues" class="import-issues"></div>
+        <details id="import-details"><summary>Every mapping</summary>
+          <table class="import-table"><thead><tr><th>Segment</th><th>Outcome</th><th>Source seconds</th><th>Boundary basis</th><th>Note</th></tr></thead><tbody id="import-segments"></tbody></table>
+          <table class="import-table"><thead><tr><th>Recipe</th><th>Outcome</th><th>Items</th><th>Note</th></tr></thead><tbody id="import-recipes-rows"></tbody></table>
+        </details>
+        <p id="import-candidates" class="plans-muted" hidden></p>
+      </section>
     </dialog>
 
     <dialog id="doctor-dialog" class="doctor-dialog">

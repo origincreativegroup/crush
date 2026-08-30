@@ -71,6 +71,8 @@ struct ReelV1Recipe {
 
 #[derive(Debug)]
 struct FrozenReelPlanItem {
+    /// `shot` or `span` (an imported/manual span, Task 022).
+    media_kind: String,
     media_id: String,
     start_s: f64,
     end_s: f64,
@@ -1151,8 +1153,9 @@ fn parse_frozen_reel_plan(value: &str) -> anyhow::Result<Vec<FrozenReelPlanItem>
         let item = value
             .as_object()
             .with_context(|| format!("frozen project item {index} is not an object"))?;
+        let media_kind = item.get("media_kind").and_then(Value::as_str);
         ensure!(
-            item.get("media_kind").and_then(Value::as_str) == Some("shot"),
+            matches!(media_kind, Some("shot" | "span")),
             "ordered reel v1 cannot render project item {index}: photo holds need a versioned duration and framing contract"
         );
         ensure!(
@@ -1177,6 +1180,7 @@ fn parse_frozen_reel_plan(value: &str) -> anyhow::Result<Vec<FrozenReelPlanItem>
             "frozen project item {index} has invalid clip boundaries"
         );
         parsed.push(FrozenReelPlanItem {
+            media_kind: media_kind.expect("checked above").to_owned(),
             media_id: required_string(item, "media_id", "frozen project item")?.to_owned(),
             start_s,
             end_s,
@@ -1244,12 +1248,13 @@ fn parse_reel_source_snapshots(value: &str) -> anyhow::Result<Vec<VideoSourceSna
             let source = value
                 .as_object()
                 .with_context(|| format!("reel source {index} must be an object"))?;
+            let media_kind = source.get("media_kind").and_then(Value::as_str);
             ensure!(
-                source.get("media_kind").and_then(Value::as_str) == Some("shot"),
-                "ordered reel v1 supports shot sources only"
+                matches!(media_kind, Some("shot" | "span")),
+                "ordered reel v1 supports shot and imported span sources only"
             );
             Ok(VideoSourceSnapshot {
-                media_kind: "shot".to_owned(),
+                media_kind: media_kind.expect("checked above").to_owned(),
                 media_id: required_string(source, "media_id", "reel source")?.to_owned(),
                 source_id: required_string(source, "source_id", "reel source")?.to_owned(),
                 sha256: required_string(source, "sha256", "reel source")?.to_owned(),
@@ -1295,21 +1300,45 @@ fn resolve_reel_v1_sources(
                 item.media_id
             )
         })?;
-        let shot = store
-            .shot_by_id(owner_id, &item.media_id)?
-            .with_context(|| format!("reel shot {} is not owned by this owner", item.media_id))?;
         ensure!(
-            shot.video_id == snapshot.source_id,
-            "reel shot source_id does not match its owner-scoped video"
+            snapshot.media_kind == item.media_kind,
+            "frozen reel source kind does not match its project item"
+        );
+        // Shots come from Crush's own scene detection; spans are human-decided boundaries
+        // (imported from Reel Studio or set manually) that survive resplit. Both bind to one
+        // owner-scoped video and must contain the frozen in/out.
+        let (video_id, bound_start, bound_end) = if item.media_kind == "span" {
+            let span = store
+                .manual_span_by_id(owner_id, &item.media_id)?
+                .with_context(|| {
+                    format!("reel span {} is not owned by this owner", item.media_id)
+                })?;
+            (span.video_id, span.start_s, span.end_s)
+        } else {
+            let shot = store
+                .shot_by_id(owner_id, &item.media_id)?
+                .with_context(|| {
+                    format!("reel shot {} is not owned by this owner", item.media_id)
+                })?;
+            (shot.video_id, shot.start_s, shot.end_s)
+        };
+        ensure!(
+            video_id == snapshot.source_id,
+            "reel {} source_id does not match its owner-scoped video",
+            item.media_kind
         );
         ensure!(
-            item.start_s >= shot.start_s && item.end_s <= shot.end_s,
-            "frozen reel boundaries must stay inside shot {}",
+            item.start_s >= bound_start && item.end_s <= bound_end,
+            "frozen reel boundaries must stay inside {} {}",
+            item.media_kind,
             item.media_id
         );
-        let video = store
-            .video_by_id(owner_id, &shot.video_id)?
-            .with_context(|| format!("reel shot {} has no owned source video", item.media_id))?;
+        let video = store.video_by_id(owner_id, &video_id)?.with_context(|| {
+            format!(
+                "reel {} {} has no owned source video",
+                item.media_kind, item.media_id
+            )
+        })?;
         ensure!(
             video.sha256.eq_ignore_ascii_case(&snapshot.sha256),
             "library video hash changed after this reel was queued"
