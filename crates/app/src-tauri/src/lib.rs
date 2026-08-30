@@ -3231,13 +3231,19 @@ mod macos {
                 let mut config = Config::load(None)?;
                 config.data_dir = Some(data_dir.clone());
                 let paths = AppPaths::resolve(config.data_dir.as_ref())?;
-                let render_recovery = recover_interrupted_renders(&config, &paths)?;
-                eprintln!(
-                    "startup render recovery: finalized={} failed={} staging_removed={}",
-                    render_recovery.finalized,
-                    render_recovery.failed,
-                    render_recovery.staging_removed
-                );
+                // Recovery touches user-chosen export volumes; a read-only or unmounted volume
+                // must not brick every subsequent launch, so failures are logged, not fatal.
+                match recover_interrupted_renders(&config, &paths) {
+                    Ok(render_recovery) => eprintln!(
+                        "startup render recovery: finalized={} failed={} staging_removed={}",
+                        render_recovery.finalized,
+                        render_recovery.failed,
+                        render_recovery.staging_removed
+                    ),
+                    Err(error) => eprintln!(
+                        "startup render recovery could not complete; interrupted renders stay recoverable: {error:#}"
+                    ),
+                }
                 let store = Store::open(&paths.root)?;
                 store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
                 let scope = app.asset_protocol_scope();
