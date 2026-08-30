@@ -3,6 +3,7 @@
 //! Recipe intent remains platform neutral. This module records the actual CPU/image backend in
 //! the manifest and publishes only fully verified files through exclusive same-filesystem links.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,10 @@ use chrono::Utc;
 use crush_stage_split::ffmpeg::{
     self, BasicVideoGrade, ClipAudio, ClipOutputPreset, ClipRenderRequest, ClipTransition,
     NormalizedVideoCrop, VideoGrade,
+};
+use crush_stage_split::reel::{
+    ReelFormat, ReelMediaKind, ReelMotion, ResolvedReelGrade, ResolvedReelItem,
+    ResolvedReelRequest, ResolvedReelTransition,
 };
 use crush_store::{
     RenderAttempt, RenderJob, RenderJobStatus, RenderOutput, RenderRecipeKind, Store,
@@ -56,6 +61,27 @@ struct VideoSourceSnapshot {
 struct ResolvedVideoSource {
     path: PathBuf,
     has_audio: bool,
+}
+
+#[derive(Debug)]
+struct ReelV1Recipe {
+    audio: ClipAudio,
+    output: ClipOutputPreset,
+}
+
+#[derive(Debug)]
+struct FrozenReelPlanItem {
+    media_id: String,
+    start_s: f64,
+    end_s: f64,
+    grade: ResolvedReelGrade,
+}
+
+#[derive(Debug)]
+struct ResolvedReelSources {
+    request: ResolvedReelRequest,
+    snapshots: Vec<VideoSourceSnapshot>,
+    resolved_paths: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug)]
@@ -120,8 +146,7 @@ impl ManagedStaging {
 }
 
 impl Pipeline {
-    /// Execute one frozen photo job. Video and reel jobs deliberately fail as unsupported until
-    /// their backend-neutral renderers and golden verifiers land later in Task 021.
+    /// Execute one frozen photo, clip, or initial ordered-reel job.
     pub fn execute_render_job(&self, owner_id: &str, job_id: &str) -> anyhow::Result<RenderOutput> {
         let mut store = Store::open(&self.paths.root)?;
         let job = store
@@ -136,13 +161,13 @@ impl Pipeline {
         );
         ensure!(
             !self.cancellation.is_cancelled(),
-            "photo render was cancelled before it started"
+            "render was cancelled before it started"
         );
         match job.recipe_kind {
             RenderRecipeKind::VideoClip => {
                 return self.execute_video_clip_job(&mut store, owner_id, &job)
             }
-            RenderRecipeKind::Reel => bail!("reel render execution is not implemented yet"),
+            RenderRecipeKind::Reel => return self.execute_reel_job(&mut store, owner_id, &job),
             RenderRecipeKind::Photo => {}
         }
 
@@ -322,6 +347,246 @@ impl Pipeline {
                 Err(error)
             }
         }
+    }
+
+    fn execute_reel_job(
+        &self,
+        store: &mut Store,
+        owner_id: &str,
+        job: &RenderJob,
+    ) -> anyhow::Result<RenderOutput> {
+        let recipe = parse_reel_v1_recipe(&job.frozen_recipe_json)?;
+        let plan = job
+            .frozen_plan_json
+            .as_deref()
+            .context("reel job has no frozen project revision")?;
+        let sources = resolve_reel_v1_sources(store, owner_id, job, plan, &recipe)?;
+        let destination = PathBuf::from(&job.destination_path);
+        validate_video_destination(&destination, recipe.output)?;
+        let staging = ManagedStaging::create(&destination)?;
+        let attempt = store.render_job_start(
+            owner_id,
+            &job.id,
+            &staging.output.to_string_lossy(),
+            Utc::now(),
+        )?;
+        let execution = (|| {
+            staging.write_marker(owner_id, &job.id, attempt.attempt, &destination)?;
+            store.render_attempt_set_commands(
+                owner_id,
+                &job.id,
+                attempt.attempt,
+                &json!([{
+                    "executor": "crush-video-reel-v1",
+                    "phase": "started",
+                    "staging_output": staging.output,
+                    "destination": destination,
+                }])
+                .to_string(),
+            )?;
+            self.execute_reel_attempt(
+                store,
+                owner_id,
+                job,
+                &attempt,
+                &sources,
+                &destination,
+                &staging,
+            )
+        })();
+        match execution {
+            Ok(output) => Ok(output),
+            Err(error) => {
+                if let Some(current) = store.render_job_by_id(owner_id, &job.id)? {
+                    if matches!(
+                        current.status,
+                        RenderJobStatus::Running | RenderJobStatus::Verifying
+                    ) {
+                        if self.cancellation.is_cancelled() {
+                            let _ = store.render_job_cancel(owner_id, &job.id, Utc::now());
+                        } else if destination.is_file()
+                            && manifest_path(&destination).is_file()
+                            && current.status == RenderJobStatus::Verifying
+                        {
+                            // Recovery will finalize the already-published checksummed pair.
+                        } else {
+                            let _ = store.render_job_fail(
+                                owner_id,
+                                &job.id,
+                                &format!("{error:#}"),
+                                Utc::now(),
+                            );
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_reel_attempt(
+        &self,
+        store: &mut Store,
+        owner_id: &str,
+        job: &RenderJob,
+        attempt: &RenderAttempt,
+        sources: &ResolvedReelSources,
+        destination: &Path,
+        staging: &ManagedStaging,
+    ) -> anyhow::Result<RenderOutput> {
+        store.render_job_set_progress(owner_id, &job.id, 0.1)?;
+        let runner = ffmpeg::Runner::new(
+            ffmpeg::resolve()?,
+            self.config.limits.threads,
+            job.id.clone(),
+        );
+        let rendered = runner.render_reel_with_control(
+            &sources.request,
+            &staging.output,
+            &self.cancellation,
+            |_| {},
+        )?;
+        store.render_job_set_progress(owner_id, &job.id, 0.75)?;
+        ensure!(!self.cancellation.is_cancelled(), "reel render cancelled");
+
+        let mut source_evidence = Vec::with_capacity(sources.snapshots.len());
+        for snapshot in &sources.snapshots {
+            let path = sources
+                .resolved_paths
+                .get(&snapshot.media_id)
+                .context("resolved reel source path is missing")?;
+            let hash_after = sha256_file(path)
+                .with_context(|| format!("failed to recheck reel source {}", path.display()))?;
+            ensure!(
+                hash_after.eq_ignore_ascii_case(&snapshot.sha256),
+                "reel source changed while it was rendering"
+            );
+            source_evidence.push(json!({
+                "media_kind": snapshot.media_kind,
+                "media_id": snapshot.media_id,
+                "source_id": snapshot.source_id,
+                "sha256": snapshot.sha256,
+                "frozen_path": snapshot.frozen_path,
+                "resolved_path": path,
+                "hash_after": hash_after,
+            }));
+        }
+
+        let output_size = i64::try_from(fs::metadata(&staging.output)?.len())
+            .context("render output size overflowed i64")?;
+        let output_sha256 = sha256_file(&staging.output)?;
+        let duration_tolerance_s = if rendered.output_probe.fps > 0.0 {
+            0.05 + sources.request.items.len() as f64 / rendered.output_probe.fps
+        } else {
+            0.1
+        };
+        let duration_delta_s =
+            (rendered.output_probe.duration_s - rendered.requested_duration_s).abs();
+        ensure!(
+            duration_delta_s <= duration_tolerance_s,
+            "rendered reel duration differs from requested duration beyond frame tolerance"
+        );
+        let verification = json!({
+            "sources_unchanged": true,
+            "source_count": sources.snapshots.len(),
+            "item_count": sources.request.items.len(),
+            "requested_duration_s": rendered.requested_duration_s,
+            "measured_duration_s": rendered.output_probe.duration_s,
+            "duration_delta_s": duration_delta_s,
+            "duration_tolerance_s": duration_tolerance_s,
+            "dimensions": {
+                "width": rendered.output_probe.width,
+                "height": rendered.output_probe.height,
+            },
+            "fps": rendered.output_probe.fps,
+            "has_audio": rendered.output_probe.has_audio,
+            "video_codec": rendered.output_probe.video_codec,
+            "pixel_format": rendered.output_probe.pixel_format,
+            "color_space": rendered.output_probe.color_space,
+            "color_primaries": rendered.output_probe.color_primaries,
+            "color_transfer": rendered.output_probe.color_transfer,
+        });
+        let created_at = Utc::now();
+        let media_type = match sources.request.output {
+            ClipOutputPreset::Mp4H264SdrV1 => "video/mp4",
+            ClipOutputPreset::MovH264SdrV1 => "video/quicktime",
+        }
+        .to_owned();
+        let mut commands = rendered.item_commands.clone();
+        commands.push(rendered.command.clone());
+        commands.push(rendered.probe_command.clone());
+        let manifest_destination = manifest_path(destination);
+        let manifest = json!({
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "job": {
+                "id": job.id,
+                "attempt": attempt.attempt,
+                "owner_id": owner_id,
+                "created_at": created_at,
+            },
+            "sources": source_evidence,
+            "frozen_recipe": serde_json::from_str::<Value>(&job.frozen_recipe_json)?,
+            "frozen_plan": serde_json::from_str::<Value>(
+                job.frozen_plan_json.as_deref().context("reel frozen plan is missing")?
+            )?,
+            "model_versions": serde_json::from_str::<Value>(&job.model_versions_json)?,
+            "tool_versions": {
+                "crush_pipeline": env!("CARGO_PKG_VERSION"),
+                "executor": "crush-video-reel-v1",
+                "backend": rendered.backend.as_str(),
+                "encoder": rendered.encoder,
+            },
+            "commands": commands,
+            "render": {
+                "preset": rendered.preset,
+                "output_path": destination,
+                "media_type": media_type,
+                "checksum_sha256": output_sha256,
+                "size_bytes": output_size,
+            },
+            "verification": verification,
+        });
+        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        write_new_synced(&staging.manifest, manifest_json.as_bytes())?;
+        let manifest_sha256 = sha256_file(&staging.manifest)?;
+        File::open(&staging.output)?.sync_all()?;
+        let output = RenderOutput {
+            owner_id: owner_id.to_owned(),
+            id: format!("render-output-{}", Uuid::new_v4()),
+            job_id: job.id.clone(),
+            attempt: attempt.attempt,
+            output_path: destination.to_string_lossy().into_owned(),
+            output_sha256,
+            size_bytes: output_size,
+            media_type,
+            width: Some(i64::from(rendered.output_probe.width)),
+            height: Some(i64::from(rendered.output_probe.height)),
+            duration_s: Some(rendered.output_probe.duration_s),
+            verification_json: verification.to_string(),
+            manifest_path: manifest_destination.to_string_lossy().into_owned(),
+            manifest_json,
+            manifest_sha256,
+            created_at,
+        };
+        store.render_attempt_set_commands(
+            owner_id,
+            &job.id,
+            attempt.attempt,
+            &recovery_command_json(&output, &staging.manifest),
+        )?;
+        store.render_job_mark_verifying(owner_id, &job.id)?;
+        reject_existing(&manifest_destination, "render manifest destination")?;
+        reject_existing(destination, "render destination")?;
+        fs::hard_link(&staging.manifest, &manifest_destination)
+            .context("filesystem does not support exclusive render-manifest publication")?;
+        if let Err(error) = fs::hard_link(&staging.output, destination) {
+            let _ = fs::remove_file(&manifest_destination);
+            return Err(error).context("filesystem does not support exclusive render publication");
+        }
+        sync_parent(destination)?;
+        store.render_job_finish(owner_id, &output)?;
+        Ok(output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -826,6 +1091,284 @@ fn parse_video_clip_recipe(frozen: &str) -> anyhow::Result<ClipRenderRequest> {
     Ok(recipe)
 }
 
+fn parse_reel_v1_recipe(frozen: &str) -> anyhow::Result<ReelV1Recipe> {
+    let frozen: Value = serde_json::from_str(frozen).context("frozen recipe is invalid JSON")?;
+    let schema = frozen
+        .get("schema")
+        .and_then(Value::as_object)
+        .context("frozen recipe schema is missing")?;
+    ensure!(
+        schema.get("schema_version").and_then(Value::as_u64) == Some(1),
+        "ordered reel executor supports only recipe schema version 1"
+    );
+    ensure!(
+        schema.get("kind").and_then(Value::as_str) == Some("reel"),
+        "frozen recipe is not a reel"
+    );
+    ensure!(
+        schema
+            .get("transition")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("cut"),
+        "ordered reel v1 supports cut transitions only"
+    );
+    let audio = match schema
+        .get("audio")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+    {
+        Some("source") => ClipAudio::Source,
+        Some("mute") => ClipAudio::Mute,
+        Some(other) => bail!("unsupported ordered reel audio mode {other:?}"),
+        None => bail!("ordered reel audio mode is missing"),
+    };
+    let output = match schema
+        .get("output")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("preset"))
+        .and_then(Value::as_str)
+    {
+        Some("mp4-h264-sdr-v1") => ClipOutputPreset::Mp4H264SdrV1,
+        Some("mov-h264-sdr-v1") => ClipOutputPreset::MovH264SdrV1,
+        Some(other) => bail!("unsupported ordered reel output preset {other:?}"),
+        None => bail!("ordered reel output preset is missing"),
+    };
+    Ok(ReelV1Recipe { audio, output })
+}
+
+fn parse_frozen_reel_plan(value: &str) -> anyhow::Result<Vec<FrozenReelPlanItem>> {
+    let value: Value = serde_json::from_str(value).context("frozen project is invalid JSON")?;
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .context("frozen project has no items array")?;
+    ensure!(!items.is_empty(), "frozen reel project is empty");
+    let mut parsed = Vec::with_capacity(items.len());
+    for (index, value) in items.iter().enumerate() {
+        let item = value
+            .as_object()
+            .with_context(|| format!("frozen project item {index} is not an object"))?;
+        ensure!(
+            item.get("media_kind").and_then(Value::as_str) == Some("shot"),
+            "ordered reel v1 cannot render project item {index}: photo holds need a versioned duration and framing contract"
+        );
+        ensure!(
+            item.get("pacing").is_none_or(Value::is_null),
+            "ordered reel v1 cannot reproduce saved pacing on project item {index}"
+        );
+        ensure!(
+            item.get("crop_x").is_none_or(Value::is_null),
+            "ordered reel v1 cannot reproduce scalar crop intent on project item {index}"
+        );
+        let grade = parse_reel_plan_grade(item.get("grade_json"), index)?;
+        let start_s = item
+            .get("start_s")
+            .and_then(Value::as_f64)
+            .with_context(|| format!("frozen project item {index} has no start_s"))?;
+        let end_s = item
+            .get("end_s")
+            .and_then(Value::as_f64)
+            .with_context(|| format!("frozen project item {index} has no end_s"))?;
+        ensure!(
+            start_s.is_finite() && end_s.is_finite() && start_s >= 0.0 && end_s > start_s,
+            "frozen project item {index} has invalid clip boundaries"
+        );
+        parsed.push(FrozenReelPlanItem {
+            media_id: required_string(item, "media_id", "frozen project item")?.to_owned(),
+            start_s,
+            end_s,
+            grade,
+        });
+    }
+    Ok(parsed)
+}
+
+fn parse_reel_plan_grade(value: Option<&Value>, index: usize) -> anyhow::Result<ResolvedReelGrade> {
+    let Some(Value::String(value)) = value else {
+        ensure!(
+            value.is_none_or(Value::is_null),
+            "frozen project item {index} grade_json must be a JSON string or null"
+        );
+        return Ok(ResolvedReelGrade::default());
+    };
+    let parsed: Value = serde_json::from_str(value)
+        .with_context(|| format!("frozen project item {index} grade_json is invalid"))?;
+    let object = parsed
+        .as_object()
+        .with_context(|| format!("frozen project item {index} grade must be an object"))?;
+    if object.is_empty()
+        || (object.len() == 1 && object.get("mode").and_then(Value::as_str) == Some("none"))
+    {
+        return Ok(ResolvedReelGrade::default());
+    }
+    let expected = [
+        "mode",
+        "exposure_ev",
+        "contrast",
+        "saturation",
+        "temperature",
+        "tint",
+    ];
+    ensure!(
+        object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key)),
+        "ordered reel v1 cannot reproduce the saved color treatment on project item {index}"
+    );
+    ensure!(
+        object.get("mode").and_then(Value::as_str) == Some("basic"),
+        "ordered reel v1 supports only none or basic color treatment on project item {index}"
+    );
+    Ok(ResolvedReelGrade {
+        exposure_ev: required_f64(object, "exposure_ev", "reel grade")?,
+        contrast: required_f64(object, "contrast", "reel grade")?,
+        saturation: required_f64(object, "saturation", "reel grade")?,
+        temperature: required_f64(object, "temperature", "reel grade")?,
+        tint: required_f64(object, "tint", "reel grade")?,
+        ..ResolvedReelGrade::default()
+    })
+}
+
+fn parse_reel_source_snapshots(value: &str) -> anyhow::Result<Vec<VideoSourceSnapshot>> {
+    let value: Value = serde_json::from_str(value).context("source snapshot is invalid JSON")?;
+    let sources = value
+        .get("sources")
+        .and_then(Value::as_array)
+        .context("source snapshot sources are missing")?;
+    ensure!(!sources.is_empty(), "a reel requires frozen sources");
+    sources
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let source = value
+                .as_object()
+                .with_context(|| format!("reel source {index} must be an object"))?;
+            ensure!(
+                source.get("media_kind").and_then(Value::as_str) == Some("shot"),
+                "ordered reel v1 supports shot sources only"
+            );
+            Ok(VideoSourceSnapshot {
+                media_kind: "shot".to_owned(),
+                media_id: required_string(source, "media_id", "reel source")?.to_owned(),
+                source_id: required_string(source, "source_id", "reel source")?.to_owned(),
+                sha256: required_string(source, "sha256", "reel source")?.to_owned(),
+                frozen_path: PathBuf::from(required_string(source, "path", "reel source")?),
+            })
+        })
+        .collect()
+}
+
+fn resolve_reel_v1_sources(
+    store: &Store,
+    owner_id: &str,
+    job: &RenderJob,
+    frozen_plan: &str,
+    recipe: &ReelV1Recipe,
+) -> anyhow::Result<ResolvedReelSources> {
+    let plan_items = parse_frozen_reel_plan(frozen_plan)?;
+    let snapshots = parse_reel_source_snapshots(&job.source_snapshot_json)?;
+    ensure!(
+        snapshots.len() == plan_items.len(),
+        "frozen reel sources must exactly match the frozen project items"
+    );
+    let mut by_media_id = BTreeMap::new();
+    for snapshot in &snapshots {
+        ensure!(
+            by_media_id
+                .insert(snapshot.media_id.clone(), snapshot)
+                .is_none(),
+            "frozen reel sources contain a duplicate shot"
+        );
+    }
+
+    let volume = match recipe.audio {
+        ClipAudio::Source => 1.0,
+        ClipAudio::Mute => 0.0,
+    };
+    let mut resolved_paths = BTreeMap::new();
+    let mut items = Vec::with_capacity(plan_items.len());
+    for (index, item) in plan_items.iter().enumerate() {
+        let snapshot = by_media_id.remove(&item.media_id).with_context(|| {
+            format!(
+                "frozen project item {} has no matching source",
+                item.media_id
+            )
+        })?;
+        let shot = store
+            .shot_by_id(owner_id, &item.media_id)?
+            .with_context(|| format!("reel shot {} is not owned by this owner", item.media_id))?;
+        ensure!(
+            shot.video_id == snapshot.source_id,
+            "reel shot source_id does not match its owner-scoped video"
+        );
+        ensure!(
+            item.start_s >= shot.start_s && item.end_s <= shot.end_s,
+            "frozen reel boundaries must stay inside shot {}",
+            item.media_id
+        );
+        let video = store
+            .video_by_id(owner_id, &shot.video_id)?
+            .with_context(|| format!("reel shot {} has no owned source video", item.media_id))?;
+        ensure!(
+            video.sha256.eq_ignore_ascii_case(&snapshot.sha256),
+            "library video hash changed after this reel was queued"
+        );
+        if let Some(duration) = video.duration_s {
+            ensure!(
+                item.end_s <= duration,
+                "frozen reel boundary exceeds the source duration"
+            );
+        }
+        if recipe.audio == ClipAudio::Source {
+            ensure!(
+                video.has_audio,
+                "source-audio reel item {index} has no audio; silence insertion is not approved in v1"
+            );
+        }
+        let path = PathBuf::from(video.path);
+        ensure!(path.is_absolute(), "library video path is not absolute");
+        let hash_before = sha256_file(&path)
+            .with_context(|| format!("failed to hash reel source {}", path.display()))?;
+        ensure!(
+            hash_before.eq_ignore_ascii_case(&snapshot.sha256),
+            "reel source bytes changed after this render was queued"
+        );
+        resolved_paths.insert(item.media_id.clone(), path.clone());
+        items.push(ResolvedReelItem {
+            source_path: path,
+            media_kind: ReelMediaKind::Video,
+            in_s: item.start_s,
+            out_s: item.end_s,
+            crop: None,
+            crop_keyframes: Vec::new(),
+            caption: None,
+            transition: ResolvedReelTransition::default(),
+            speed: 1.0,
+            motion: ReelMotion::None,
+            volume,
+            grade: item.grade,
+        });
+    }
+    ensure!(
+        by_media_id.is_empty(),
+        "frozen reel sources contain shots absent from the frozen project"
+    );
+    Ok(ResolvedReelSources {
+        request: ResolvedReelRequest {
+            items,
+            format: ReelFormat::Source,
+            music: None,
+            master_volume: 1.0,
+            watermark: None,
+            cover: None,
+            output: recipe.output,
+        },
+        snapshots,
+        resolved_paths,
+    })
+}
+
 fn parse_photo_source_snapshot(value: &str) -> anyhow::Result<PhotoSourceSnapshot> {
     let value: Value = serde_json::from_str(value).context("source snapshot is invalid JSON")?;
     let sources = value
@@ -1260,5 +1803,61 @@ mod tests {
         assert_eq!(recipe.output, PhotoOutputPreset::PngSrgbV1);
         assert!(matches!(recipe.grade, PhotoGrade::Basic(_)));
         assert_eq!(recipe.crop.unwrap().width, 0.7);
+    }
+
+    #[test]
+    fn ordered_reel_v1_parser_preserves_supported_intent_and_rejects_v2() {
+        let frozen = json!({
+            "id": "reel-cut",
+            "version": 1,
+            "kind": "reel",
+            "name": "Ordered cut reel",
+            "schema": {
+                "schema_version": 1,
+                "kind": "reel",
+                "transition": {"kind": "cut"},
+                "audio": {"mode": "mute"},
+                "output": {"preset": "mov-h264-sdr-v1"}
+            }
+        });
+        let recipe = parse_reel_v1_recipe(&frozen.to_string()).unwrap();
+        assert_eq!(recipe.audio, ClipAudio::Mute);
+        assert_eq!(recipe.output, ClipOutputPreset::MovH264SdrV1);
+
+        let mut v2 = frozen;
+        v2["schema"]["schema_version"] = json!(2);
+        assert!(parse_reel_v1_recipe(&v2.to_string()).is_err());
+    }
+
+    #[test]
+    fn ordered_reel_plan_rejects_treatment_it_cannot_reproduce() {
+        let plan = |crop_x: Value, grade_json: Value| {
+            json!({
+                "items": [{
+                    "media_kind": "shot",
+                    "media_id": "shot-1",
+                    "start_s": 1.0,
+                    "end_s": 2.0,
+                    "pacing": null,
+                    "crop_x": crop_x,
+                    "grade_json": grade_json
+                }]
+            })
+        };
+        let supported = parse_frozen_reel_plan(
+            &plan(
+                Value::Null,
+                json!(r#"{"mode":"basic","exposure_ev":0.1,"contrast":0.0,"saturation":1.0,"temperature":0.0,"tint":0.0}"#),
+            )
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(supported[0].start_s, 1.0);
+        assert_eq!(supported[0].grade.exposure_ev, 0.1);
+        assert!(parse_frozen_reel_plan(&plan(json!(0.5), Value::Null).to_string()).is_err());
+        assert!(
+            parse_frozen_reel_plan(&plan(Value::Null, json!(r#"{"warmth":12}"#)).to_string())
+                .is_err()
+        );
     }
 }

@@ -62,7 +62,22 @@ greater-than-8-bit sources fail until a real conversion/tone-map policy is versi
 dimensions also fail rather than being silently padded.
 
 The actual backend and encoder are capability results in the manifest. The current macOS provider
-is VideoToolbox; it is not part of recipe intent. Reels remain in progress under Task 021. Until
-their ordered sequence, photo holds, transitions, crops, grades, captions and audio policies are
-implemented together, the application must report reel rendering as unavailable rather than emit
-an incomplete export.
+is VideoToolbox; it is not part of recipe intent.
+
+## Ordered reel preset v1
+
+The first reel executor uses the same MP4/MOV output contracts for a frozen project revision. It
+supports ordered video shots with exact absolute source boundaries, zero-duration cuts, no framing
+intent, none/basic grade, speed 1, no motion, and either source audio on every item or a fully muted
+reel. Each frame-sensitive item is encoded; only the final verified same-codec/dimension/audio
+concat is stream-copied. The manifest records every item command in project order, the frozen
+project and recipe, every source identity/hash, the final assembly/probe commands, requested versus
+measured duration, and actual backend/encoder.
+
+This v1 contract deliberately has source dimensions rather than a fixed social canvas. All items
+must resolve to identical rendered dimensions. Photo holds, fixed formats, music, captions,
+watermarks, cover sidecars, motion, speed changes, crop keyframes, scalar project crop intent,
+non-cut transitions, missing-audio silence insertion, mixed/fractional item volume, and extended
+Reel Studio grade controls are capability errors. Reel Studio schema v2 is preserved and resolved
+separately but is not downgraded to this subset. Those fields require versioned asset, timing,
+layout, mix, and publication contracts before output is allowed.

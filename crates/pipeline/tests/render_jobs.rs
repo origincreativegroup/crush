@@ -6,11 +6,11 @@ use crush_core::cancellation::CancellationToken;
 use crush_core::paths::AppPaths;
 use crush_core::{Config, DEFAULT_OWNER_ID};
 use crush_pipeline::{sha256_file, Pipeline};
+#[cfg(target_os = "macos")]
+use crush_store::{MediaKind, Plan, PlanItem, PlanOrigin, Shot, Video, VideoStatus};
 use crush_store::{
     NewRenderJob, Photo, PhotoStatus, RenderJobStatus, RenderRecipe, RenderRecipeKind, Store,
 };
-#[cfg(target_os = "macos")]
-use crush_store::{Video, VideoStatus};
 use image::{Rgb, RgbImage};
 
 fn setup_photo_job(
@@ -642,4 +642,191 @@ fn frozen_video_clip_job_encodes_and_publishes_measured_manifest() {
     assert_eq!(manifest["render"]["preset"], "mp4-h264-sdr-v1");
     assert_eq!(manifest["tool_versions"]["backend"], "videotoolbox");
     assert_eq!(manifest["verification"]["source_unchanged"], true);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn frozen_ordered_reel_job_renders_project_order_and_publishes_one_manifest() {
+    if crush_stage_split::ffmpeg::resolve().is_err() {
+        eprintln!("skipping reel render: bundled/development FFmpeg is unavailable");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = repo_root().join("fixtures/clips/synthetic-speech.mp4");
+    let source_hash = sha256_file(&source).unwrap();
+    let destination = directory.path().join("exports/ordered-reel.mp4");
+    let now = Utc::now();
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &Video {
+                id: "video-reel".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                sha256: source_hash.clone(),
+                duration_s: Some(12.0),
+                fps: Some(30.0),
+                width: Some(640),
+                height: Some(360),
+                has_audio: true,
+                status: VideoStatus::Done,
+                indexed_at: Some(now),
+            },
+        )
+        .unwrap();
+    let shots = [
+        Shot {
+            id: "reel-shot-a".to_owned(),
+            video_id: "video-reel".to_owned(),
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            idx: 0,
+            start_s: 0.0,
+            end_s: 2.0,
+            rep_frame_s: 1.0,
+            thumb_rel: None,
+            scene_score: None,
+        },
+        Shot {
+            id: "reel-shot-b".to_owned(),
+            video_id: "video-reel".to_owned(),
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            idx: 1,
+            start_s: 3.0,
+            end_s: 5.0,
+            rep_frame_s: 4.0,
+            thumb_rel: None,
+            scene_score: None,
+        },
+    ];
+    store.insert_shots(DEFAULT_OWNER_ID, &shots).unwrap();
+    store
+        .plan_create(
+            DEFAULT_OWNER_ID,
+            &Plan {
+                id: "reel-project".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                name: "Ordered reel".to_owned(),
+                description: String::new(),
+                context_key: "render-test".to_owned(),
+                brief: String::new(),
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .unwrap();
+    for (position, (shot_id, start_s, end_s)) in
+        [("reel-shot-a", 0.25, 1.25), ("reel-shot-b", 3.25, 4.25)]
+            .into_iter()
+            .enumerate()
+    {
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &PlanItem {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    plan_id: "reel-project".to_owned(),
+                    media_kind: MediaKind::Shot,
+                    media_id: shot_id.to_owned(),
+                    position: position as i64,
+                    start_s: Some(start_s),
+                    end_s: Some(end_s),
+                    pacing: None,
+                    crop_x: None,
+                    grade_json: None,
+                    reason: String::new(),
+                    signals_json: "{}".to_owned(),
+                    origin: PlanOrigin::General,
+                    rank: None,
+                    profile_version: None,
+                    added_at: now,
+                },
+            )
+            .unwrap();
+    }
+    let revision = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "reel-project", "render golden")
+        .unwrap();
+    store
+        .render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: "ordered-reel-mp4".to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::Reel,
+                name: "Ordered reel MP4".to_owned(),
+                schema_json: serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "reel",
+                    "transition": {"kind": "cut"},
+                    "audio": {"mode": "source"},
+                    "output": {"preset": "mp4-h264-sdr-v1"}
+                })
+                .to_string(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-ordered-reel".to_owned(),
+                recipe_id: "ordered-reel-mp4".to_owned(),
+                recipe_version: 1,
+                plan_id: Some("reel-project".to_owned()),
+                plan_revision: Some(revision.revision),
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "render-test",
+                    "selection_provenance": {"origin": "general"},
+                    "sources": shots.iter().map(|shot| serde_json::json!({
+                        "media_kind": "shot",
+                        "media_id": shot.id,
+                        "source_id": "video-reel",
+                        "sha256": source_hash,
+                        "path": source,
+                    })).collect::<Vec<_>>()
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used"
+                    }
+                })
+                .to_string(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    let pipeline = Pipeline::new(
+        Config {
+            data_dir: Some(directory.path().to_path_buf()),
+            ..Config::default()
+        },
+        AppPaths {
+            root: directory.path().to_path_buf(),
+        },
+        CancellationToken::default(),
+    );
+    let output = pipeline
+        .execute_render_job(DEFAULT_OWNER_ID, "render-ordered-reel")
+        .unwrap();
+
+    assert_eq!(output.media_type, "video/mp4");
+    assert!((output.duration_s.unwrap() - 2.0).abs() <= 0.12);
+    assert_eq!(sha256_file(&source).unwrap(), source_hash);
+    assert!(destination.is_file());
+    let manifest: serde_json::Value = serde_json::from_str(&output.manifest_json).unwrap();
+    assert_eq!(manifest["render"]["preset"], "mp4-h264-sdr-v1");
+    assert_eq!(manifest["sources"].as_array().unwrap().len(), 2);
+    assert_eq!(manifest["verification"]["sources_unchanged"], true);
+    assert_eq!(manifest["verification"]["item_count"], 2);
 }
