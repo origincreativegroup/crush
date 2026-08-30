@@ -545,14 +545,31 @@
     const { items, revisions, ...view } = plan;
     return { ...view, itemCount: items.length };
   };
-  const planKind = (assetType) => assetType === "photo" ? "photo" : "shot";
+  const planKind = (assetType) => assetType === "photo" ? "photo" : assetType === "span" ? "span" : "shot";
+  if (scenario === "plans-historical") {
+    plans.set("plan-hist", {
+      id: "plan-hist", name: "Reel Studio · Healthy Earth", contextKey: "default",
+      description: "Imported from Reel Studio recipe healthy-earth.json (historical; recipe reel-studio-healthy-earth v1)", brief: "",
+      items: [{
+        mediaKind: "span", mediaId: "span-hist-1", position: 0, startS: 3.45, endS: 4.45, pacing: null, cropX: 0.42, gradeJson: null,
+        reason: "Reel Studio segment V1-0001_S1 (historical choice)",
+        signalsJson: JSON.stringify({ candidate: { kind: "span", path: video.path, start_s: 3.2, end_s: 5.95, boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0 }, historical: { source: "reel_studio", external_id: "V1-0001_S1", used_in: "reel-01" } }),
+        origin: "historical", rank: null, profileVersion: null,
+        provenanceJson: JSON.stringify({ source: "reel_studio", external_id: "V1-0001_S1", boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0 }),
+        addedAt: "2026-08-30T12:00:00Z",
+      }],
+      revisions: [{ revision: 1, label: "imported from Reel Studio", createdAt: "2026-08-30T12:00:00Z" }],
+      createdAt: "2026-08-30T12:00:00Z", updatedAt: "2026-08-30T12:00:00Z",
+    });
+  }
   const planItemFor = (plan, args) => {
     const item = plan.items.find((item) => item.mediaId === args.mediaId && item.mediaKind === planKind(args.assetType));
     if (!item) throw "Plan item not found";
     return item;
   };
   const validatePlanItem = (item) => {
-    if (item.mediaKind === "shot" && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
+    if ((item.mediaKind === "shot" || item.mediaKind === "span") && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
+    if ((item.origin === "historical" || item.origin === "imported") && item.profileVersion != null) throw "Invalid provenance";
     if ((item.origin === "personal") !== (item.profileVersion != null)) throw "Invalid provenance";
   };
 
@@ -668,6 +685,31 @@
         return "Crush doctor\nffmpeg source=Bundled\nmodels=4/4 present";
       case "cancel_ingest":
         return cancelIngest();
+      case "import_reel_studio": {
+        const apply = Boolean(args.request?.apply);
+        if (!args.request?.catalogue) throw "choose the Reel Studio clips.db first";
+        return clone({
+          import_id: apply ? "import-apply" : "import-dry",
+          mode: apply ? "apply" : "dry_run",
+          catalogue_path: args.request.catalogue,
+          catalogue_sha256: "abc123",
+          context_key: args.request.contextKey,
+          sources: [
+            { clip_id: "V1-0001", source_file: "V1-0001.mp4", resolved_path: "/Volumes/Footage/2026/V1-0001.mp4", video_id: "video-one", matched_by: "path" },
+            { clip_id: "V1-0009", source_file: "V1-0009.mp4", resolved_path: null, video_id: null, matched_by: "missing_file" },
+          ],
+          segments: [
+            { segment_id: "V1-0001_S1", clip_id: "V1-0001", video_id: "video-one", start_s: 3.2, end_s: 5.95, boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0, outcome: apply ? "unchanged" : "new", reason: "no library folder; catalogue timecodes taken literally with keyframe tolerance" },
+            { segment_id: "V1-0009_S1", clip_id: "V1-0009", video_id: null, start_s: 1, end_s: 2, boundary_basis: "catalogue_tc", boundary_tolerance_s: 0, outcome: "skipped", reason: "source clip is not matched to an indexed video" },
+          ],
+          recipes: [{ file: args.request.recipes?.[0] || "healthy-earth.json", recipe_id: "reel-studio-healthy-earth", plan_name: "Reel Studio · Healthy Earth", items: 1, finished_project: true, outcome: apply ? "unchanged" : "new", reason: null }],
+          issues: [{ kind: "missing_source", subject: "V1-0009", detail: "V1-0009.mp4 was not found under the given originals directories" }],
+          planned_writes: { manual_spans_insert: apply ? 0 : 1, manual_spans_update: 0, render_recipes_insert: apply ? 0 : 1, plans_insert: apply ? 0 : 1, plan_items_insert: apply ? 0 : 1, plan_revisions_insert: apply ? 0 : 1, feedback_events_insert: 0, reference_sets_insert: 0 },
+          reference_set_candidates: ["Reel Studio · Healthy Earth"],
+          started_at: "2026-08-30T12:00:00Z",
+          finished_at: "2026-08-30T12:00:01Z",
+        });
+      }
       case "add_folder":
       case "reindex_video":
         return { jobId: "background-test" };
@@ -890,8 +932,12 @@
       },
     },
     dialog: {
-      async open() {
-        return null;
+      async open(options = {}) {
+        calls.push({ command: "dialog.open", args: options });
+        if (scenario !== "import-reel-studio") return null;
+        if (options.directory) return options.multiple ? ["/Volumes/Footage/2026"] : "/Volumes/Video Production";
+        if (options.filters?.[0]?.extensions?.includes("json")) return ["/Users/john/Desktop/healthy-earth.json"];
+        return "/Volumes/Video Production/clips.db";
       },
       async save(options) {
         return `/tmp/${options.defaultPath}`;

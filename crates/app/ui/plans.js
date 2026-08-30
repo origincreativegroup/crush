@@ -437,7 +437,7 @@
     const example = button("Use as preference example", async () => {
       await invoke("record_feedback", { assetType: kind(item.mediaKind), id: item.mediaId, signal: "pick", value: 1, context: state.plan.brief, contextKey: state.plan.contextKey });
       message(`Preference example recorded for “${state.plan.contextKey}”.`);
-    }));
+    });
     if (item.mediaKind === "span") {
       example.disabled = true;
       example.title = "Imported Reel Studio spans are historical evidence; confirm them as examples from Preferences once the catalogue import is reviewed.";

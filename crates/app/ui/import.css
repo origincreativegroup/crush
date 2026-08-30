@@ -1,0 +1,25 @@
+/* Reel Studio import dialog (Task 022) */
+.import-dialog { width: 760px; max-height: 90vh; overflow: auto; }
+.import-copy { margin: 14px 0 16px; color: #a8a8b0; line-height: 1.5; }
+.import-form { display: grid; gap: 12px; }
+.import-field label { display: block; margin-bottom: 5px; color: #8a8a93; font-size: 11px; }
+.import-picker { display: flex; gap: 8px; }
+.import-picker input, #import-context { flex: 1; height: 32px; padding: 0 10px; border: 1px solid #34343b; border-radius: 7px; color: #ececf0; background: #141416; }
+.import-advanced { padding: 8px 0; }
+.import-advanced summary { color: #8a8a93; cursor: pointer; }
+.import-advanced .import-field { margin-top: 10px; }
+.import-check { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: #a8a8b0; }
+.import-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.import-status { min-height: 20px; margin-top: 12px; color: #c9c9cf; }
+.import-report { margin-top: 12px; border-top: 1px solid #2a2a30; padding-top: 12px; }
+.import-summary { color: #e8e8ea; font-weight: 650; }
+.import-issues { display: grid; gap: 4px; margin: 8px 0; }
+.import-issue { padding: 6px 8px; border-left: 2px solid #8d7a4a; background: #202024; color: #b7b7be; font-size: 12px; }
+.import-issue.missing_source, .import-issue.out_of_range, .import-issue.unknown_segment { border-left-color: #ff5c5c; }
+.import-table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 11px; }
+.import-table th { text-align: left; padding: 4px 6px; color: #777781; border-bottom: 1px solid #303037; }
+.import-table td { padding: 4px 6px; border-bottom: 1px solid #28282e; color: #b9b9c0; vertical-align: top; }
+.import-outcome.new { color: #85d4a2; }
+.import-outcome.updated { color: #8bb4ff; }
+.import-outcome.skipped { color: #ff8d8d; }
+.button.small { min-height: 28px; padding: 0 10px; font-size: 11px; }
