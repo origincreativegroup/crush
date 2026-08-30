@@ -636,6 +636,7 @@ fn library(
                     "media_kind": match asset.media_kind {
                         crush_store::MediaKind::Photo => "photo",
                         crush_store::MediaKind::Shot => "shot",
+                        crush_store::MediaKind::Span => "span",
                     },
                     "media_id": asset.media_id,
                     "path": asset.path,
@@ -678,6 +679,7 @@ fn library(
         let kind = match asset.media_kind {
             crush_store::MediaKind::Photo => "photo",
             crush_store::MediaKind::Shot => "shot",
+            crush_store::MediaKind::Span => "span",
         };
         println!(
             "{:<6} {:<24} {:<10} {:>7}  {:<8} {:<8}  {}",
@@ -823,6 +825,7 @@ fn plans(paths: &AppPaths, items: Option<String>, json: bool) -> anyhow::Result<
                 match item.media_kind {
                     crush_store::MediaKind::Photo => "photo",
                     crush_store::MediaKind::Shot => "shot",
+                    crush_store::MediaKind::Span => "span",
                 },
                 item.media_id,
                 item.start_s

@@ -909,10 +909,12 @@ mod macos {
                 let exists = match media_kind {
                     MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
                     MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
+                    MediaKind::Span => store.manual_span_by_id(DEFAULT_OWNER_ID, &id)?.is_some(),
                 };
                 let kind = match media_kind {
                     MediaKind::Photo => "photo",
                     MediaKind::Shot => "shot",
+                    MediaKind::Span => "span",
                 };
                 ensure!(exists, "no {kind} exists with id {id}");
                 if let Some(compared_id) = &compared_id {
@@ -923,6 +925,9 @@ mod macos {
                         Some(MediaKind::Shot) => {
                             store.shot_by_id(DEFAULT_OWNER_ID, compared_id)?.is_some()
                         }
+                        Some(MediaKind::Span) => store
+                            .manual_span_by_id(DEFAULT_OWNER_ID, compared_id)?
+                            .is_some(),
                         None => false,
                     };
                     ensure!(
@@ -1147,10 +1152,14 @@ mod macos {
             let exists = match media_kind {
                 MediaKind::Photo => store.photo_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
                 MediaKind::Shot => store.shot_by_id(DEFAULT_OWNER_ID, &media_id)?.is_some(),
+                MediaKind::Span => store
+                    .manual_span_by_id(DEFAULT_OWNER_ID, &media_id)?
+                    .is_some(),
             };
             let kind = match media_kind {
                 MediaKind::Photo => "photo",
                 MediaKind::Shot => "shot",
+                MediaKind::Span => "span",
             };
             ensure!(exists, "no {kind} exists with id {media_id}");
             store.reference_set_add_item(
@@ -1280,6 +1289,7 @@ mod macos {
             media_kind: match asset.media_kind {
                 MediaKind::Photo => "photo".to_owned(),
                 MediaKind::Shot => "shot".to_owned(),
+                MediaKind::Span => "span".to_owned(),
             },
             media_id: asset.media_id,
             path: asset.path,
@@ -1493,6 +1503,7 @@ mod macos {
                     media_kind: match item.media_kind {
                         MediaKind::Photo => "photo".to_owned(),
                         MediaKind::Shot => "shot".to_owned(),
+                        MediaKind::Span => "span".to_owned(),
                     },
                     media_id: item.media_id,
                     context_key: item.context_key,
@@ -2000,6 +2011,8 @@ mod macos {
         let origin = match selected.origin {
             PlanOrigin::General => "general",
             PlanOrigin::Personal => "personal",
+            PlanOrigin::Historical => "historical",
+            PlanOrigin::Imported => "imported",
         };
         let job_id = format!("render-job-{}", Uuid::new_v4());
         store.render_job_create(
@@ -2152,6 +2165,8 @@ mod macos {
         let origin = match selected.origin {
             PlanOrigin::General => "general",
             PlanOrigin::Personal => "personal",
+            PlanOrigin::Historical => "historical",
+            PlanOrigin::Imported => "imported",
         };
         let job_id = format!("render-job-{}", Uuid::new_v4());
         store.render_job_create(
@@ -2235,6 +2250,7 @@ mod macos {
             media_kind: match item.media_kind {
                 MediaKind::Photo => "photo".to_owned(),
                 MediaKind::Shot => "shot".to_owned(),
+                MediaKind::Span => "span".to_owned(),
             },
             media_id: item.media_id,
             position: item.position,
@@ -2248,6 +2264,8 @@ mod macos {
             origin: match item.origin {
                 PlanOrigin::General => "general".to_owned(),
                 PlanOrigin::Personal => "personal".to_owned(),
+                PlanOrigin::Historical => "historical".to_owned(),
+                PlanOrigin::Imported => "imported".to_owned(),
             },
             rank: item.rank,
             profile_version: item.profile_version,
@@ -2372,6 +2390,7 @@ mod macos {
                 origin: parse_plan_origin(item.origin.as_deref())?,
                 rank: item.rank,
                 profile_version: item.profile_version,
+                provenance_json: "{}".to_owned(),
                 added_at: chrono::Utc::now(),
             };
             let plan_id = plan_item.plan_id.clone();

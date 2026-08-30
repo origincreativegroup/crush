@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 11;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
@@ -27,6 +27,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (8, include_str!("../migrations/0008_collections.sql")),
     (9, include_str!("../migrations/0009_plans.sql")),
     (10, include_str!("../migrations/0010_rendering.sql")),
+    (
+        11,
+        include_str!("../migrations/0011_reel_studio_import.sql"),
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +148,8 @@ pub struct VideoSourceMetadata {
 pub enum MediaKind {
     Photo,
     Shot,
+    /// An imported or manual video span (Task 022); references `manual_spans`, never `shots`.
+    Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -379,6 +385,10 @@ pub struct SavedSearch {
 pub enum PlanOrigin {
     General,
     Personal,
+    /// A prior human choice reproduced from an imported recipe/project (Task 022).
+    Historical,
+    /// A catalogue-driven selection imported from another tool (Task 022).
+    Imported,
 }
 
 /// An owner-scoped editorial document: an ordered, editable selection of photos and video
@@ -418,6 +428,9 @@ pub struct PlanItem {
     pub origin: PlanOrigin,
     pub rank: Option<f64>,
     pub profile_version: Option<i64>,
+    /// `{}` for general/personal items. Historical/imported items carry
+    /// `{source, external_id, import_id, boundary_basis, boundary_tolerance_s}`.
+    pub provenance_json: String,
     pub added_at: DateTime<Utc>,
 }
 
@@ -2236,8 +2249,8 @@ impl Store {
                 "INSERT INTO plan_items (
                     owner_id, plan_id, media_kind, media_id, position, start_s, end_s, pacing,
                     crop_x, grade_json, reason, signals_json, origin, rank, profile_version,
-                    added_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    provenance_json, added_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     owner_id,
                     item.plan_id,
@@ -2254,6 +2267,7 @@ impl Store {
                     plan_origin_to_str(item.origin),
                     item.rank,
                     item.profile_version,
+                    item.provenance_json,
                     item.added_at.to_rfc3339(),
                 ],
             )
@@ -2364,7 +2378,7 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT owner_id, plan_id, media_kind, media_id, position, start_s, end_s, pacing,
                     crop_x, grade_json, reason, signals_json, origin, rank, profile_version,
-                    added_at
+                    provenance_json, added_at
              FROM plan_items WHERE owner_id = ?1 AND plan_id = ?2
              ORDER BY position, media_kind, media_id",
         )?;
@@ -2574,8 +2588,8 @@ impl Store {
                     "INSERT INTO plan_items (
                         owner_id, plan_id, media_kind, media_id, position, start_s, end_s,
                         pacing, crop_x, grade_json, reason, signals_json, origin, rank,
-                        profile_version, added_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                        profile_version, provenance_json, added_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         owner_id,
                         plan_id,
@@ -2592,6 +2606,7 @@ impl Store {
                         plan_origin_to_str(item.origin),
                         item.rank,
                         item.profile_version,
+                        item.provenance_json,
                         item.added_at.to_rfc3339(),
                     ],
                 )
@@ -2663,10 +2678,10 @@ impl Store {
                 "INSERT INTO plan_items (
                     owner_id, plan_id, media_kind, media_id, position, start_s, end_s, pacing,
                     crop_x, grade_json, reason, signals_json, origin, rank, profile_version,
-                    added_at
+                    provenance_json, added_at
                  ) SELECT owner_id, ?3, media_kind, media_id, position, start_s, end_s, pacing,
                           crop_x, grade_json, reason, signals_json, origin, rank,
-                          profile_version, ?4
+                          profile_version, provenance_json, ?4
                  FROM plan_items WHERE owner_id = ?1 AND plan_id = ?2",
                 params![owner_id, plan_id, copy.id, now.to_rfc3339()],
             )
@@ -3472,6 +3487,24 @@ impl Store {
                 );
                 Ok(Some(shot))
             }
+            MediaKind::Span => {
+                let span = self
+                    .manual_span_by_id(owner_id, &item.media_id)?
+                    .with_context(|| {
+                        format!("span {} does not exist for this owner", item.media_id)
+                    })?;
+                let start_s = item.start_s.context("plan item span start is required")?;
+                let end_s = item.end_s.context("plan item span end is required")?;
+                ensure!(
+                    start_s >= span.start_s && end_s <= span.end_s && end_s > start_s,
+                    "plan item boundaries {start_s}..{end_s} must stay inside imported span {} \
+                     ({:.3}..{:.3})",
+                    item.media_id,
+                    span.start_s,
+                    span.end_s
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -3731,6 +3764,9 @@ impl Store {
         let mut sql = match filter.kind {
             Some(MediaKind::Photo) => photo_select,
             Some(MediaKind::Shot) => shot_select,
+            Some(MediaKind::Span) => {
+                bail!("imported spans are listed through manual_spans, not the library")
+            }
             None => format!("{photo_select}\nUNION ALL\n{shot_select}"),
         };
         sql.push_str("\nORDER BY sort_at, media_kind, media_id");
@@ -5461,7 +5497,7 @@ fn plan_from_row(row: &Row<'_>) -> rusqlite::Result<Plan> {
 fn plan_item_from_row(row: &Row<'_>) -> rusqlite::Result<PlanItem> {
     let media_kind: String = row.get(2)?;
     let origin: String = row.get(12)?;
-    let added_at: String = row.get(15)?;
+    let added_at: String = row.get(16)?;
     Ok(PlanItem {
         owner_id: row.get(0)?,
         plan_id: row.get(1)?,
@@ -5480,7 +5516,8 @@ fn plan_item_from_row(row: &Row<'_>) -> rusqlite::Result<PlanItem> {
             .map_err(|error| conversion_message(12, error.to_string()))?,
         rank: row.get(13)?,
         profile_version: row.get(14)?,
-        added_at: timestamp_from_str(&added_at, 15)?,
+        provenance_json: row.get(15)?,
+        added_at: timestamp_from_str(&added_at, 16)?,
     })
 }
 
@@ -5726,6 +5763,7 @@ fn media_kind_to_str(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Photo => "photo",
         MediaKind::Shot => "shot",
+        MediaKind::Span => "span",
     }
 }
 
@@ -5733,6 +5771,7 @@ fn media_kind_from_str(value: &str) -> anyhow::Result<MediaKind> {
     match value {
         "photo" => Ok(MediaKind::Photo),
         "shot" => Ok(MediaKind::Shot),
+        "span" => Ok(MediaKind::Span),
         _ => bail!("unknown media kind {value:?}"),
     }
 }
@@ -5741,6 +5780,8 @@ pub fn plan_origin_to_str(origin: PlanOrigin) -> &'static str {
     match origin {
         PlanOrigin::General => "general",
         PlanOrigin::Personal => "personal",
+        PlanOrigin::Historical => "historical",
+        PlanOrigin::Imported => "imported",
     }
 }
 
@@ -5748,6 +5789,8 @@ pub fn plan_origin_from_str(value: &str) -> anyhow::Result<PlanOrigin> {
     match value {
         "general" => Ok(PlanOrigin::General),
         "personal" => Ok(PlanOrigin::Personal),
+        "historical" => Ok(PlanOrigin::Historical),
+        "imported" => Ok(PlanOrigin::Imported),
         _ => bail!("unknown plan item origin {value:?}"),
     }
 }
@@ -7150,7 +7193,7 @@ fn validate_plan_item_fields(item: &PlanItem) -> anyhow::Result<()> {
                 "photo plan items carry no clip boundaries"
             );
         }
-        MediaKind::Shot => {
+        MediaKind::Shot | MediaKind::Span => {
             let start_s = item.start_s.context("plan item shot start is required")?;
             let end_s = item.end_s.context("plan item shot end is required")?;
             ensure!(
@@ -7159,6 +7202,7 @@ fn validate_plan_item_fields(item: &PlanItem) -> anyhow::Result<()> {
             );
         }
     }
+    validate_plan_item_provenance(item)?;
     if let Some(pacing) = item.pacing {
         ensure_unit_score(pacing, "plan item pacing")?;
     }
@@ -7201,6 +7245,7 @@ fn plan_item_snapshot_value(item: &PlanItem) -> serde_json::Value {
         "origin": plan_origin_to_str(item.origin),
         "rank": item.rank,
         "profile_version": item.profile_version,
+        "provenance_json": item.provenance_json,
         "added_at": item.added_at.to_rfc3339(),
     })
 }
@@ -7265,6 +7310,11 @@ fn plan_item_from_snapshot(
         profile_version: value
             .get("profile_version")
             .and_then(serde_json::Value::as_i64),
+        provenance_json: value
+            .get("provenance_json")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("{}")
+            .to_owned(),
         added_at,
     };
     validate_plan_item_fields(&item)?;
@@ -7354,4 +7404,417 @@ fn collect_string_pairs(
         output.push(problem(first, second));
     }
     Ok(())
+}
+
+// ---- Reel Studio import: manual spans and catalogue ledger (Task 022) ----
+
+/// Where an imported/manual span's boundaries came from. Imported spans are honest about
+/// whether the catalogue timecodes were taken literally or corrected from a measured library clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanBoundaryBasis {
+    CatalogueTc,
+    LibraryProbe,
+    User,
+}
+
+pub fn span_boundary_basis_to_str(basis: SpanBoundaryBasis) -> &'static str {
+    match basis {
+        SpanBoundaryBasis::CatalogueTc => "catalogue_tc",
+        SpanBoundaryBasis::LibraryProbe => "library_probe",
+        SpanBoundaryBasis::User => "user",
+    }
+}
+
+pub fn span_boundary_basis_from_str(value: &str) -> anyhow::Result<SpanBoundaryBasis> {
+    match value {
+        "catalogue_tc" => Ok(SpanBoundaryBasis::CatalogueTc),
+        "library_probe" => Ok(SpanBoundaryBasis::LibraryProbe),
+        "user" => Ok(SpanBoundaryBasis::User),
+        _ => bail!("unknown span boundary basis {value:?}"),
+    }
+}
+
+/// A first-class human-decided video span on the original source timeline. Survives resplit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ManualSpan {
+    pub id: String,
+    pub owner_id: String,
+    pub video_id: String,
+    /// `reel_studio` or `manual`.
+    pub source: String,
+    /// The external identifier (Reel Studio `segment_id`) or a Crush-generated id for manual spans.
+    pub external_id: String,
+    pub start_s: f64,
+    pub end_s: f64,
+    pub boundary_basis: SpanBoundaryBasis,
+    pub boundary_tolerance_s: f64,
+    /// `source_t = start_s + library_relative_offset_s + t` for library-clip-relative seconds.
+    pub library_relative_offset_s: f64,
+    pub description: String,
+    pub shot_type: String,
+    pub camera_move: String,
+    pub subjects: String,
+    pub action: String,
+    pub tags: String,
+    pub quality: Option<i64>,
+    pub standout: bool,
+    pub usable: bool,
+    pub faces_visible: bool,
+    pub nametags_visible: bool,
+    pub blur_required: bool,
+    pub used_in: String,
+    pub crop_x: Option<f64>,
+    pub notes: String,
+    pub import_id: Option<String>,
+    pub imported_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One append-only row in the import ledger.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CatalogueImport {
+    pub id: String,
+    pub owner_id: String,
+    pub source: String,
+    /// `dry_run` or `apply`.
+    pub mode: String,
+    pub catalogue_path: String,
+    pub catalogue_sha256: String,
+    pub recipes_json: String,
+    pub report_json: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+}
+
+const MANUAL_SPAN_COLUMNS: &str = "id, owner_id, video_id, source, external_id, start_s, end_s, \
+     boundary_basis, boundary_tolerance_s, library_relative_offset_s, description, shot_type, \
+     camera_move, subjects, action, tags, quality, standout, usable, faces_visible, \
+     nametags_visible, blur_required, used_in, crop_x, notes, import_id, imported_at, updated_at";
+
+fn manual_span_from_row(row: &Row<'_>) -> rusqlite::Result<ManualSpan> {
+    let basis: String = row.get(7)?;
+    let imported_at: String = row.get(26)?;
+    let updated_at: String = row.get(27)?;
+    Ok(ManualSpan {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        video_id: row.get(2)?,
+        source: row.get(3)?,
+        external_id: row.get(4)?,
+        start_s: row.get(5)?,
+        end_s: row.get(6)?,
+        boundary_basis: span_boundary_basis_from_str(&basis)
+            .map_err(|error| conversion_message(7, error.to_string()))?,
+        boundary_tolerance_s: row.get(8)?,
+        library_relative_offset_s: row.get(9)?,
+        description: row.get(10)?,
+        shot_type: row.get(11)?,
+        camera_move: row.get(12)?,
+        subjects: row.get(13)?,
+        action: row.get(14)?,
+        tags: row.get(15)?,
+        quality: row.get(16)?,
+        standout: row.get::<_, i64>(17)? != 0,
+        usable: row.get::<_, i64>(18)? != 0,
+        faces_visible: row.get::<_, i64>(19)? != 0,
+        nametags_visible: row.get::<_, i64>(20)? != 0,
+        blur_required: row.get::<_, i64>(21)? != 0,
+        used_in: row.get(22)?,
+        crop_x: row.get(23)?,
+        notes: row.get(24)?,
+        import_id: row.get(25)?,
+        imported_at: timestamp_from_str(&imported_at, 26)?,
+        updated_at: timestamp_from_str(&updated_at, 27)?,
+    })
+}
+
+fn catalogue_import_from_row(row: &Row<'_>) -> rusqlite::Result<CatalogueImport> {
+    let started_at: String = row.get(8)?;
+    let finished_at: String = row.get(9)?;
+    Ok(CatalogueImport {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        source: row.get(2)?,
+        mode: row.get(3)?,
+        catalogue_path: row.get(4)?,
+        catalogue_sha256: row.get(5)?,
+        recipes_json: row.get(6)?,
+        report_json: row.get(7)?,
+        started_at: timestamp_from_str(&started_at, 8)?,
+        finished_at: timestamp_from_str(&finished_at, 9)?,
+    })
+}
+
+/// Historical/imported items must say where they came from and never claim a profile.
+fn validate_plan_item_provenance(item: &PlanItem) -> anyhow::Result<()> {
+    let provenance: serde_json::Value = serde_json::from_str(&item.provenance_json)
+        .context("plan item provenance_json must be valid JSON")?;
+    ensure!(
+        provenance.is_object(),
+        "plan item provenance_json must be a JSON object"
+    );
+    match item.origin {
+        PlanOrigin::General | PlanOrigin::Personal => Ok(()),
+        PlanOrigin::Historical | PlanOrigin::Imported => {
+            ensure!(
+                item.profile_version.is_none(),
+                "historical or imported plan items never carry a profile version"
+            );
+            let object = provenance.as_object().expect("checked above");
+            for key in ["source", "external_id"] {
+                ensure!(
+                    object
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty()),
+                    "historical or imported plan items require provenance {key}"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_manual_span(span: &ManualSpan) -> anyhow::Result<()> {
+    ensure!(
+        !span.id.trim().is_empty(),
+        "manual span id must not be empty"
+    );
+    ensure!(
+        matches!(span.source.as_str(), "reel_studio" | "manual"),
+        "manual span source must be reel_studio or manual"
+    );
+    ensure!(
+        !span.external_id.trim().is_empty(),
+        "manual span external id must not be empty"
+    );
+    ensure!(
+        span.start_s.is_finite()
+            && span.end_s.is_finite()
+            && span.start_s >= 0.0
+            && span.end_s > span.start_s,
+        "manual span end must exceed its finite non-negative start"
+    );
+    ensure!(
+        span.boundary_tolerance_s.is_finite() && span.boundary_tolerance_s >= 0.0,
+        "manual span boundary tolerance must be finite and non-negative"
+    );
+    ensure!(
+        span.library_relative_offset_s.is_finite(),
+        "manual span library offset must be finite"
+    );
+    if let Some(quality) = span.quality {
+        ensure!(
+            (1..=5).contains(&quality),
+            "manual span quality must be 1..=5"
+        );
+    }
+    if let Some(crop_x) = span.crop_x {
+        ensure_unit_score(crop_x, "manual span crop_x")?;
+    }
+    Ok(())
+}
+
+impl Store {
+    /// Insert or refresh one imported/manual span keyed by (owner, source, external_id). The
+    /// span id is stable across re-imports: an existing row keeps its id (so plan items that
+    /// reference it survive) and only its evidence/boundaries are updated. Returns the stored row.
+    pub fn manual_span_upsert(
+        &self,
+        owner_id: &str,
+        span: &ManualSpan,
+    ) -> anyhow::Result<ManualSpan> {
+        ensure_owner_matches(owner_id, &span.owner_id, "manual span")?;
+        validate_manual_span(span)?;
+        let existing =
+            self.manual_span_by_external_id(owner_id, &span.source, &span.external_id)?;
+        let id = existing
+            .as_ref()
+            .map(|row| row.id.clone())
+            .unwrap_or_else(|| span.id.clone());
+        self.connection
+            .execute(
+                &format!(
+                    "INSERT INTO manual_spans ({MANUAL_SPAN_COLUMNS})
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)
+                     ON CONFLICT(owner_id, source, external_id) DO UPDATE SET
+                        video_id = excluded.video_id,
+                        start_s = excluded.start_s,
+                        end_s = excluded.end_s,
+                        boundary_basis = excluded.boundary_basis,
+                        boundary_tolerance_s = excluded.boundary_tolerance_s,
+                        library_relative_offset_s = excluded.library_relative_offset_s,
+                        description = excluded.description,
+                        shot_type = excluded.shot_type,
+                        camera_move = excluded.camera_move,
+                        subjects = excluded.subjects,
+                        action = excluded.action,
+                        tags = excluded.tags,
+                        quality = excluded.quality,
+                        standout = excluded.standout,
+                        usable = excluded.usable,
+                        faces_visible = excluded.faces_visible,
+                        nametags_visible = excluded.nametags_visible,
+                        blur_required = excluded.blur_required,
+                        used_in = excluded.used_in,
+                        crop_x = excluded.crop_x,
+                        notes = excluded.notes,
+                        import_id = excluded.import_id,
+                        updated_at = excluded.updated_at"
+                ),
+                params![
+                    id,
+                    owner_id,
+                    span.video_id,
+                    span.source,
+                    span.external_id,
+                    span.start_s,
+                    span.end_s,
+                    span_boundary_basis_to_str(span.boundary_basis),
+                    span.boundary_tolerance_s,
+                    span.library_relative_offset_s,
+                    span.description,
+                    span.shot_type,
+                    span.camera_move,
+                    span.subjects,
+                    span.action,
+                    span.tags,
+                    span.quality,
+                    i64::from(span.standout),
+                    i64::from(span.usable),
+                    i64::from(span.faces_visible),
+                    i64::from(span.nametags_visible),
+                    i64::from(span.blur_required),
+                    span.used_in,
+                    span.crop_x,
+                    span.notes,
+                    span.import_id,
+                    span.imported_at.to_rfc3339(),
+                    span.updated_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to upsert manual span")?;
+        self.manual_span_by_id(owner_id, &id)?
+            .context("manual span disappeared after upsert")
+    }
+
+    pub fn manual_span_by_id(
+        &self,
+        owner_id: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<ManualSpan>> {
+        self.connection
+            .query_row(
+                &format!("SELECT {MANUAL_SPAN_COLUMNS} FROM manual_spans WHERE owner_id = ?1 AND id = ?2"),
+                params![owner_id, id],
+                manual_span_from_row,
+            )
+            .optional()
+            .context("failed to read manual span")
+    }
+
+    pub fn manual_span_by_external_id(
+        &self,
+        owner_id: &str,
+        source: &str,
+        external_id: &str,
+    ) -> anyhow::Result<Option<ManualSpan>> {
+        self.connection
+            .query_row(
+                &format!(
+                    "SELECT {MANUAL_SPAN_COLUMNS} FROM manual_spans
+                     WHERE owner_id = ?1 AND source = ?2 AND external_id = ?3"
+                ),
+                params![owner_id, source, external_id],
+                manual_span_from_row,
+            )
+            .optional()
+            .context("failed to read manual span by external id")
+    }
+
+    pub fn manual_spans_for_video(
+        &self,
+        owner_id: &str,
+        video_id: &str,
+    ) -> anyhow::Result<Vec<ManualSpan>> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {MANUAL_SPAN_COLUMNS} FROM manual_spans
+             WHERE owner_id = ?1 AND video_id = ?2 ORDER BY start_s, end_s, id"
+        ))?;
+        let rows = statement.query_map(params![owner_id, video_id], manual_span_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list manual spans for video")
+    }
+
+    pub fn manual_spans(&self, owner_id: &str) -> anyhow::Result<Vec<ManualSpan>> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {MANUAL_SPAN_COLUMNS} FROM manual_spans
+             WHERE owner_id = ?1 ORDER BY video_id, start_s, end_s, id"
+        ))?;
+        let rows = statement.query_map(params![owner_id], manual_span_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list manual spans")
+    }
+
+    pub fn manual_span_delete(&self, owner_id: &str, id: &str) -> anyhow::Result<bool> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM manual_spans WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, id],
+            )
+            .context("failed to delete manual span")?;
+        Ok(changed == 1)
+    }
+
+    /// Append one ledger row. The ledger is append-only at the database layer.
+    pub fn catalogue_import_append(
+        &self,
+        owner_id: &str,
+        import: &CatalogueImport,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &import.owner_id, "catalogue import")?;
+        ensure!(
+            !import.id.trim().is_empty(),
+            "catalogue import id must not be empty"
+        );
+        ensure!(
+            matches!(import.mode.as_str(), "dry_run" | "apply"),
+            "catalogue import mode must be dry_run or apply"
+        );
+        self.connection
+            .execute(
+                "INSERT INTO catalogue_imports (
+                    id, owner_id, source, mode, catalogue_path, catalogue_sha256, recipes_json,
+                    report_json, started_at, finished_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    import.id,
+                    owner_id,
+                    import.source,
+                    import.mode,
+                    import.catalogue_path,
+                    import.catalogue_sha256,
+                    import.recipes_json,
+                    import.report_json,
+                    import.started_at.to_rfc3339(),
+                    import.finished_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to append catalogue import")?;
+        Ok(())
+    }
+
+    pub fn catalogue_imports(&self, owner_id: &str) -> anyhow::Result<Vec<CatalogueImport>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, owner_id, source, mode, catalogue_path, catalogue_sha256, recipes_json,
+                    report_json, started_at, finished_at
+             FROM catalogue_imports WHERE owner_id = ?1 ORDER BY started_at DESC, id",
+        )?;
+        let rows = statement.query_map(params![owner_id], catalogue_import_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list catalogue imports")
+    }
 }

@@ -147,6 +147,8 @@ pub(crate) fn media_vector(
     match kind {
         MediaKind::Photo => store.vector_for_photo(owner_id, id),
         MediaKind::Shot => store.vector_for_shot(owner_id, id),
+        // Imported spans carry catalogue evidence only; they are not embedded (Task 022).
+        MediaKind::Span => Ok(None),
     }
 }
 
@@ -901,6 +903,10 @@ fn hydrate_strong_asset(
         .and_then(|annotation| annotation.quality);
     let style = personal_style_score(store, owner_id, strong.media_kind, &strong.media_id)?;
     match strong.media_kind {
+        MediaKind::Span => anyhow::bail!(
+            "imported span {} is catalogue evidence and is not aesthetically assessed",
+            strong.media_id
+        ),
         MediaKind::Shot => {
             let context = store
                 .search_shot_context(owner_id, &strong.media_id)?
