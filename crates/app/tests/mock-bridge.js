@@ -635,6 +635,27 @@
           completedAt: "2026-08-29T12:30:00Z",
         };
       }
+      case "render_project_clip": {
+        const item = planItemFor(planFor(args.projectId), { assetType: "video", mediaId: args.shotId });
+        if (item.pacing != null) throw "saved pacing is not supported by single-clip export yet; remove the pacing value before rendering";
+        if (item.cropX != null) throw "the saved horizontal crop cannot map exactly to this export; remove it before rendering";
+        const grade = JSON.parse(item.gradeJson || "{}");
+        if (Object.keys(grade).length && grade.mode !== "basic" && grade.mode !== "none") {
+          throw "this clip's saved color treatment cannot be rendered exactly yet; remove it or use a supported basic treatment";
+        }
+        return {
+          jobId: "render-job-clip-demo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "c".repeat(64),
+          manifestSha256: "d".repeat(64),
+          sizeBytes: 8388608,
+          mediaType: args.preset.startsWith("mp4") ? "video/mp4" : "video/quicktime",
+          width: 1920,
+          height: 1080,
+          completedAt: "2026-08-29T12:31:00Z",
+        };
+      }
       case "models_status":
         return modelsStatus();
       case "models_download":

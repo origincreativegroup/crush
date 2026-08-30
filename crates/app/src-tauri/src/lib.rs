@@ -1798,6 +1798,87 @@ mod macos {
         extensions: &'static [&'static str],
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct ClipPresetSpec {
+        name: &'static str,
+        preset: &'static str,
+        extensions: &'static [&'static str],
+    }
+
+    fn clip_preset_spec(value: &str) -> anyhow::Result<ClipPresetSpec> {
+        match value {
+            "mp4-h264-sdr-v1" => Ok(ClipPresetSpec {
+                name: "MP4 — compatible H.264",
+                preset: "mp4-h264-sdr-v1",
+                extensions: &["mp4"],
+            }),
+            "mov-h264-sdr-v1" => Ok(ClipPresetSpec {
+                name: "MOV — editing-friendly H.264",
+                preset: "mov-h264-sdr-v1",
+                extensions: &["mov"],
+            }),
+            other => anyhow::bail!("unsupported video export preset {other:?}"),
+        }
+    }
+
+    fn clip_grade_from_plan(value: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let Some(value) = value else {
+            return Ok(serde_json::json!({ "mode": "none" }));
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(value).context("the saved color treatment is not valid JSON")?;
+        let object = parsed
+            .as_object()
+            .context("the saved color treatment must be a JSON object")?;
+        if object.is_empty() {
+            return Ok(serde_json::json!({ "mode": "none" }));
+        }
+        match object.get("mode").and_then(serde_json::Value::as_str) {
+            Some("none") if object.len() == 1 => Ok(parsed),
+            Some("basic") => {
+                let expected = [
+                    "mode",
+                    "exposure_ev",
+                    "contrast",
+                    "saturation",
+                    "temperature",
+                    "tint",
+                ];
+                ensure!(
+                    object.len() == expected.len()
+                        && expected.iter().all(|key| object.contains_key(*key)),
+                    "the saved basic color treatment must include only exposure_ev, contrast, saturation, temperature, and tint"
+                );
+                Ok(parsed)
+            }
+            _ => anyhow::bail!(
+                "this clip's saved color treatment cannot be rendered exactly yet; remove it or use a supported basic treatment"
+            ),
+        }
+    }
+
+    fn clip_recipe_schema(
+        start_s: f64,
+        end_s: f64,
+        grade: serde_json::Value,
+        audio: &str,
+        preset: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "kind": "video_clip",
+            // Plan and shot boundaries are absolute positions on the owning source video's
+            // timeline. The renderer seeks that source directly, so no shot-start offset applies.
+            "in_s": start_s,
+            "out_s": end_s,
+            "crop": null,
+            "grade": grade,
+            "transition": { "kind": "cut" },
+            "audio": { "mode": audio },
+            "output": { "preset": preset },
+        })
+    }
+
     fn photo_preset_spec(value: &str) -> anyhow::Result<PhotoPresetSpec> {
         match value {
             "jpeg-srgb-v1" => Ok(PhotoPresetSpec {
@@ -1945,6 +2026,158 @@ mod macos {
                         "source_id": photo.id,
                         "sha256": photo.sha256,
                         "path": photo.path,
+                    }],
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used",
+                    },
+                })
+                .to_string(),
+                destination_path: destination_path.to_string_lossy().into_owned(),
+                created_at: chrono::Utc::now(),
+            },
+        )?;
+        drop(store);
+
+        let output = Pipeline::new(config.clone(), paths.clone(), CancellationToken::default())
+            .execute_render_job(DEFAULT_OWNER_ID, &job_id)?;
+        ensure!(
+            Path::new(&output.output_path).is_file() && Path::new(&output.manifest_path).is_file(),
+            "render completed without both verified files"
+        );
+        Ok(PhotoRenderView {
+            job_id: output.job_id,
+            output_path: output.output_path,
+            manifest_path: output.manifest_path,
+            output_sha256: output.output_sha256,
+            manifest_sha256: output.manifest_sha256,
+            size_bytes: output.size_bytes,
+            media_type: output.media_type,
+            width: output.width,
+            height: output.height,
+            completed_at: output.created_at.to_rfc3339(),
+        })
+    }
+
+    fn render_project_clip_job(
+        config: &Config,
+        paths: &AppPaths,
+        project_id: &str,
+        shot_id: &str,
+        preset: &str,
+        audio: &str,
+        destination: &str,
+    ) -> anyhow::Result<PhotoRenderView> {
+        let spec = clip_preset_spec(preset)?;
+        ensure!(
+            matches!(audio, "source" | "mute"),
+            "sound must be source or mute"
+        );
+        let destination_path = PathBuf::from(destination);
+        ensure!(
+            destination_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| spec
+                    .extensions
+                    .iter()
+                    .any(|allowed| value.eq_ignore_ascii_case(allowed))),
+            "the selected file type requires a .{} destination",
+            spec.extensions[0]
+        );
+
+        let mut store = Store::open(&paths.root)?;
+        let project = store
+            .plan_get(DEFAULT_OWNER_ID, project_id)?
+            .with_context(|| format!("project {project_id} was not found"))?;
+        let selected = store
+            .plan_items(DEFAULT_OWNER_ID, project_id)?
+            .into_iter()
+            .find(|item| item.media_kind == MediaKind::Shot && item.media_id == shot_id)
+            .with_context(|| format!("clip {shot_id} is not selected in this project"))?;
+        ensure!(
+            selected.pacing.is_none(),
+            "saved pacing is not supported by single-clip export yet; remove the pacing value before rendering"
+        );
+        ensure!(
+            selected.crop_x.is_none(),
+            "the saved horizontal crop cannot map exactly to this export; remove it before rendering"
+        );
+        let start_s = selected
+            .start_s
+            .context("the selected clip needs a saved In point before rendering")?;
+        let end_s = selected
+            .end_s
+            .context("the selected clip needs a saved Out point before rendering")?;
+        ensure!(
+            end_s > start_s,
+            "the selected clip's Out point must be after its In point"
+        );
+        let grade = clip_grade_from_plan(selected.grade_json.as_deref())?;
+        let shot = store
+            .shot_by_id(DEFAULT_OWNER_ID, shot_id)?
+            .with_context(|| format!("clip {shot_id} was not found"))?;
+        ensure!(
+            start_s >= shot.start_s && end_s <= shot.end_s,
+            "the selected clip's saved In and Out points must stay inside its source shot"
+        );
+        let video = store
+            .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
+            .with_context(|| format!("source video {} was not found", shot.video_id))?;
+        let annotation = store.editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, shot_id)?;
+        ensure!(
+            !annotation.is_some_and(|value| !value.usable || value.blur_required),
+            "this clip is flagged unusable or blur-required and cannot be rendered"
+        );
+
+        let recipe_id = format!("crush-video-clip-{}", Uuid::new_v4());
+        store.render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: recipe_id.clone(),
+                version: 1,
+                kind: RenderRecipeKind::VideoClip,
+                name: spec.name.to_owned(),
+                schema_json: clip_recipe_schema(start_s, end_s, grade, audio, spec.preset)
+                    .to_string(),
+                created_at: chrono::Utc::now(),
+            },
+        )?;
+        let origin = match selected.origin {
+            PlanOrigin::General => "general",
+            PlanOrigin::Personal => "personal",
+        };
+        let job_id = format!("render-job-{}", Uuid::new_v4());
+        store.render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: job_id.clone(),
+                recipe_id,
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": project.context_key,
+                    "selection_provenance": {
+                        "project_id": project.id,
+                        "position": selected.position,
+                        "origin": origin,
+                        "rank": selected.rank,
+                        "profile_version": selected.profile_version,
+                    },
+                    "sources": [{
+                        "media_kind": "shot",
+                        "media_id": shot.id,
+                        "source_id": video.id,
+                        "sha256": video.sha256,
+                        "path": video.path,
                     }],
                 })
                 .to_string(),
@@ -2666,6 +2899,32 @@ mod macos {
     }
 
     #[tauri::command]
+    async fn render_project_clip(
+        project_id: String,
+        shot_id: String,
+        preset: String,
+        audio: String,
+        destination: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PhotoRenderView> {
+        let config = state.config.clone();
+        let paths = state.paths.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result(render_project_clip_job(
+                &config,
+                &paths,
+                &project_id,
+                &shot_id,
+                &preset,
+                &audio,
+                &destination,
+            ))
+        })
+        .await
+        .map_err(|error| format!("clip render worker failed: {error}"))?
+    }
+
+    #[tauri::command]
     async fn export_clip(
         id: String,
         out: String,
@@ -2989,6 +3248,7 @@ mod macos {
                 plan_duplicate,
                 selects_candidates,
                 render_project_photo,
+                render_project_clip,
                 export_clip,
                 open_in_finder
             ])
@@ -3075,6 +3335,39 @@ mod macos {
             assert_eq!(recipes.len(), 3);
             assert!(recipes.iter().all(|recipe| recipe.version == 1));
             assert!(photo_preset_spec("webp").is_err());
+        }
+
+        #[test]
+        fn clip_export_maps_only_exact_supported_treatments() {
+            assert_eq!(
+                clip_grade_from_plan(None).unwrap(),
+                serde_json::json!({ "mode": "none" })
+            );
+            assert_eq!(
+                clip_grade_from_plan(Some("{}")).unwrap(),
+                serde_json::json!({ "mode": "none" })
+            );
+            let basic = r#"{"mode":"basic","exposure_ev":0.1,"contrast":0.2,"saturation":1.1,"temperature":0.0,"tint":-0.1}"#;
+            assert_eq!(clip_grade_from_plan(Some(basic)).unwrap()["mode"], "basic");
+            assert!(clip_grade_from_plan(Some(r#"{"exposure":0.1}"#)).is_err());
+            assert_eq!(
+                clip_preset_spec("mp4-h264-sdr-v1").unwrap().extensions,
+                &["mp4"]
+            );
+            assert_eq!(
+                clip_preset_spec("mov-h264-sdr-v1").unwrap().extensions,
+                &["mov"]
+            );
+            let schema = clip_recipe_schema(
+                3.4,
+                5.2,
+                serde_json::json!({ "mode": "none" }),
+                "mute",
+                "mov-h264-sdr-v1",
+            );
+            assert_eq!(schema["in_s"], 3.4);
+            assert_eq!(schema["out_s"], 5.2);
+            assert_eq!(schema["audio"]["mode"], "mute");
         }
     }
 }

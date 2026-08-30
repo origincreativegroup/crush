@@ -8,7 +8,7 @@
   const state = {
     plans: [], plan: null, items: [], revisions: [], candidates: null,
     busy: false, dirty: new Set(), loaded: false, previewKey: null, previewLoop: false,
-    photoExportKey: null, photoExportBusy: false, photoExportResult: null,
+    photoExportKey: null, photoExportKind: null, photoExportBusy: false, photoExportResult: null,
   };
   const kind = (value) => value === "photo" ? "photo" : "video";
   const itemKey = (item) => `${kind(item.mediaKind)}:${item.mediaId}`;
@@ -43,6 +43,9 @@
   };
   const photoExport = {
     root: $("project-photo-export"), preset: $("project-photo-preset"),
+    step: $("project-photo-export-step"), title: $("project-photo-export-title"),
+    copy: $("project-photo-export-copy"), clipOptions: $("project-clip-export-options"),
+    audio: $("project-clip-audio"), outputLabel: $("project-photo-output-label"),
     destination: $("project-photo-destination"), choose: $("project-photo-choose"),
     render: $("project-photo-render"), progress: $("project-photo-progress"),
     status: $("project-photo-status"), result: $("project-photo-result"),
@@ -54,6 +57,8 @@
     "jpeg-srgb-v1": { extension: "jpg", filter: { name: "JPEG image", extensions: ["jpg", "jpeg"] } },
     "png-srgb-v1": { extension: "png", filter: { name: "PNG image", extensions: ["png"] } },
     "tiff-srgb-v1": { extension: "tif", filter: { name: "TIFF image", extensions: ["tif", "tiff"] } },
+    "mp4-h264-sdr-v1": { extension: "mp4", filter: { name: "MP4 video", extensions: ["mp4"] } },
+    "mov-h264-sdr-v1": { extension: "mov", filter: { name: "MOV video", extensions: ["mov"] } },
   };
   async function run(action) {
     if (state.busy) return;
@@ -212,7 +217,7 @@
     return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : null;
   }
   function clearPhotoExport(item = null) {
-    const key = item && item.mediaKind === "photo" ? itemKey(item) : null;
+    const key = item ? itemKey(item) : null;
     if (state.photoExportKey === key) return;
     state.photoExportKey = key;
     state.photoExportResult = null;
@@ -223,9 +228,28 @@
     photoExport.render.disabled = true;
   }
   function renderPhotoExport(item) {
-    const isPhoto = item?.mediaKind === "photo";
-    photoExport.root.hidden = !isPhoto;
-    clearPhotoExport(isPhoto ? item : null);
+    const exportable = item && ["photo", "shot"].includes(item.mediaKind);
+    photoExport.root.hidden = !exportable;
+    if (!exportable) { clearPhotoExport(null); return; }
+    const exportKind = item.mediaKind === "photo" ? "photo" : "clip";
+    if (state.photoExportKind !== exportKind) {
+      state.photoExportKind = exportKind;
+      const options = exportKind === "photo"
+        ? [["jpeg-srgb-v1", "JPEG — smaller, easy to share"], ["png-srgb-v1", "PNG — lossless"], ["tiff-srgb-v1", "TIFF — high-quality archive"]]
+        : [["mp4-h264-sdr-v1", "MP4 — compatible H.264"], ["mov-h264-sdr-v1", "MOV — editing-friendly H.264"]];
+      photoExport.preset.replaceChildren(...options.map(([value, label]) => {
+        const option = node("option", label); option.value = value; return option;
+      }));
+      photoExport.audio.value = "source";
+    }
+    const isPhoto = exportKind === "photo";
+    photoExport.step.textContent = `Export selected ${isPhoto ? "photo" : "clip"}`;
+    photoExport.title.textContent = `Create a finished ${isPhoto ? "copy" : "clip"}`;
+    photoExport.copy.textContent = `Your original ${isPhoto ? "photo" : "video"} stays untouched. Crush verifies the new file before showing it here.`;
+    photoExport.clipOptions.hidden = isPhoto;
+    photoExport.render.textContent = `Render ${isPhoto ? "photo" : "clip"}`;
+    photoExport.outputLabel.textContent = `Finished ${isPhoto ? "photo" : "clip"}`;
+    clearPhotoExport(item);
   }
   function showPhotoRenderResult(result) {
     state.photoExportResult = result;
@@ -535,13 +559,14 @@
   photoExport.choose.addEventListener("click", async () => {
     if (state.photoExportBusy) return;
     const item = previewItem();
-    if (!item || item.mediaKind !== "photo") return;
+    if (!item || !["photo", "shot"].includes(item.mediaKind)) return;
+    const isPhoto = item.mediaKind === "photo";
     const preset = photoPresets[photoExport.preset.value];
     const candidate = parse(item.signalsJson).candidate || {};
     const sourceName = filename(candidate.path || item.mediaId).replace(/\.[^.]+$/, "") || "photo";
     try {
       const destination = await bridge.dialog.save({
-        title: "Export selected photo",
+        title: `Export selected ${isPhoto ? "photo" : "clip"}`,
         defaultPath: `${sourceName}_export.${preset.extension}`,
         filters: [preset.filter],
       });
@@ -560,22 +585,26 @@
   photoExport.render.addEventListener("click", async () => {
     if (state.photoExportBusy || state.busy) return;
     const item = previewItem();
-    if (!state.plan || !item || item.mediaKind !== "photo" || !photoExport.destination.value) return;
+    if (!state.plan || !item || !["photo", "shot"].includes(item.mediaKind) || !photoExport.destination.value) return;
     const expectedKey = itemKey(item);
+    const isPhoto = item.mediaKind === "photo";
+    if (state.dirty.has(expectedKey)) {
+      photoExport.status.textContent = "Save this item's edits before rendering so the finished file matches the visible In, Out, and treatment.";
+      photoExport.status.classList.add("error");
+      return;
+    }
     photoExport.result.hidden = true;
     photoExport.status.textContent = "Rendering and verifying the finished copy…";
     photoExport.status.classList.remove("error");
     setPhotoExportBusy(true);
     try {
-      const result = await invoke("render_project_photo", {
-        projectId: state.plan.id,
-        photoId: item.mediaId,
-        preset: photoExport.preset.value,
-        destination: photoExport.destination.value,
-      });
+      const shared = { projectId: state.plan.id, preset: photoExport.preset.value, destination: photoExport.destination.value };
+      const result = isPhoto
+        ? await invoke("render_project_photo", { ...shared, photoId: item.mediaId })
+        : await invoke("render_project_clip", { ...shared, shotId: item.mediaId, audio: photoExport.audio.value });
       if (state.photoExportKey !== expectedKey) return;
       showPhotoRenderResult(result);
-      photoExport.status.textContent = "Rendered and verified. Your original photo was not changed.";
+      photoExport.status.textContent = `Rendered and verified. Your original ${isPhoto ? "photo" : "video"} was not changed.`;
     } catch (error) {
       if (state.photoExportKey !== expectedKey) return;
       photoExport.status.textContent = `Render failed: ${String(error)}`;

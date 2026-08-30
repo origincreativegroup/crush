@@ -191,9 +191,9 @@
                   <p id="project-preview-label" class="plans-muted"></p>
                   <section id="project-photo-export" class="project-photo-export" hidden aria-labelledby="project-photo-export-title">
                     <div>
-                      <p class="workflow-step">Export selected photo</p>
+                      <p id="project-photo-export-step" class="workflow-step">Export selected photo</p>
                       <h3 id="project-photo-export-title">Create a finished copy</h3>
-                      <p class="plans-muted">Your original stays untouched. Crush verifies the new file before showing it here.</p>
+                      <p id="project-photo-export-copy" class="plans-muted">Your original stays untouched. Crush verifies the new file before showing it here.</p>
                     </div>
                     <div class="photo-export-fields">
                       <label>File type
@@ -210,13 +210,22 @@
                         </span>
                       </label>
                     </div>
+                    <details id="project-clip-export-options" class="plans-item-options" hidden>
+                      <summary>Sound options</summary>
+                      <label>Sound
+                        <select id="project-clip-audio">
+                          <option value="source">Keep source sound</option>
+                          <option value="mute">Muted</option>
+                        </select>
+                      </label>
+                    </details>
                     <div class="plans-actions">
                       <button id="project-photo-render" class="button primary" type="button" disabled>Render photo</button>
                       <progress id="project-photo-progress" hidden aria-label="Photo render progress"></progress>
                       <span id="project-photo-status" class="plans-muted" role="status">Choose where to save the finished copy.</span>
                     </div>
                     <section id="project-photo-result" class="photo-export-result" hidden aria-label="Verified photo export">
-                      <div><strong>Finished photo</strong><code id="project-photo-output-path"></code><button id="project-photo-show-output" class="button secondary small" type="button">Show in Finder</button></div>
+                      <div><strong id="project-photo-output-label">Finished photo</strong><code id="project-photo-output-path"></code><button id="project-photo-show-output" class="button secondary small" type="button">Show in Finder</button></div>
                       <div><strong>Verification manifest</strong><code id="project-photo-manifest-path"></code><button id="project-photo-show-manifest" class="button secondary small" type="button">Show in Finder</button></div>
                       <details>
                         <summary>Verification details</summary>
