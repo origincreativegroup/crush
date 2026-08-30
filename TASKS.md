@@ -58,3 +58,15 @@ boundary/audio/manifest artifacts), **018 held-out style proof**, and **023 clea
 acceptance** (`docs/smoke.md`). No agent test or CI is release approval. 028–031 remain the additive
 Windows track. See `docs/platform-architecture.md`. PyTorch is reserved for training/evaluation and
 validated ONNX export; the shipped app always retains a CPU path.
+| TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | backlog — next stretch; blocks any "learned" claim |
+| TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | backlog — next stretch |
+| TASK-034 | Imported-evidence search + explicit confirmation bridge (022 follow-up) | OpenCode | backlog — next stretch, after 021/022 merge |
+| TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | backlog — next stretch, after 021 merge; no golden changes |
+
+## OpenCode next stretch (2026-08-30)
+
+Order: 032 → 033 → 034 → 035 (034/035 wait for the 021/022 merge; 032/033 can start from
+`origin/main` conventions now, in their own worktrees). Every task: one branch, one PR, full gates
+(fmt, warnings-denied clippy, workspace tests, `npm run test:ui`), truthful record in the task file.
+Human gates are unchanged and none of these tasks may claim or bypass them.
+
