@@ -90,6 +90,20 @@ changes for that task: exact imported/manual video spans that survive re-splitti
 historical/imported plan provenance. Its real recipe fields are recorded in the Task 021/022 plans.
 Do not start importer writes before the Task 021 render-golden review.
 
+## Task 022 continuation (2026-08-30, Claude)
+
+John ordered Task 022 next while PR #37 (Task 021) awaits his render-golden review. Task 022 is
+implemented on `task/22-import` stacked on #37: schema v11 (`manual_spans`, `catalogue_imports`,
+`plan_items` with `span` kind and `historical`/`imported` origins + `provenance_json`), the
+`crush_pipeline::reel_studio_import` dry-run/apply importer, `crushctl import reel-studio`, the
+Library import dialog, Projects provenance pills, and span support in the ordered-reel executor.
+See `.tasks/backlog/TASK-022-impl-plan.md` and `docs/reel-studio-import.md`. The 2026-08-30 review of
+#37 (`ReportFindings`) confirmed: Escape handler lost its Search-view guard; startup render recovery
+`?` can brick launch; cancel-before-published ordering and swallowed `render_job_fail` errors in the
+executors; per-attempt orphan `render_recipes` rows for clip exports. The first two are fixed on
+`task/22-import`; the executor ones remain for the 021 owner. Task 021's human render review and
+Task 023's clean-machine gate are unchanged.
+
 ## Previous implementation state (2026-08-28)
 
 - TASK-001 is complete: workspace build, all tests, Clippy with warnings denied, and rustfmt pass

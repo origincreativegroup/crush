@@ -99,3 +99,43 @@ this task does not mark 021 accepted, and imported recipes execute only through 
 3. Recipe → plan/recipe rows + render round trip.
 4. Tauri commands + Library UI + harness scenario + Projects pills.
 5. Docs: `docs/reel-studio-import.md`, HANDOFF, TASKS.
+
+## Implemented (2026-08-30, Claude, branch `task/22-import`, stacked on PR #37)
+
+- **Schema v11** (`0011_reel_studio_import.sql`): `manual_spans` (owner-scoped human spans on the
+  original timeline, referencing `videos` so `replace_shots`/resplit cannot erase them, carrying the
+  catalogue evidence, safety flags, `used_in`, crop and an explicit `boundary_basis`/tolerance);
+  append-only `catalogue_imports` ledger; `plan_items` rebuilt to admit `media_kind='span'` and
+  origins `historical`/`imported` with a required `provenance_json` and no profile version.
+  `MediaKind::Span`, `PlanOrigin::{Historical, Imported}`, `ManualSpan`, `CatalogueImport` APIs.
+- **Importer** (`crush_pipeline::reel_studio_import`): reads `clips.db` read-only, matches originals
+  by path then optional SHA-256, derives spans with `catalogue_tc`/`library_probe` basis (a 1080p
+  re-encoded library copy is treated as exact; a 4K stream copy keeps the keyframe tolerance),
+  normalizes raw recipe JSON into the frozen reel v2 contract (refusing unknown fields instead of
+  discarding them), resolves segment-relative in/out to original-source seconds through
+  `resolve_reel_recipe`, and writes recipe + `Reel Studio · <theme>` project + revision. Dry-run
+  reports sources, segments, recipes, issues (`missing_source`, `not_indexed`, `duplicate`,
+  `unsupported`, `out_of_range`, `unknown_segment`), planned writes and reference-set candidates.
+  Apply is idempotent (span ids stable by external id, recipes by content, projects by name never
+  overwritten). No feedback events or reference sets are ever written.
+- **Rendering**: the durable ordered-reel executor accepts `span` sources (store ownership
+  validation, frozen plan/source parsing, resolution against `manual_spans`). Advanced Reel Studio
+  treatments still fail explicitly per Task 021's contract.
+- **CLI** `crushctl import reel-studio --catalogue … --originals … [--library …] [--recipe …]
+  [--match-by-hash] [--apply] [--json]`.
+- **App**: `import_reel_studio` command; Library → *Import Reel Studio…* dialog (dry run, report,
+  apply unlocked only for the dry-run inputs); Projects shows *Historical · your earlier Reel Studio
+  choice* / *Imported · catalogue evidence* pills, boundary-basis note, In/Out editing and preview for
+  span items, and disables "Use as preference example" for imported spans (feedback stays photo/shot).
+- **Docs**: `docs/reel-studio-import.md`.
+
+Verification: store 38 tests (v11 migration, spans survive resplit, historical provenance rules,
+ledger immutability, cascade); pipeline `reel_studio_import` 2 tests (dry-run report, apply,
+re-apply unchanged, catalogue edit refresh, and a real FFmpeg render of an imported span project on
+macOS); browser harness 19/19 including `import-reel-studio` and `plans-historical`; workspace
+clippy clean. Two confirmed review findings from PR #37 were fixed on this branch (Escape handler
+view guard; non-fatal startup render recovery).
+
+Not done / honest limits: catalogue descriptions are not in the search index yet; `used_in` is
+kept as span evidence rather than feedback events (feedback media kinds remain photo/shot);
+promotion to previous-work reference sets remains an explicit user step in Preferences.
