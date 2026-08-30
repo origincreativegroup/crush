@@ -1282,6 +1282,24 @@ impl Runner {
         Ok(command_line)
     }
 
+    /// Run a crate-internal FFmpeg operation through the same command recording,
+    /// cancellation, process-group, and progress supervision as the built-in stages.
+    /// Keeping raw arguments crate-private lets sibling render modules compose bundled
+    /// FFmpeg without exposing an unsupervised command surface to application callers.
+    pub(crate) fn run_ffmpeg_progress_args<F>(
+        &self,
+        arguments: Vec<OsString>,
+        expected_duration_s: f64,
+        cancellation: &CancellationToken,
+        progress: &mut F,
+    ) -> Result<String>
+    where
+        F: FnMut(Progress),
+    {
+        let spec = CommandSpec::new(&self.resolved.path).args(arguments);
+        self.run_progress(&spec, expected_duration_s, cancellation, progress)
+    }
+
     fn record_command(&self, spec: &CommandSpec, low_priority: bool) -> Result<String> {
         let rendered = spec.render(low_priority);
         tracing::info!(
