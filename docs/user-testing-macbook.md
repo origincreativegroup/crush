@@ -6,7 +6,7 @@ not Task 021 render-golden approval or Task 023 clean-machine acceptance.
 ## Installed build and preserved state
 
 - App: `/Applications/Crush.app`
-- Git commit: `0724f08` on `task/21-render-export` (draft PR #37), based on merged PR #36.
+- Git commit: `9191ee4` on `task/21-render-export` (draft PR #37), based on merged PR #36.
 - Build: release, arm64, Hardened Runtime, ad-hoc signed. The bundled FFmpeg and FFprobe
   signatures and the complete bundle pass `codesign --verify --deep --strict`.
 - Not notarized and not a DMG. Those are Task 023 release gates, not defects in this local build.
