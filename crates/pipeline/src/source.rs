@@ -24,7 +24,7 @@ use image::{
     imageops::FilterType as ResizeFilter, ConvertColorOptions, DynamicImage, ExtendedColorType,
     GenericImageView, ImageDecoder, ImageEncoder, ImageReader, RgbImage, RgbaImage,
 };
-use moxcms::{ColorDateTime, ColorProfile, Layout, TransformOptions};
+use moxcms::{ColorProfile, Layout, TransformOptions};
 use serde_json::{json, Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
 
@@ -401,9 +401,7 @@ pub fn render_photo_derivative(
         );
     }
 
-    let srgb_profile = deterministic_srgb_profile()
-        .encode()
-        .context("failed to create the deterministic sRGB output profile")?;
+    let srgb_profile = deterministic_srgb_profile_bytes()?;
     encode_photo_preset(&image, recipe.output, output, &srgb_profile)?;
     let (width, height) = image.dimensions();
     Ok(PhotoRenderResult {
@@ -421,19 +419,27 @@ pub fn render_photo_derivative(
     })
 }
 
-fn deterministic_srgb_profile() -> ColorProfile {
-    let mut profile = ColorProfile::new_srgb();
-    // ICC creation time is metadata, not colorimetry. Pin it so otherwise identical derivatives
-    // do not change hashes based on wall-clock time.
-    profile.creation_date_time = ColorDateTime {
-        year: 2000,
-        month: 1,
-        day_of_the_month: 1,
-        hours: 0,
-        minutes: 0,
-        seconds: 0,
-    };
-    profile
+fn deterministic_srgb_profile_bytes() -> anyhow::Result<Vec<u8>> {
+    let mut profile = ColorProfile::new_srgb()
+        .encode()
+        .context("failed to create the sRGB output profile")?;
+    // moxcms 0.8.1's writer currently writes `ColorDateTime::now()` into ICC header bytes
+    // 24..36 even when the public profile field is set. Creation time is metadata, not
+    // colorimetry, so canonicalize the encoded header itself to 2000-01-01T00:00:00. A pinned
+    // dependency plus this byte-level normalization makes output stable across processes.
+    ensure!(
+        profile.len() >= 36,
+        "encoded sRGB output profile is shorter than its ICC header"
+    );
+    profile[24..36].copy_from_slice(&[
+        0x07, 0xd0, // year 2000
+        0x00, 0x01, // month 1
+        0x00, 0x01, // day 1
+        0x00, 0x00, // hour 0
+        0x00, 0x00, // minute 0
+        0x00, 0x00, // second 0
+    ]);
+    Ok(profile)
 }
 
 fn image_channel_depth(image: &DynamicImage) -> i64 {
@@ -1325,7 +1331,7 @@ mod tests {
             Rgb([(x * 9) as u8, (y * 13) as u8, ((x + y) * 5) as u8])
         }));
         let decoded = test_decoded_photo(image, Some(8), None, None);
-        let expected_profile = deterministic_srgb_profile().encode().unwrap();
+        let expected_profile = deterministic_srgb_profile_bytes().unwrap();
         for (preset, extension) in [
             (PhotoOutputPreset::JpegSrgbV1, "jpg"),
             (PhotoOutputPreset::PngSrgbV1, "png"),
@@ -1413,7 +1419,7 @@ mod tests {
         let mut decoder = reader.into_decoder().unwrap();
         assert_eq!(
             decoder.icc_profile().unwrap().as_deref(),
-            Some(deterministic_srgb_profile().encode().unwrap().as_slice())
+            Some(deterministic_srgb_profile_bytes().unwrap().as_slice())
         );
     }
 

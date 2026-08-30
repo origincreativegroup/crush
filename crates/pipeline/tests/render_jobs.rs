@@ -168,6 +168,54 @@ fn frozen_photo_job_publishes_verified_output_and_manifest_without_touching_sour
 }
 
 #[test]
+fn documented_photo_presets_are_deterministic_through_the_durable_executor() {
+    for (preset, extension, media_type) in [
+        ("jpeg-srgb-v1", "jpg", "image/jpeg"),
+        ("png-srgb-v1", "png", "image/png"),
+        ("tiff-srgb-v1", "tiff", "image/tiff"),
+    ] {
+        let first_directory = tempfile::tempdir().unwrap();
+        let first_destination = first_directory
+            .path()
+            .join(format!("exports/review.{extension}"));
+        let (first_pipeline, first_source) = setup_photo_job(
+            first_directory.path(),
+            preset,
+            &first_destination,
+            "render-photo-preset",
+        );
+        let first_source_hash = sha256_file(&first_source).unwrap();
+        let first = first_pipeline
+            .execute_render_job(DEFAULT_OWNER_ID, "render-photo-preset")
+            .unwrap();
+
+        let second_directory = tempfile::tempdir().unwrap();
+        let second_destination = second_directory
+            .path()
+            .join(format!("exports/review.{extension}"));
+        let (second_pipeline, second_source) = setup_photo_job(
+            second_directory.path(),
+            preset,
+            &second_destination,
+            "render-photo-preset",
+        );
+        let second_source_hash = sha256_file(&second_source).unwrap();
+        let second = second_pipeline
+            .execute_render_job(DEFAULT_OWNER_ID, "render-photo-preset")
+            .unwrap();
+
+        assert_eq!(first_source_hash, second_source_hash, "{preset} source");
+        assert_eq!(first.media_type, media_type);
+        assert_eq!((first.width, first.height), (Some(4), Some(12)));
+        assert_eq!(first.output_sha256, second.output_sha256, "{preset}");
+        assert_eq!(sha256_file(&first_source).unwrap(), first_source_hash);
+        assert_eq!(sha256_file(&second_source).unwrap(), second_source_hash);
+        assert!(first_destination.is_file());
+        assert!(second_destination.is_file());
+    }
+}
+
+#[test]
 fn existing_destination_and_stale_source_fail_before_an_attempt_or_overwrite() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("existing.png");
