@@ -292,6 +292,24 @@
   font-size: 13px;
 }
 
+.detail-playback {
+  display: grid;
+  grid-template-columns: auto auto minmax(120px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-playback input[type="range"] {
+  width: 100%;
+  accent-color: #4f8cff;
+}
+
+#detail-position {
+  color: #a8a8b0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .detail-shot-index {
   color: #8a8a93;
   font-size: 11px;

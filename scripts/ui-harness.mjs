@@ -56,13 +56,21 @@ const tests = {
     await frame.locator('#plan-header-form button[type="submit"]').click();
     await frame.locator("#plan-generate").click();
     await poll(async () => await frame.locator("#plan-general .plans-candidate").count() === 2);
-    assert.match(await visibleText(frame.locator("#plan-personal-status")), /Experimental profile v3.*review pending/);
+    assert.match(await visibleText(frame.locator("#plan-personal-status")), /Experimental preference profile v3.*review pending/);
     await frame.locator("#plan-general .plans-candidate").first().locator("button").click();
     await frame.locator("#plan-personal .plans-candidate").first().locator("button").click();
     const items = frame.locator("#plan-items .plans-item");
     await poll(async () => await items.count() === 2);
     assert.equal(await visibleText(items.nth(0).locator(".plans-pill")), "General");
-    assert.match(await visibleText(items.nth(1).locator(".plans-pill")), /Personalized · profile v3/);
+    assert.match(await visibleText(items.nth(1).locator(".plans-pill")), /Preference-assisted · profile v3/);
+    // Sequence preview starts on the first clip and exposes visible, boundary-aware controls.
+    await frame.locator("#project-preview").waitFor({ state: "visible" });
+    assert.equal(await frame.locator("#project-preview-play").isVisible(), true);
+    assert.equal(Number(await frame.locator("#project-preview-scrubber").getAttribute("max")), 2.75);
+    await frame.locator("#project-preview-next").click();
+    assert.equal(await frame.locator("#project-preview-photo").isVisible(), true);
+    await frame.locator("#project-preview-prev").click();
+    assert.equal(await frame.locator("#project-preview-video").isVisible(), true);
     assert.equal(await frame.locator("#plan-general .plans-candidate button:disabled").count(), 2);
     const original = (await mockCalls(page)).filter((call) => call.command === "plan_add_item");
     assert.equal(original[0].args.item.origin, "general");
@@ -76,7 +84,13 @@ const tests = {
 
     await items.nth(0).locator('[name="startS"]').fill("3.4");
     await items.nth(0).locator('[name="endS"]').fill("5.2");
+    assert.ok(Math.abs(Number(await frame.locator("#project-preview-scrubber").getAttribute("max")) - 1.8) < 0.001);
+    await items.nth(0).locator('[name="endS"]').fill("3.3");
+    assert.equal(await frame.locator("#project-preview-play").isDisabled(), true);
+    assert.equal(await visibleText(frame.locator("#project-preview-time")), "Set a valid In and Out");
+    await items.nth(0).locator('[name="endS"]').fill("5.2");
     await items.nth(0).locator('[name="reason"]').fill("Hold the quiet moment");
+    await items.nth(0).locator(".plans-item-options summary").click();
     await items.nth(0).locator('[name="pacing"]').fill("0.35");
     await items.nth(0).locator('[name="cropX"]').fill("0.6");
     await items.nth(0).locator('[name="gradeJson"]').fill('{"exposure":0.1}');
@@ -89,7 +103,7 @@ const tests = {
     await frame.locator("#plan-revision-form button").click();
     await poll(async () => await frame.locator("#plan-revisions button").count() === 1);
     await items.nth(1).getByRole("button", { name: "Move up", exact: true }).click();
-    assert.match(await visibleText(items.nth(0).locator(".plans-pill")), /Personalized/);
+    assert.match(await visibleText(items.nth(0).locator(".plans-pill")), /Preference-assisted/);
     await items.nth(0).getByRole("button", { name: "Remove", exact: true }).click();
     await poll(async () => await items.count() === 1);
     assert.equal((await mockCalls(page)).filter((call) => call.command === "record_feedback").length, 0);
@@ -98,8 +112,8 @@ const tests = {
     await poll(async () => await items.count() === 2);
     assert.equal(await items.nth(0).locator('[name="startS"]').inputValue(), "3.4");
     assert.equal(await items.nth(0).locator('[name="endS"]').inputValue(), "5.2");
-    assert.match(await visibleText(items.nth(1).locator(".plans-pill")), /Personalized · profile v3/);
-    await items.nth(0).getByRole("button", { name: "Pick for this context", exact: true }).click();
+    assert.match(await visibleText(items.nth(1).locator(".plans-pill")), /Preference-assisted · profile v3/);
+    await items.nth(0).getByRole("button", { name: "Use as preference example", exact: true }).click();
     const feedback = (await mockCalls(page)).filter((call) => call.command === "record_feedback");
     assert.equal(feedback.length, 1);
     assert.equal(feedback[0].args.contextKey, "campaign");
@@ -127,7 +141,7 @@ const tests = {
     await frame.locator('#plan-header-form button[type="submit"]').click();
     await frame.locator("#plan-generate").click();
     await poll(async () => await frame.locator("#plan-personal .plans-candidate").count() === 2);
-    assert.match(await visibleText(frame.locator("#plan-personal-status")), /General brief matching only/);
+    assert.match(await visibleText(frame.locator("#plan-personal-status")), /Matched to the brief with the general model/);
     await frame.locator("#plan-personal .plans-candidate").first().locator("button").click();
     const addition = (await mockCalls(page)).find((call) => call.command === "plan_add_item");
     assert.equal(addition.args.item.origin, "general");
@@ -149,13 +163,14 @@ const tests = {
     assert.match(await visibleText(frame.locator("#plans-message")), /Disk full/);
     assert.equal(await item.locator('[name="reason"]').inputValue(), "Retain this draft");
     await frame.locator("#plan-revision-form button").click();
-    assert.match(await visibleText(frame.locator("#plans-message")), /Save your item/);
+    assert.match(await visibleText(frame.locator("#plans-message")), /Save your clip/);
     await frame.locator("#plan-duplicate").click();
     await frame.locator('#plan-confirm button[value="cancel"]').click();
     assert.equal(await item.locator('[name="reason"]').inputValue(), "Retain this draft");
     await item.locator('button[type="submit"]').click();
-    assert.match(await visibleText(frame.locator("#plans-message")), /Item saved/);
+    assert.match(await visibleText(frame.locator("#plans-message")), /Clip settings saved/);
     const callsBefore = (await mockCalls(page)).filter((call) => call.command === "plan_update_item").length;
+    await item.locator(".plans-item-options summary").click();
     await item.locator('[name="gradeJson"]').fill("[]");
     await item.locator('button[type="submit"]').click();
     assert.match(await visibleText(frame.locator("#plans-message")), /JSON object/);
@@ -273,6 +288,10 @@ const tests = {
     await card.waitFor({ state: "visible" });
     await card.click();
     await frame.locator("#detail").waitFor({ state: "visible" });
+    assert.equal(await frame.locator("#detail-playback").isVisible(), true);
+    assert.equal(Number(await frame.locator("#detail-scrubber").getAttribute("max")), 2.75);
+    await frame.locator("#detail-loop").click();
+    assert.equal(await frame.locator("#detail-loop").getAttribute("aria-pressed"), "true");
     await frame.locator("#feedback-pick").click();
     await poll(async () => {
       const calls = await mockCalls(page);
@@ -301,7 +320,7 @@ const tests = {
     await frame.locator("#nav-style").click();
     // Automated success is not human approval. Never claim learned at the open hard stop.
     await poll(async () =>
-      /Experimental profile · human review pending/.test(
+      /Experimental preferences · human review pending/.test(
         await visibleText(frame.locator("#style-status-line")),
       ));
     const rows = frame.locator("#style-sets .style-set-row");
@@ -391,9 +410,11 @@ const tests = {
     await frame.locator("#filter-kind").selectOption("photo");
     await frame.locator("#filter-apply").click();
     await poll(async () => (await tiles.count()) === 2);
+    assert.match(await visibleText(frame.locator("#review-active-filters")), /^Showing:\s*Photos ×$/);
     const calls = await mockCalls(page);
     const browse = calls.filter((call) => call.command === "library_browse").at(-1);
     assert.equal(browse.args.filter.kind, "photo");
+    await frame.locator("#filter-more").click();
     await frame.locator("#filter-reset").click();
     await poll(async () => (await tiles.count()) === 3);
   },
@@ -484,10 +505,12 @@ const tests = {
     await frame.locator("#nav-review").click();
     const tiles = frame.locator("#review-grid .review-tile");
     await poll(async () => (await tiles.count()) === 3);
+    await frame.locator("#filter-more").click();
     await frame.locator("#filter-blur").selectOption("true");
     await frame.locator("#filter-apply").click();
     await poll(async () => (await tiles.count()) === 1);
     // Save the current filters as a named search.
+    await frame.locator("#saved-search-tools summary").click();
     await frame.locator("#saved-search-name").fill("Blur picks");
     await frame.locator("#saved-search-save").click();
     await poll(async () => {

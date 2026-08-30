@@ -24,6 +24,10 @@
     context: $("#filter-context"),
     search: $("#filter-search"),
     reset: $("#filter-reset"),
+    more: $("#filter-more"),
+    moreCount: $("#filter-more-count"),
+    advanced: $("#review-advanced-filters"),
+    activeFilters: $("#review-active-filters"),
     savedSelect: $("#saved-search-select"),
     savedLoad: $("#saved-search-load"),
     savedDelete: $("#saved-search-delete"),
@@ -73,6 +77,7 @@
     applyArmed: false,
     deleteArmed: null,
     deleteTimer: null,
+    appliedFilters: {},
   };
 
   const fileSrc = (path) => bridge.core.convertFileSrc(path);
@@ -150,6 +155,59 @@
     el.counts.textContent = counts
       ? `${counts.photos} photo${counts.photos === 1 ? "" : "s"} · ${counts.shots} shot${counts.shots === 1 ? "" : "s"} · ${counts.picks} picks · ${counts.rejects} rejects · ${counts.flagged} flagged`
       : "";
+  }
+
+  function filterLabel(key, value) {
+    const selectLabels = {
+      kind: el.kind,
+      status: el.status,
+      usable: el.usable,
+      blurRequired: el.blur,
+      collectionId: el.collection,
+      stackId: el.stack,
+    };
+    const select = selectLabels[key];
+    if (select) return select.selectedOptions[0]?.textContent || String(value);
+    if (key === "contextKey") return `Purpose: ${value}`;
+    if (key === "search") return `Name: ${value}`;
+    return String(value);
+  }
+
+  function clearFilter(key) {
+    const empty = { kind: el.kind, status: el.status, usable: el.usable, blurRequired: el.blur,
+      collectionId: el.collection, stackId: el.stack, contextKey: el.context, search: el.search }[key];
+    if (!empty) return;
+    empty.value = "";
+    refreshReview();
+  }
+
+  function renderActiveFilters() {
+    const entries = Object.entries(state.appliedFilters);
+    el.activeFilters.replaceChildren();
+    el.activeFilters.hidden = entries.length === 0;
+    if (entries.length) {
+      const lead = document.createElement("span");
+      lead.textContent = "Showing:";
+      el.activeFilters.append(lead);
+    }
+    for (const [key, value] of entries) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "active-filter-chip";
+      chip.textContent = `${filterLabel(key, value)} ×`;
+      chip.setAttribute("aria-label", `Remove filter ${filterLabel(key, value)}`);
+      chip.addEventListener("click", () => clearFilter(key));
+      el.activeFilters.append(chip);
+    }
+    const advancedKeys = ["status", "usable", "blurRequired", "collectionId", "stackId", "contextKey"];
+    const count = advancedKeys.filter((key) => key in state.appliedFilters).length;
+    el.moreCount.textContent = count ? `(${count})` : "";
+  }
+
+  function setAdvancedFiltersVisible(visible) {
+    el.advanced.hidden = !visible;
+    el.more.setAttribute("aria-expanded", String(visible));
+    el.more.firstChild.textContent = visible ? "Fewer filters " : "More filters ";
   }
 
   // ---------- grid ----------
@@ -345,22 +403,25 @@
     renderSavedSearches();
     renderGrid();
     renderBatchBar();
+    renderActiveFilters();
   }
 
   async function refreshReview() {
+    const filters = filterArgs();
     try {
       const [counts, collections, stacks, saved, assets] = await Promise.all([
         invoke("library_counts"),
         invoke("collection_list"),
         invoke("stack_list"),
         invoke("saved_search_list"),
-        invoke("library_browse", { filter: filterArgs() }),
+        invoke("library_browse", { filter: filters }),
       ]);
       state.counts = counts;
       state.collections = collections;
       state.stacks = stacks;
       state.saved = saved;
       state.assets = assets;
+      state.appliedFilters = { ...filters };
       for (const key of [...state.selection.keys()]) {
         if (!assets.some((asset) => `${asset.mediaKind}|${asset.mediaId}` === key)) {
           state.selection.delete(key);
@@ -528,6 +589,7 @@
     applyFilterArgs({});
     refreshReview();
   });
+  el.more.addEventListener("click", () => setAdvancedFiltersVisible(el.advanced.hidden));
 
   el.savedForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -568,6 +630,9 @@
       return;
     }
     applyFilterArgs(filters);
+    const hasAdvanced = ["status", "usable", "blurRequired", "collectionId", "stackId", "contextKey"]
+      .some((key) => filters[key] !== undefined && filters[key] !== null && filters[key] !== "");
+    if (hasAdvanced) setAdvancedFiltersVisible(true);
     refreshReview();
   });
 

@@ -2793,7 +2793,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=9"));
+            assert!(report.contains("schema=10"));
         }
     }
 }

@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
@@ -26,6 +26,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (7, include_str!("../migrations/0007_reference_sets.sql")),
     (8, include_str!("../migrations/0008_collections.sql")),
     (9, include_str!("../migrations/0009_plans.sql")),
+    (10, include_str!("../migrations/0010_rendering.sql")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +441,115 @@ pub struct PlanRevision {
     pub revision: i64,
     pub label: String,
     pub snapshot_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The media contract described by an immutable version of a render recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderRecipeKind {
+    Photo,
+    VideoClip,
+    Reel,
+}
+
+/// One immutable version of a non-destructive render recipe. `schema_json` is validated on
+/// insertion and is frozen again into every queued job, so later recipe versions cannot change
+/// work that is already queued.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderRecipe {
+    pub owner_id: String,
+    pub id: String,
+    pub version: i64,
+    pub kind: RenderRecipeKind,
+    pub name: String,
+    pub schema_json: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderJobStatus {
+    Queued,
+    Running,
+    Verifying,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// Input for queueing a render. The recipe and optional plan revision are looked up under the
+/// supplied owner and frozen by [`Store::render_job_create`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewRenderJob {
+    pub id: String,
+    pub recipe_id: String,
+    pub recipe_version: i64,
+    pub plan_id: Option<String>,
+    pub plan_revision: Option<i64>,
+    pub source_snapshot_json: String,
+    pub model_versions_json: String,
+    pub destination_path: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Durable render state. Source, recipe, and plan snapshots are immutable after creation; only
+/// lifecycle fields change while an attempt runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderJob {
+    pub owner_id: String,
+    pub id: String,
+    pub recipe_id: String,
+    pub recipe_version: i64,
+    pub recipe_kind: RenderRecipeKind,
+    pub frozen_recipe_json: String,
+    pub plan_id: Option<String>,
+    pub plan_revision: Option<i64>,
+    pub frozen_plan_json: Option<String>,
+    pub source_snapshot_json: String,
+    pub model_versions_json: String,
+    pub destination_path: String,
+    pub status: RenderJobStatus,
+    pub progress: f64,
+    pub current_attempt: i64,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderAttempt {
+    pub owner_id: String,
+    pub job_id: String,
+    pub attempt: i64,
+    pub status: RenderJobStatus,
+    pub staging_path: String,
+    pub progress: f64,
+    pub command_json: String,
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// Verified output facts and its immutable, separately checksummed manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderOutput {
+    pub owner_id: String,
+    pub id: String,
+    pub job_id: String,
+    pub attempt: i64,
+    pub output_path: String,
+    pub output_sha256: String,
+    pub size_bytes: i64,
+    pub media_type: String,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub duration_s: Option<f64>,
+    pub verification_json: String,
+    pub manifest_path: String,
+    pub manifest_json: String,
+    pub manifest_sha256: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2565,6 +2675,634 @@ impl Store {
         Ok(copy)
     }
 
+    // ---- Non-destructive render recipes and durable outputs (Task 021) ----
+
+    /// Insert one immutable recipe version. Existing versions are never overwritten.
+    pub fn render_recipe_create(
+        &self,
+        owner_id: &str,
+        recipe: &RenderRecipe,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &recipe.owner_id, "render recipe")?;
+        ensure!(!recipe.id.trim().is_empty(), "recipe id must not be empty");
+        ensure!(recipe.version > 0, "recipe version must be positive");
+        ensure!(
+            !recipe.name.trim().is_empty(),
+            "recipe name must not be empty"
+        );
+        validate_render_recipe_json(recipe.kind, &recipe.schema_json)?;
+        self.connection
+            .execute(
+                "INSERT INTO render_recipes
+                 (owner_id, id, version, kind, name, schema_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    owner_id,
+                    recipe.id,
+                    recipe.version,
+                    render_recipe_kind_to_str(recipe.kind),
+                    recipe.name,
+                    recipe.schema_json,
+                    recipe.created_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to create immutable render recipe")?;
+        Ok(())
+    }
+
+    pub fn render_recipe_get(
+        &self,
+        owner_id: &str,
+        recipe_id: &str,
+        version: i64,
+    ) -> anyhow::Result<Option<RenderRecipe>> {
+        self.connection
+            .query_row(
+                "SELECT owner_id, id, version, kind, name, schema_json, created_at
+                 FROM render_recipes WHERE owner_id = ?1 AND id = ?2 AND version = ?3",
+                params![owner_id, recipe_id, version],
+                render_recipe_from_row,
+            )
+            .optional()
+            .context("failed to read render recipe")
+    }
+
+    pub fn render_recipes(
+        &self,
+        owner_id: &str,
+        kind: Option<RenderRecipeKind>,
+    ) -> anyhow::Result<Vec<RenderRecipe>> {
+        let kind = kind.map(render_recipe_kind_to_str);
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, id, version, kind, name, schema_json, created_at
+             FROM render_recipes
+             WHERE owner_id = ?1 AND (?2 IS NULL OR kind = ?2)
+             ORDER BY created_at, id, version",
+        )?;
+        let rows = statement.query_map(params![owner_id, kind], render_recipe_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list render recipes")
+    }
+
+    /// Queue a render from immutable owner-scoped inputs. A recipe version and optional saved
+    /// plan revision are copied into the job in the same transaction as creation.
+    pub fn render_job_create(
+        &mut self,
+        owner_id: &str,
+        job: &NewRenderJob,
+    ) -> anyhow::Result<RenderJob> {
+        ensure!(!job.id.trim().is_empty(), "render job id must not be empty");
+        ensure!(
+            job.plan_id.is_some() == job.plan_revision.is_some(),
+            "plan id and revision must be supplied together"
+        );
+        validate_source_snapshot_json(&job.source_snapshot_json)?;
+        validate_model_versions_json(&job.model_versions_json)?;
+        validate_destination_path(&job.destination_path)?;
+        let recipe = self
+            .render_recipe_get(owner_id, &job.recipe_id, job.recipe_version)?
+            .with_context(|| {
+                format!(
+                    "render recipe {} version {} was not found for this owner",
+                    job.recipe_id, job.recipe_version
+                )
+            })?;
+        let frozen_plan = match (&job.plan_id, job.plan_revision) {
+            (Some(plan_id), Some(revision)) => Some(
+                self.connection
+                    .query_row(
+                        "SELECT snapshot_json FROM plan_revisions
+                         WHERE owner_id = ?1 AND plan_id = ?2 AND revision = ?3",
+                        params![owner_id, plan_id, revision],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .with_context(|| {
+                        format!("plan {plan_id} revision {revision} was not found for this owner")
+                    })?,
+            ),
+            (None, None) => None,
+            _ => unreachable!("validated optional plan fields"),
+        };
+        ensure!(
+            (recipe.kind == RenderRecipeKind::Reel) == frozen_plan.is_some(),
+            "reel recipes require a frozen plan revision; photo and clip recipes must not carry one"
+        );
+        let recipe_schema: serde_json::Value = serde_json::from_str(&recipe.schema_json)
+            .context("validated render recipe could not be parsed for freezing")?;
+        let frozen_recipe = serde_json::json!({
+            "id": recipe.id,
+            "version": recipe.version,
+            "kind": render_recipe_kind_to_str(recipe.kind),
+            "name": recipe.name,
+            "schema": recipe_schema,
+        })
+        .to_string();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction
+            .execute(
+                "INSERT INTO render_jobs (
+                    owner_id, id, recipe_id, recipe_version, recipe_kind, frozen_recipe_json,
+                    plan_id, plan_revision, frozen_plan_json, source_snapshot_json,
+                    model_versions_json, destination_path, status, progress, current_attempt,
+                    created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                           'queued', 0.0, 0, ?13)",
+                params![
+                    owner_id,
+                    job.id,
+                    recipe.id,
+                    recipe.version,
+                    render_recipe_kind_to_str(recipe.kind),
+                    frozen_recipe,
+                    job.plan_id,
+                    job.plan_revision,
+                    frozen_plan,
+                    job.source_snapshot_json,
+                    job.model_versions_json,
+                    job.destination_path,
+                    job.created_at.to_rfc3339(),
+                ],
+            )
+            .context("failed to queue render job")?;
+        transaction.commit()?;
+        self.render_job_by_id(owner_id, &job.id)?
+            .context("queued render job could not be read back")
+    }
+
+    pub fn render_job_by_id(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+    ) -> anyhow::Result<Option<RenderJob>> {
+        self.connection
+            .query_row(
+                "SELECT owner_id, id, recipe_id, recipe_version, recipe_kind,
+                        frozen_recipe_json, plan_id, plan_revision, frozen_plan_json,
+                        source_snapshot_json, model_versions_json, destination_path, status,
+                        progress, current_attempt, error, created_at, started_at, finished_at
+                 FROM render_jobs WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, job_id],
+                render_job_from_row,
+            )
+            .optional()
+            .context("failed to read render job")
+    }
+
+    pub fn render_jobs(
+        &self,
+        owner_id: &str,
+        status: Option<RenderJobStatus>,
+    ) -> anyhow::Result<Vec<RenderJob>> {
+        let status = status.map(render_job_status_to_str);
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, id, recipe_id, recipe_version, recipe_kind,
+                    frozen_recipe_json, plan_id, plan_revision, frozen_plan_json,
+                    source_snapshot_json, model_versions_json, destination_path, status,
+                    progress, current_attempt, error, created_at, started_at, finished_at
+             FROM render_jobs
+             WHERE owner_id = ?1 AND (?2 IS NULL OR status = ?2)
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = statement.query_map(params![owner_id, status], render_job_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list render jobs")
+    }
+
+    /// Start or retry a queued/failed/cancelled render. Every retry gets a new attempt row and
+    /// caller-provided managed staging path; completed outputs can never be retried or replaced.
+    pub fn render_job_start(
+        &mut self,
+        owner_id: &str,
+        job_id: &str,
+        staging_path: &str,
+        started_at: DateTime<Utc>,
+    ) -> anyhow::Result<RenderAttempt> {
+        validate_destination_path(staging_path)
+            .context("render staging path must be an absolute managed path")?;
+        let current = self
+            .render_job_by_id(owner_id, job_id)?
+            .with_context(|| format!("render job {job_id} was not found"))?;
+        ensure!(
+            matches!(
+                current.status,
+                RenderJobStatus::Queued | RenderJobStatus::Failed | RenderJobStatus::Cancelled
+            ),
+            "render job {job_id} cannot start from {}",
+            render_job_status_to_str(current.status)
+        );
+        ensure!(
+            self.render_output_by_job(owner_id, job_id)?.is_none(),
+            "render job {job_id} already has a verified output"
+        );
+        let attempt = current
+            .current_attempt
+            .checked_add(1)
+            .context("render attempt number overflowed i64")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO render_attempts
+             (owner_id, job_id, attempt, status, staging_path, progress, started_at)
+             VALUES (?1, ?2, ?3, 'running', ?4, 0.0, ?5)",
+            params![
+                owner_id,
+                job_id,
+                attempt,
+                staging_path,
+                started_at.to_rfc3339()
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE render_jobs
+             SET status = 'running', progress = 0.0, current_attempt = ?3, error = NULL,
+                 started_at = ?4, finished_at = NULL
+             WHERE owner_id = ?1 AND id = ?2 AND current_attempt = ?5",
+            params![
+                owner_id,
+                job_id,
+                attempt,
+                started_at.to_rfc3339(),
+                current.current_attempt
+            ],
+        )?;
+        ensure!(
+            changed == 1,
+            "render job changed while its attempt was starting"
+        );
+        transaction.commit()?;
+        self.render_attempt(owner_id, job_id, attempt)?
+            .context("started render attempt could not be read back")
+    }
+
+    pub fn render_job_set_progress(
+        &mut self,
+        owner_id: &str,
+        job_id: &str,
+        progress: f64,
+    ) -> anyhow::Result<()> {
+        ensure_unit_score(progress, "render progress")?;
+        ensure!(
+            progress < 1.0,
+            "render progress reaches 1.0 only after verification"
+        );
+        let job = self
+            .render_job_by_id(owner_id, job_id)?
+            .with_context(|| format!("render job {job_id} was not found"))?;
+        ensure!(
+            matches!(
+                job.status,
+                RenderJobStatus::Running | RenderJobStatus::Verifying
+            ),
+            "render progress can only update a running or verifying job"
+        );
+        ensure!(
+            progress >= job.progress,
+            "render progress cannot move backwards"
+        );
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "UPDATE render_attempts SET progress = ?4
+             WHERE owner_id = ?1 AND job_id = ?2 AND attempt = ?3",
+            params![owner_id, job_id, job.current_attempt, progress],
+        )?;
+        transaction.execute(
+            "UPDATE render_jobs SET progress = ?3 WHERE owner_id = ?1 AND id = ?2",
+            params![owner_id, job_id, progress],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn render_attempt_set_commands(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+        attempt: i64,
+        command_json: &str,
+    ) -> anyhow::Result<()> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(command_json).context("render command_json must be valid JSON")?;
+        ensure!(
+            parsed.is_array(),
+            "render command_json must be a JSON array"
+        );
+        let changed = self.connection.execute(
+            "UPDATE render_attempts SET command_json = ?4
+             WHERE owner_id = ?1 AND job_id = ?2 AND attempt = ?3
+               AND status IN ('running', 'verifying')",
+            params![owner_id, job_id, attempt, command_json],
+        )?;
+        ensure!(changed == 1, "active render attempt was not found");
+        Ok(())
+    }
+
+    pub fn render_job_mark_verifying(
+        &mut self,
+        owner_id: &str,
+        job_id: &str,
+    ) -> anyhow::Result<()> {
+        let job = self
+            .render_job_by_id(owner_id, job_id)?
+            .with_context(|| format!("render job {job_id} was not found"))?;
+        ensure!(
+            job.status == RenderJobStatus::Running,
+            "only a running render can begin verification"
+        );
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE render_attempts SET status = 'verifying'
+             WHERE owner_id = ?1 AND job_id = ?2 AND attempt = ?3 AND status = 'running'",
+            params![owner_id, job_id, job.current_attempt],
+        )?;
+        ensure!(changed == 1, "active render attempt was not running");
+        let changed = transaction.execute(
+            "UPDATE render_jobs SET status = 'verifying'
+             WHERE owner_id = ?1 AND id = ?2 AND status = 'running'",
+            params![owner_id, job_id],
+        )?;
+        ensure!(changed == 1, "render job changed before verification began");
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically record verified output+manifest evidence and finish the active attempt.
+    pub fn render_job_finish(
+        &mut self,
+        owner_id: &str,
+        output: &RenderOutput,
+    ) -> anyhow::Result<()> {
+        ensure_owner_matches(owner_id, &output.owner_id, "render output")?;
+        ensure!(
+            !output.id.trim().is_empty(),
+            "render output id must not be empty"
+        );
+        ensure!(
+            !output.output_path.trim().is_empty(),
+            "render output path is required"
+        );
+        ensure!(
+            !output.output_sha256.trim().is_empty(),
+            "render output SHA-256 is required"
+        );
+        validate_sha256(&output.output_sha256, "render output SHA-256")?;
+        ensure!(
+            output.size_bytes >= 0,
+            "render output size cannot be negative"
+        );
+        ensure!(
+            !output.media_type.trim().is_empty(),
+            "render output media type is required"
+        );
+        ensure!(
+            !output.manifest_path.trim().is_empty(),
+            "render manifest path is required"
+        );
+        ensure!(
+            !output.manifest_sha256.trim().is_empty(),
+            "render manifest SHA-256 is required"
+        );
+        validate_sha256(&output.manifest_sha256, "render manifest SHA-256")?;
+        validate_json_object(&output.verification_json, "render verification_json")?;
+        validate_json_object(&output.manifest_json, "render manifest_json")?;
+        let job = self
+            .render_job_by_id(owner_id, &output.job_id)?
+            .with_context(|| format!("render job {} was not found", output.job_id))?;
+        ensure!(
+            job.status == RenderJobStatus::Verifying,
+            "render job is not verifying"
+        );
+        ensure!(
+            output.attempt == job.current_attempt,
+            "output attempt does not match the active render attempt"
+        );
+        ensure!(
+            output.output_path == job.destination_path,
+            "verified output path differs from the frozen destination"
+        );
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO render_outputs (
+                owner_id, id, job_id, attempt, output_path, output_sha256, size_bytes,
+                media_type, width, height, duration_s, verification_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                owner_id,
+                output.id,
+                output.job_id,
+                output.attempt,
+                output.output_path,
+                output.output_sha256,
+                output.size_bytes,
+                output.media_type,
+                output.width,
+                output.height,
+                output.duration_s,
+                output.verification_json,
+                output.created_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO render_manifests
+             (owner_id, output_id, manifest_path, manifest_json, manifest_sha256, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                owner_id,
+                output.id,
+                output.manifest_path,
+                output.manifest_json,
+                output.manifest_sha256,
+                output.created_at.to_rfc3339(),
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE render_attempts
+             SET status = 'done', progress = 1.0, finished_at = ?4
+             WHERE owner_id = ?1 AND job_id = ?2 AND attempt = ?3 AND status = 'verifying'",
+            params![
+                owner_id,
+                output.job_id,
+                output.attempt,
+                output.created_at.to_rfc3339()
+            ],
+        )?;
+        ensure!(
+            changed == 1,
+            "verifying render attempt changed before completion"
+        );
+        let changed = transaction.execute(
+            "UPDATE render_jobs
+             SET status = 'done', progress = 1.0, error = NULL, finished_at = ?3
+             WHERE owner_id = ?1 AND id = ?2 AND status = 'verifying'",
+            params![owner_id, output.job_id, output.created_at.to_rfc3339()],
+        )?;
+        ensure!(
+            changed == 1,
+            "verifying render job changed before completion"
+        );
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn render_job_fail(
+        &mut self,
+        owner_id: &str,
+        job_id: &str,
+        error: &str,
+        finished_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            !error.trim().is_empty(),
+            "failed render must include an error"
+        );
+        self.finish_render_attempt(
+            owner_id,
+            job_id,
+            RenderJobStatus::Failed,
+            Some(error),
+            finished_at,
+        )
+    }
+
+    pub fn render_job_cancel(
+        &mut self,
+        owner_id: &str,
+        job_id: &str,
+        finished_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.finish_render_attempt(
+            owner_id,
+            job_id,
+            RenderJobStatus::Cancelled,
+            None,
+            finished_at,
+        )
+    }
+
+    pub fn render_attempt(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+        attempt: i64,
+    ) -> anyhow::Result<Option<RenderAttempt>> {
+        self.connection
+            .query_row(
+                "SELECT owner_id, job_id, attempt, status, staging_path, progress, command_json,
+                        error, started_at, finished_at
+                 FROM render_attempts
+                 WHERE owner_id = ?1 AND job_id = ?2 AND attempt = ?3",
+                params![owner_id, job_id, attempt],
+                render_attempt_from_row,
+            )
+            .optional()
+            .context("failed to read render attempt")
+    }
+
+    pub fn render_attempts(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+    ) -> anyhow::Result<Vec<RenderAttempt>> {
+        let mut statement = self.connection.prepare(
+            "SELECT owner_id, job_id, attempt, status, staging_path, progress, command_json,
+                    error, started_at, finished_at
+             FROM render_attempts WHERE owner_id = ?1 AND job_id = ?2 ORDER BY attempt",
+        )?;
+        let rows = statement.query_map(params![owner_id, job_id], render_attempt_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to list render attempts")
+    }
+
+    pub fn render_output_by_job(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+    ) -> anyhow::Result<Option<RenderOutput>> {
+        self.connection
+            .query_row(
+                "SELECT o.owner_id, o.id, o.job_id, o.attempt, o.output_path,
+                        o.output_sha256, o.size_bytes, o.media_type, o.width, o.height,
+                        o.duration_s, o.verification_json, m.manifest_path, m.manifest_json,
+                        m.manifest_sha256, o.created_at
+                 FROM render_outputs AS o
+                 JOIN render_manifests AS m
+                   ON m.owner_id = o.owner_id AND m.output_id = o.id
+                 WHERE o.owner_id = ?1 AND o.job_id = ?2",
+                params![owner_id, job_id],
+                render_output_from_row,
+            )
+            .optional()
+            .context("failed to read render output")
+    }
+
+    fn finish_render_attempt(
+        &mut self,
+        owner_id: &str,
+        job_id: &str,
+        status: RenderJobStatus,
+        error: Option<&str>,
+        finished_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            matches!(status, RenderJobStatus::Failed | RenderJobStatus::Cancelled),
+            "render terminal helper only accepts failed or cancelled"
+        );
+        let job = self
+            .render_job_by_id(owner_id, job_id)?
+            .with_context(|| format!("render job {job_id} was not found"))?;
+        ensure!(
+            matches!(
+                job.status,
+                RenderJobStatus::Running | RenderJobStatus::Verifying
+            ),
+            "only an active render can be failed or cancelled"
+        );
+        let status_text = render_job_status_to_str(status);
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE render_attempts SET status = ?4, error = ?5, finished_at = ?6
+             WHERE owner_id = ?1 AND job_id = ?2 AND attempt = ?3
+               AND status IN ('running', 'verifying')",
+            params![
+                owner_id,
+                job_id,
+                job.current_attempt,
+                status_text,
+                error,
+                finished_at.to_rfc3339(),
+            ],
+        )?;
+        ensure!(
+            changed == 1,
+            "active render attempt changed before it finished"
+        );
+        let changed = transaction.execute(
+            "UPDATE render_jobs SET status = ?3, error = ?4, finished_at = ?5
+             WHERE owner_id = ?1 AND id = ?2 AND status IN ('running', 'verifying')",
+            params![
+                owner_id,
+                job_id,
+                status_text,
+                error,
+                finished_at.to_rfc3339()
+            ],
+        )?;
+        ensure!(changed == 1, "active render job changed before it finished");
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// The general cold-start strong-shot list, read through the
     /// `aesthetic_assessments_strongest` index (overall DESC, confidence DESC). Assets the
     /// owner marked unusable or blur-required never surface as candidates: machine scores
@@ -4654,6 +5392,99 @@ fn plan_revision_from_row(row: &Row<'_>) -> rusqlite::Result<PlanRevision> {
     })
 }
 
+fn render_recipe_from_row(row: &Row<'_>) -> rusqlite::Result<RenderRecipe> {
+    let kind: String = row.get(3)?;
+    let created_at: String = row.get(6)?;
+    Ok(RenderRecipe {
+        owner_id: row.get(0)?,
+        id: row.get(1)?,
+        version: row.get(2)?,
+        kind: render_recipe_kind_from_str(&kind)
+            .map_err(|error| conversion_message(3, error.to_string()))?,
+        name: row.get(4)?,
+        schema_json: row.get(5)?,
+        created_at: timestamp_from_str(&created_at, 6)?,
+    })
+}
+
+fn render_job_from_row(row: &Row<'_>) -> rusqlite::Result<RenderJob> {
+    let kind: String = row.get(4)?;
+    let status: String = row.get(12)?;
+    let created_at: String = row.get(16)?;
+    let started_at: Option<String> = row.get(17)?;
+    let finished_at: Option<String> = row.get(18)?;
+    Ok(RenderJob {
+        owner_id: row.get(0)?,
+        id: row.get(1)?,
+        recipe_id: row.get(2)?,
+        recipe_version: row.get(3)?,
+        recipe_kind: render_recipe_kind_from_str(&kind)
+            .map_err(|error| conversion_message(4, error.to_string()))?,
+        frozen_recipe_json: row.get(5)?,
+        plan_id: row.get(6)?,
+        plan_revision: row.get(7)?,
+        frozen_plan_json: row.get(8)?,
+        source_snapshot_json: row.get(9)?,
+        model_versions_json: row.get(10)?,
+        destination_path: row.get(11)?,
+        status: render_job_status_from_str(&status)
+            .map_err(|error| conversion_message(12, error.to_string()))?,
+        progress: row.get(13)?,
+        current_attempt: row.get(14)?,
+        error: row.get(15)?,
+        created_at: timestamp_from_str(&created_at, 16)?,
+        started_at: started_at
+            .map(|value| timestamp_from_str(&value, 17))
+            .transpose()?,
+        finished_at: finished_at
+            .map(|value| timestamp_from_str(&value, 18))
+            .transpose()?,
+    })
+}
+
+fn render_attempt_from_row(row: &Row<'_>) -> rusqlite::Result<RenderAttempt> {
+    let status: String = row.get(3)?;
+    let started_at: String = row.get(8)?;
+    let finished_at: Option<String> = row.get(9)?;
+    Ok(RenderAttempt {
+        owner_id: row.get(0)?,
+        job_id: row.get(1)?,
+        attempt: row.get(2)?,
+        status: render_job_status_from_str(&status)
+            .map_err(|error| conversion_message(3, error.to_string()))?,
+        staging_path: row.get(4)?,
+        progress: row.get(5)?,
+        command_json: row.get(6)?,
+        error: row.get(7)?,
+        started_at: timestamp_from_str(&started_at, 8)?,
+        finished_at: finished_at
+            .map(|value| timestamp_from_str(&value, 9))
+            .transpose()?,
+    })
+}
+
+fn render_output_from_row(row: &Row<'_>) -> rusqlite::Result<RenderOutput> {
+    let created_at: String = row.get(15)?;
+    Ok(RenderOutput {
+        owner_id: row.get(0)?,
+        id: row.get(1)?,
+        job_id: row.get(2)?,
+        attempt: row.get(3)?,
+        output_path: row.get(4)?,
+        output_sha256: row.get(5)?,
+        size_bytes: row.get(6)?,
+        media_type: row.get(7)?,
+        width: row.get(8)?,
+        height: row.get(9)?,
+        duration_s: row.get(10)?,
+        verification_json: row.get(11)?,
+        manifest_path: row.get(12)?,
+        manifest_json: row.get(13)?,
+        manifest_sha256: row.get(14)?,
+        created_at: timestamp_from_str(&created_at, 15)?,
+    })
+}
+
 fn library_asset_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryAsset> {
     let media_kind: String = row.get(0)?;
     let indexed_at: Option<String> = row.get(6)?;
@@ -4814,6 +5645,46 @@ pub fn plan_origin_from_str(value: &str) -> anyhow::Result<PlanOrigin> {
         "general" => Ok(PlanOrigin::General),
         "personal" => Ok(PlanOrigin::Personal),
         _ => bail!("unknown plan item origin {value:?}"),
+    }
+}
+
+fn render_recipe_kind_to_str(kind: RenderRecipeKind) -> &'static str {
+    match kind {
+        RenderRecipeKind::Photo => "photo",
+        RenderRecipeKind::VideoClip => "video_clip",
+        RenderRecipeKind::Reel => "reel",
+    }
+}
+
+fn render_recipe_kind_from_str(value: &str) -> anyhow::Result<RenderRecipeKind> {
+    match value {
+        "photo" => Ok(RenderRecipeKind::Photo),
+        "video_clip" => Ok(RenderRecipeKind::VideoClip),
+        "reel" => Ok(RenderRecipeKind::Reel),
+        _ => bail!("unknown render recipe kind {value:?}"),
+    }
+}
+
+fn render_job_status_to_str(status: RenderJobStatus) -> &'static str {
+    match status {
+        RenderJobStatus::Queued => "queued",
+        RenderJobStatus::Running => "running",
+        RenderJobStatus::Verifying => "verifying",
+        RenderJobStatus::Done => "done",
+        RenderJobStatus::Failed => "failed",
+        RenderJobStatus::Cancelled => "cancelled",
+    }
+}
+
+fn render_job_status_from_str(value: &str) -> anyhow::Result<RenderJobStatus> {
+    match value {
+        "queued" => Ok(RenderJobStatus::Queued),
+        "running" => Ok(RenderJobStatus::Running),
+        "verifying" => Ok(RenderJobStatus::Verifying),
+        "done" => Ok(RenderJobStatus::Done),
+        "failed" => Ok(RenderJobStatus::Failed),
+        "cancelled" => Ok(RenderJobStatus::Cancelled),
+        _ => bail!("unknown render job status {value:?}"),
     }
 }
 
@@ -5338,6 +6209,384 @@ fn validate_proxy_fields(
         _ => bail!("photo proxy path, SHA-256, width, and height must be set together"),
     }
     Ok(())
+}
+
+fn validate_render_recipe_json(kind: RenderRecipeKind, value: &str) -> anyhow::Result<()> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).context("render recipe schema must be valid JSON")?;
+    let object = parsed
+        .as_object()
+        .context("render recipe schema must be a JSON object")?;
+    ensure_json_keys(
+        object,
+        match kind {
+            RenderRecipeKind::Photo => &[
+                "schema_version",
+                "kind",
+                "crop",
+                "rotation_degrees",
+                "grade",
+                "output",
+            ],
+            RenderRecipeKind::VideoClip => &[
+                "schema_version",
+                "kind",
+                "in_s",
+                "out_s",
+                "crop",
+                "grade",
+                "transition",
+                "audio",
+                "output",
+            ],
+            RenderRecipeKind::Reel => &["schema_version", "kind", "transition", "audio", "output"],
+        },
+        "render recipe",
+    )?;
+    ensure!(
+        object
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1),
+        "render recipe schema_version must be 1"
+    );
+    ensure!(
+        object.get("kind").and_then(serde_json::Value::as_str)
+            == Some(render_recipe_kind_to_str(kind)),
+        "render recipe kind does not match its record"
+    );
+
+    match kind {
+        RenderRecipeKind::Photo => {
+            validate_crop(object.get("crop").expect("key set checked"))?;
+            let rotation = object
+                .get("rotation_degrees")
+                .and_then(serde_json::Value::as_i64)
+                .context("photo rotation_degrees must be an integer")?;
+            ensure!(
+                matches!(rotation, 0 | 90 | 180 | 270),
+                "photo rotation_degrees must be 0, 90, 180, or 270"
+            );
+            validate_grade(object.get("grade").expect("key set checked"))?;
+            validate_output_preset(
+                object.get("output").expect("key set checked"),
+                &["jpeg-srgb-v1", "png-srgb-v1", "tiff-srgb-v1"],
+            )?;
+        }
+        RenderRecipeKind::VideoClip => {
+            let start = finite_json_number(object, "in_s", "video clip")?;
+            let end = finite_json_number(object, "out_s", "video clip")?;
+            ensure!(
+                start >= 0.0 && end > start,
+                "video clip out_s must exceed non-negative in_s"
+            );
+            validate_crop(object.get("crop").expect("key set checked"))?;
+            validate_grade(object.get("grade").expect("key set checked"))?;
+            validate_transition(object.get("transition").expect("key set checked"))?;
+            validate_audio(object.get("audio").expect("key set checked"))?;
+            validate_output_preset(
+                object.get("output").expect("key set checked"),
+                &["mp4-h264-sdr-v1", "mov-h264-sdr-v1"],
+            )?;
+        }
+        RenderRecipeKind::Reel => {
+            validate_transition(object.get("transition").expect("key set checked"))?;
+            validate_audio(object.get("audio").expect("key set checked"))?;
+            validate_output_preset(
+                object.get("output").expect("key set checked"),
+                &["mp4-h264-sdr-v1", "mov-h264-sdr-v1"],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_crop(value: &serde_json::Value) -> anyhow::Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let object = value
+        .as_object()
+        .context("crop must be null or an object")?;
+    ensure_json_keys(object, &["x", "y", "width", "height"], "crop")?;
+    let x = finite_json_number(object, "x", "crop")?;
+    let y = finite_json_number(object, "y", "crop")?;
+    let width = finite_json_number(object, "width", "crop")?;
+    let height = finite_json_number(object, "height", "crop")?;
+    ensure!(x >= 0.0 && y >= 0.0, "crop origin must be non-negative");
+    ensure!(
+        width > 0.0 && height > 0.0,
+        "crop dimensions must be positive"
+    );
+    ensure!(
+        x + width <= 1.0 && y + height <= 1.0,
+        "crop must stay inside normalized source bounds"
+    );
+    Ok(())
+}
+
+fn validate_grade(value: &serde_json::Value) -> anyhow::Result<()> {
+    let object = value.as_object().context("grade must be an object")?;
+    let mode = object
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .context("grade mode is required")?;
+    match mode {
+        "none" => ensure_json_keys(object, &["mode"], "grade"),
+        "basic" => {
+            ensure_json_keys(
+                object,
+                &[
+                    "mode",
+                    "exposure_ev",
+                    "contrast",
+                    "saturation",
+                    "temperature",
+                    "tint",
+                ],
+                "grade",
+            )?;
+            let exposure = finite_json_number(object, "exposure_ev", "grade")?;
+            let contrast = finite_json_number(object, "contrast", "grade")?;
+            let saturation = finite_json_number(object, "saturation", "grade")?;
+            let temperature = finite_json_number(object, "temperature", "grade")?;
+            let tint = finite_json_number(object, "tint", "grade")?;
+            ensure!(
+                (-5.0..=5.0).contains(&exposure),
+                "grade exposure_ev must be between -5 and 5"
+            );
+            ensure!(
+                (-1.0..=1.0).contains(&contrast),
+                "grade contrast must be between -1 and 1"
+            );
+            ensure!(
+                (0.0..=2.0).contains(&saturation),
+                "grade saturation must be between 0 and 2"
+            );
+            ensure!(
+                (-1.0..=1.0).contains(&temperature),
+                "grade temperature must be between -1 and 1"
+            );
+            ensure!(
+                (-1.0..=1.0).contains(&tint),
+                "grade tint must be between -1 and 1"
+            );
+            Ok(())
+        }
+        other => bail!("unsupported render grade mode {other:?}"),
+    }
+}
+
+fn validate_transition(value: &serde_json::Value) -> anyhow::Result<()> {
+    let object = value.as_object().context("transition must be an object")?;
+    ensure_json_keys(object, &["kind"], "transition")?;
+    ensure!(
+        object.get("kind").and_then(serde_json::Value::as_str) == Some("cut"),
+        "only the cut transition is currently supported"
+    );
+    Ok(())
+}
+
+fn validate_audio(value: &serde_json::Value) -> anyhow::Result<()> {
+    let object = value.as_object().context("audio must be an object")?;
+    ensure_json_keys(object, &["mode"], "audio")?;
+    ensure!(
+        matches!(
+            object.get("mode").and_then(serde_json::Value::as_str),
+            Some("source" | "mute")
+        ),
+        "audio mode must be source or mute"
+    );
+    Ok(())
+}
+
+fn validate_output_preset(value: &serde_json::Value, allowed: &[&str]) -> anyhow::Result<()> {
+    let object = value.as_object().context("output must be an object")?;
+    ensure_json_keys(object, &["preset"], "output")?;
+    let preset = object
+        .get("preset")
+        .and_then(serde_json::Value::as_str)
+        .context("output preset is required")?;
+    ensure!(
+        allowed.contains(&preset),
+        "unsupported output preset {preset:?}"
+    );
+    Ok(())
+}
+
+fn validate_source_snapshot_json(value: &str) -> anyhow::Result<()> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).context("render source snapshot must be valid JSON")?;
+    let object = parsed
+        .as_object()
+        .context("render source snapshot must be a JSON object")?;
+    ensure_json_keys(
+        object,
+        &[
+            "schema_version",
+            "context_key",
+            "selection_provenance",
+            "sources",
+        ],
+        "render source snapshot",
+    )?;
+    ensure!(
+        object
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1),
+        "render source snapshot schema_version must be 1"
+    );
+    ensure!(
+        object
+            .get("context_key")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
+        "render source snapshot context_key is required"
+    );
+    ensure!(
+        object
+            .get("selection_provenance")
+            .is_some_and(serde_json::Value::is_object),
+        "render source snapshot selection_provenance must be an object"
+    );
+    let sources = object
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+        .context("render source snapshot sources must be an array")?;
+    ensure!(
+        !sources.is_empty(),
+        "render source snapshot requires at least one source"
+    );
+    let mut identities = HashSet::new();
+    for (index, source) in sources.iter().enumerate() {
+        let source = source
+            .as_object()
+            .with_context(|| format!("render source {index} must be an object"))?;
+        ensure_json_keys(
+            source,
+            &["media_kind", "media_id", "source_id", "sha256", "path"],
+            "render source",
+        )?;
+        let media_kind = source
+            .get("media_kind")
+            .and_then(serde_json::Value::as_str)
+            .context("render source media_kind is required")?;
+        ensure!(
+            matches!(media_kind, "photo" | "shot" | "video"),
+            "unsupported render source media_kind {media_kind:?}"
+        );
+        let media_id = required_json_string(source, "media_id", "render source")?;
+        let source_id = required_json_string(source, "source_id", "render source")?;
+        ensure!(
+            identities.insert((media_kind.to_owned(), media_id.to_owned())),
+            "render source snapshot contains duplicate media {media_kind}:{media_id}"
+        );
+        ensure!(
+            !source_id.trim().is_empty(),
+            "render source source_id is required"
+        );
+        validate_sha256(
+            required_json_string(source, "sha256", "render source")?,
+            "render source SHA-256",
+        )?;
+        validate_destination_path(required_json_string(source, "path", "render source")?)
+            .context("render source path must be absolute")?;
+    }
+    Ok(())
+}
+
+fn validate_model_versions_json(value: &str) -> anyhow::Result<()> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).context("render model versions must be valid JSON")?;
+    let object = parsed
+        .as_object()
+        .context("render model versions must be a JSON object")?;
+    ensure_json_keys(
+        object,
+        &["schema_version", "models"],
+        "render model versions",
+    )?;
+    ensure!(
+        object
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1),
+        "render model versions schema_version must be 1"
+    );
+    let models = object
+        .get("models")
+        .and_then(serde_json::Value::as_object)
+        .context("render model versions models must be an object")?;
+    ensure_json_keys(
+        models,
+        &["clip", "aesthetic", "personal_style"],
+        "render models",
+    )?;
+    for key in ["clip", "aesthetic", "personal_style"] {
+        required_json_string(models, key, "render models")?;
+    }
+    Ok(())
+}
+
+fn validate_destination_path(value: &str) -> anyhow::Result<()> {
+    ensure!(!value.trim().is_empty(), "path must not be empty");
+    ensure!(!value.contains('\0'), "path must not contain NUL");
+    let path = Path::new(value);
+    ensure!(path.is_absolute(), "path must be absolute");
+    ensure!(path.file_name().is_some(), "path must name a file");
+    Ok(())
+}
+
+fn validate_sha256(value: &str, name: &str) -> anyhow::Result<()> {
+    ensure!(
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{name} must contain exactly 64 hexadecimal characters"
+    );
+    Ok(())
+}
+
+fn ensure_json_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    expected: &[&str],
+    name: &str,
+) -> anyhow::Result<()> {
+    for key in expected {
+        ensure!(object.contains_key(*key), "{name} is missing {key:?}");
+    }
+    for key in object.keys() {
+        ensure!(
+            expected.contains(&key.as_str()),
+            "{name} contains unsupported field {key:?}"
+        );
+    }
+    Ok(())
+}
+
+fn finite_json_number(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    name: &str,
+) -> anyhow::Result<f64> {
+    let value = object
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .with_context(|| format!("{name} {key} must be a number"))?;
+    ensure!(value.is_finite(), "{name} {key} must be finite");
+    Ok(value)
+}
+
+fn required_json_string<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    name: &str,
+) -> anyhow::Result<&'a str> {
+    let value = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("{name} {key} must be a string"))?;
+    ensure!(!value.trim().is_empty(), "{name} {key} must not be empty");
+    Ok(value)
 }
 
 fn validate_json_object(value: &str, name: &str) -> anyhow::Result<()> {

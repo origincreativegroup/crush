@@ -10,12 +10,12 @@ use crush_core::{
 };
 use crush_store::{
     AestheticAssessment, AssetFilter, Collection, CollectionItem, EditorialAnnotation,
-    EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, Photo,
-    PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, Plan, PlanItem, PlanItemPatch,
+    EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, NewRenderJob,
+    Photo, PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, Plan, PlanItem, PlanItemPatch,
     PlanOrigin, ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
-    ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch, Shot, StackItem, StackItemRole,
-    StackMediaKind, Store, StyleProfile, TranscriptSegment, VersionStack, Video,
-    VideoSourceMetadata, VideoStatus,
+    ReferenceSetStatus, RenderJobStatus, RenderOutput, RenderRecipe, RenderRecipeKind, ReviewOp,
+    SafetyFlags, SavedSearch, Shot, StackItem, StackItemRole, StackMediaKind, Store, StyleProfile,
+    TranscriptSegment, VersionStack, Video, VideoSourceMetadata, VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -139,7 +139,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -150,7 +150,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 9);
+    assert_eq!(reopened.schema_version().unwrap(), 10);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -207,7 +207,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -270,7 +270,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -1700,7 +1700,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -3356,7 +3356,7 @@ fn schema_v7_upgrades_to_collections_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(
         store
@@ -3974,7 +3974,7 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
     drop(connection);
 
     let mut store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
     // The v9 plan surfaces are live on the upgraded database.
@@ -3994,4 +3994,305 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
         .plan_save_revision(DEFAULT_OWNER_ID, "plan-upgrade", "after upgrade")
         .unwrap();
     assert_eq!(revision.revision, 1);
+}
+
+#[test]
+fn render_jobs_freeze_portable_inputs_and_verified_outputs() {
+    let directory = TestDir::new("render-contract");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 19, 0, 0).unwrap();
+    let source_hash = "a".repeat(64);
+    let output_hash = "b".repeat(64);
+    let manifest_hash = "c".repeat(64);
+    let source_path = directory.path().join("original.jpg");
+    let destination = directory.path().join("exports/hero.jpg");
+    let staging = directory.path().join("exports/.crush-render/job-1.partial");
+
+    let recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "photo-web".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Photo,
+        name: "Web JPEG".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "photo",
+            "crop": {"x": 0.1, "y": 0.0, "width": 0.8, "height": 1.0},
+            "rotation_degrees": 90,
+            "grade": {"mode": "none"},
+            "output": {"preset": "jpeg-srgb-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+    assert_eq!(
+        store
+            .render_recipe_get(DEFAULT_OWNER_ID, "photo-web", 1)
+            .unwrap(),
+        Some(recipe.clone())
+    );
+
+    let source_snapshot = serde_json::json!({
+        "schema_version": 1,
+        "context_key": "campaign",
+        "selection_provenance": {"origin": "general", "rank": 0.91},
+        "sources": [{
+            "media_kind": "photo",
+            "media_id": "photo-hero",
+            "source_id": "photo-hero",
+            "sha256": source_hash,
+            "path": source_path
+        }]
+    })
+    .to_string();
+    let model_versions = serde_json::json!({
+        "schema_version": 1,
+        "models": {
+            "clip": "models-v1",
+            "aesthetic": "strong-shot-v1",
+            "personal_style": "not_used"
+        }
+    })
+    .to_string();
+    let job = store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-photo-1".to_owned(),
+                recipe_id: recipe.id.clone(),
+                recipe_version: recipe.version,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: source_snapshot.clone(),
+                model_versions_json: model_versions.clone(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    assert_eq!(job.status, RenderJobStatus::Queued);
+    assert_eq!(job.source_snapshot_json, source_snapshot);
+    assert_eq!(job.model_versions_json, model_versions);
+    assert!(job.frozen_recipe_json.contains("photo-web"));
+    assert!(job.frozen_recipe_json.contains("jpeg-srgb-v1"));
+
+    assert!(audit
+        .execute(
+            "UPDATE render_recipes SET name = 'rewritten' WHERE id = 'photo-web'",
+            [],
+        )
+        .is_err());
+    assert!(audit
+        .execute(
+            "UPDATE render_jobs SET destination_path = '/tmp/stolen.jpg' WHERE id = 'render-photo-1'",
+            [],
+        )
+        .is_err());
+
+    let attempt = store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-photo-1",
+            &staging.to_string_lossy(),
+            now + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+    assert_eq!(attempt.attempt, 1);
+    store
+        .render_attempt_set_commands(
+            DEFAULT_OWNER_ID,
+            "render-photo-1",
+            1,
+            r#"[{"program":"photo-renderer","backend":"cpu"}]"#,
+        )
+        .unwrap();
+    store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-photo-1", 0.75)
+        .unwrap();
+    assert!(store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-photo-1", 0.5)
+        .is_err());
+    assert!(store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-photo-1", 1.0)
+        .is_err());
+    store
+        .render_job_mark_verifying(DEFAULT_OWNER_ID, "render-photo-1")
+        .unwrap();
+    let output = RenderOutput {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "output-photo-1".to_owned(),
+        job_id: "render-photo-1".to_owned(),
+        attempt: 1,
+        output_path: destination.to_string_lossy().into_owned(),
+        output_sha256: output_hash,
+        size_bytes: 42,
+        media_type: "image/jpeg".to_owned(),
+        width: Some(1200),
+        height: Some(1500),
+        duration_s: None,
+        verification_json: r#"{"dimensions":true,"orientation":true,"color":"srgb"}"#.to_owned(),
+        manifest_path: destination
+            .with_extension("jpg.manifest.json")
+            .to_string_lossy()
+            .into_owned(),
+        manifest_json: r#"{"schema_version":1,"verified":true}"#.to_owned(),
+        manifest_sha256: manifest_hash,
+        created_at: now + chrono::Duration::seconds(2),
+    };
+    store.render_job_finish(DEFAULT_OWNER_ID, &output).unwrap();
+    let finished = store
+        .render_job_by_id(DEFAULT_OWNER_ID, "render-photo-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, RenderJobStatus::Done);
+    assert_eq!(finished.progress, 1.0);
+    assert_eq!(
+        store
+            .render_output_by_job(DEFAULT_OWNER_ID, "render-photo-1")
+            .unwrap(),
+        Some(output)
+    );
+    assert!(store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-photo-1",
+            &staging.to_string_lossy(),
+            now + chrono::Duration::seconds(3),
+        )
+        .is_err());
+    assert!(audit
+        .execute("DELETE FROM render_jobs WHERE id = 'render-photo-1'", [])
+        .is_err());
+}
+
+#[test]
+fn render_contract_rejects_unsupported_or_cross_owner_intent_and_retries_safely() {
+    const OWNER_B: &str = "render-owner-b";
+    let directory = TestDir::new("render-validation");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at) VALUES (?1, ?2, ?3)",
+            [OWNER_B, "Other renderer", "2026-08-29T19:00:00Z"],
+        )
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 19, 0, 0).unwrap();
+    let mut recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "clip-safe".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::VideoClip,
+        name: "Portable clip".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "video_clip",
+            "in_s": 1.0,
+            "out_s": 3.0,
+            "crop": null,
+            "grade": {"mode": "none"},
+            "transition": {"kind": "cut"},
+            "audio": {"mode": "source"},
+            "output": {"preset": "mp4-h264-sdr-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+    recipe.id = "unsupported".to_owned();
+    recipe.schema_json = recipe
+        .schema_json
+        .replace(r#"{"mode":"none"}"#, r#"{"mode":"mystery"}"#);
+    assert!(store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .is_err());
+
+    let request = NewRenderJob {
+        id: "render-retry".to_owned(),
+        recipe_id: "clip-safe".to_owned(),
+        recipe_version: 1,
+        plan_id: None,
+        plan_revision: None,
+        source_snapshot_json: serde_json::json!({
+            "schema_version": 1,
+            "context_key": "default",
+            "selection_provenance": {"origin": "general"},
+            "sources": [{
+                "media_kind": "video",
+                "media_id": "video-1",
+                "source_id": "video-1",
+                "sha256": "d".repeat(64),
+                "path": directory.path().join("source.mov")
+            }]
+        })
+        .to_string(),
+        model_versions_json: serde_json::json!({
+            "schema_version": 1,
+            "models": {"clip": "not_used", "aesthetic": "not_used", "personal_style": "not_used"}
+        })
+        .to_string(),
+        destination_path: directory
+            .path()
+            .join("clip.mp4")
+            .to_string_lossy()
+            .into_owned(),
+        created_at: now,
+    };
+    assert!(store.render_job_create(OWNER_B, &request).is_err());
+    store.render_job_create(DEFAULT_OWNER_ID, &request).unwrap();
+    let first_staging = directory.path().join(".render-retry-1/clip.partial");
+    store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            &first_staging.to_string_lossy(),
+            now,
+        )
+        .unwrap();
+    store
+        .render_job_fail(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            "encoder unavailable",
+            now + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+    let second_staging = directory.path().join(".render-retry-2/clip.partial");
+    let second = store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            &second_staging.to_string_lossy(),
+            now + chrono::Duration::seconds(2),
+        )
+        .unwrap();
+    assert_eq!(second.attempt, 2);
+    store
+        .render_job_cancel(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            now + chrono::Duration::seconds(3),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .render_attempts(DEFAULT_OWNER_ID, "render-retry")
+            .unwrap()
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        vec![RenderJobStatus::Failed, RenderJobStatus::Cancelled]
+    );
+    assert!(audit
+        .execute(
+            "UPDATE render_attempts SET progress = 0.0 WHERE job_id = 'render-retry' AND attempt = 2",
+            [],
+        )
+        .is_err());
 }

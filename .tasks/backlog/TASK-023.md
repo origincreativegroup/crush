@@ -16,5 +16,14 @@ Also retain the UI-harness-in-CI idea from PR #15, but rewrite its video-only sc
 - [ ] Tagged build produces a checksummed, signed/notarized DMG when secrets are present and labels
       an ad-hoc build unmistakably when they are not.
 - [ ] Fresh macOS account completes first run, indexes representative RAW/still/video media,
-      reviews assets, learns from sample feedback, and renders verified photo and video outputs.
+      reviews assets with the progressive filter workflow, records sample creative preferences,
+      creates and previews a reel in Projects, and renders verified photo and video outputs. The
+      tester must not need internal vocabulary such as plan, recipe, context key, or style profile.
+- [ ] Reel playback has visible controls for play/pause, scrubbing, in/out preview, looping, and
+      sequence navigation; the browser harness and clean-machine smoke both exercise them.
+- [ ] Primary navigation calls the creation workflow Projects and the learning/evidence workflow
+      Preferences; no user-facing “Style” label suggests filters or color grading.
 - [ ] Install, privacy, format-support, data-location, backup, relink, and uninstall docs are current.
+- [ ] Bundle assembly consumes a versioned platform manifest for sidecars, models, hashes,
+      licenses and capability smokes; shell actions and data paths use platform services so the
+      accepted Mac workflow can be reused by the additive Windows Tasks 028–031.

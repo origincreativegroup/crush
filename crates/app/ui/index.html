@@ -60,11 +60,11 @@
           </button>
           <button class="nav-item" id="nav-style" type="button">
             <span class="nav-icon" aria-hidden="true">✦</span>
-            Style
+            Preferences
           </button>
           <button class="nav-item" id="nav-plans" type="button">
             <span class="nav-icon" aria-hidden="true">≡</span>
-            Plans
+            Projects
           </button>
         </nav>
         <footer class="sidebar-footer">
@@ -127,63 +127,81 @@
 
       <main id="plans-view" class="workspace" aria-labelledby="plans-title" hidden>
         <header class="toolbar">
-          <div><p class="eyebrow">Selects + sequences</p><h1 id="plans-title">Plans</h1></div>
-          <span class="plans-muted">Documents only · originals untouched</span>
+          <div><p class="eyebrow">Build a reel or selects</p><h1 id="plans-title">Projects</h1></div>
+          <span class="plans-muted">Non-destructive edits · originals untouched</span>
         </header>
         <p id="plans-message" class="library-message" role="status" hidden></p>
         <fieldset id="plans-controls" class="plans-layout">
-          <aside class="plans-list-panel" aria-label="Saved plans">
+          <aside class="plans-list-panel" aria-label="Saved projects">
             <form id="plan-create-form" class="plans-stack">
-              <label>New plan name<input id="plan-new-name" required maxlength="200" placeholder="Summer selects" /></label>
-              <label>Style context<input id="plan-new-context" required value="default" maxlength="200" /></label>
-              <button class="button primary" type="submit">Create plan</button>
+              <label>Project name<input id="plan-new-name" required maxlength="200" placeholder="Summer reel" /></label>
+              <label>Purpose <span class="plans-muted">(optional)</span><input id="plan-new-context" maxlength="200" placeholder="Campaign, social, archive…" /></label>
+              <button class="button primary" type="submit">Create project</button>
             </form>
-            <h2>Saved plans</h2>
+            <h2>Saved projects</h2>
             <div id="plans-list" class="plans-stack"></div>
-            <p id="plans-empty" class="plans-muted">No plans yet. Create one to collect photo selects and video clips.</p>
+            <p id="plans-empty" class="plans-muted">No projects yet. Create one to collect and arrange photos or video clips.</p>
           </aside>
           <div class="plans-main">
-            <p id="plan-no-selection" class="plans-muted">Choose or create a plan. General strong-shot candidates work without a style profile.</p>
-            <section id="plan-editor" hidden aria-label="Plan editor">
+            <p id="plan-no-selection" class="plans-muted">Choose or create a project. Suggested strong shots work before you add any preference examples.</p>
+            <section id="plan-editor" hidden aria-label="Project editor">
               <form id="plan-header-form" class="plans-stack">
                 <div class="plans-fields">
-                  <label>Plan name<input id="plan-name" required maxlength="200" /></label>
-                  <label>Context (fixed for this plan)<input id="plan-context" readonly /></label>
+                  <label>Project name<input id="plan-name" required maxlength="200" /></label>
+                  <label>Purpose<input id="plan-context" readonly /></label>
                 </div>
                 <label>Description<input id="plan-description" /></label>
                 <label>Creative brief<textarea id="plan-brief" rows="2" placeholder="Quiet close-ups, warm evening light…"></textarea></label>
                 <div class="plans-actions">
-                  <button class="button secondary" type="submit">Save plan details</button>
+                  <button class="button secondary" type="submit">Save project details</button>
                   <button id="plan-duplicate" class="button secondary" type="button">Duplicate</button>
-                  <button id="plan-delete" class="button danger" type="button">Delete plan…</button>
+                  <button id="plan-delete" class="button danger" type="button">Delete project…</button>
                   <span id="plan-dirty" class="plans-muted" hidden>Unsaved edits</span>
                 </div>
               </form>
               <section class="plans-candidates" aria-label="Candidate orderings">
                 <div class="plans-actions">
-                  <h2>Find candidates</h2>
-                  <button id="plan-generate" class="button primary" type="button">Refresh candidates</button>
+                  <div><p class="workflow-step">Step 1</p><h2>Find clips and selects</h2></div>
+                  <button id="plan-generate" class="button primary" type="button">Find suggestions</button>
                 </div>
-                <p id="plan-candidate-status" class="plans-muted" role="status">General quality is always available. Add a brief for the second ordering.</p>
+                <p id="plan-candidate-status" class="plans-muted" role="status">Find strong shots. Add a brief to also rank them for this project's story.</p>
                 <div class="plans-columns">
-                  <section aria-labelledby="plan-general-title"><h3 id="plan-general-title">General</h3><p class="plans-muted">Strong-shot quality, independent of your style.</p><div id="plan-general" class="plans-stack"></div></section>
-                  <section aria-labelledby="plan-personal-title"><h3 id="plan-personal-title">Personalized</h3><p id="plan-personal-status" class="plans-muted">Add a brief. Without an eligible profile, this is general brief matching.</p><div id="plan-personal" class="plans-stack"></div></section>
+                  <section aria-labelledby="plan-general-title"><h3 id="plan-general-title">Strong shots</h3><p class="plans-muted">Technical quality, composition, and moment—independent of your preferences.</p><div id="plan-general" class="plans-stack"></div></section>
+                  <section aria-labelledby="plan-personal-title"><h3 id="plan-personal-title">For this project</h3><p id="plan-personal-status" class="plans-muted">Add a brief to match the story you want. Confirmed examples can refine this ordering.</p><div id="plan-personal" class="plans-stack"></div></section>
                 </div>
               </section>
               <section aria-labelledby="plan-sequence-title" class="plans-sequence">
-                <h2 id="plan-sequence-title">Sequence <span id="plan-item-count"></span></h2>
-                <p class="plans-muted">Add, edit, move, or remove items without training the model. “Pick for this context” records explicit feedback separately.</p>
+                <p class="workflow-step">Step 2</p>
+                <h2 id="plan-sequence-title">Arrange and trim <span id="plan-item-count"></span></h2>
+                <p class="plans-muted">Preview source clips, set In and Out, and move them into story order. Nothing here renders or changes source media.</p>
+                <div id="project-preview" class="project-preview" hidden aria-label="Source sequence preview">
+                  <div class="project-preview-stage">
+                    <video id="project-preview-video" preload="metadata" playsinline></video>
+                    <img id="project-preview-photo" alt="Project select preview" hidden />
+                    <p id="project-preview-empty" class="plans-muted">Choose a sequence item to preview it.</p>
+                  </div>
+                  <div class="project-preview-controls">
+                    <button id="project-preview-prev" class="button secondary small" type="button" aria-label="Previous item">←</button>
+                    <button id="project-preview-play" class="button primary small" type="button">Play clip</button>
+                    <button id="project-preview-next" class="button secondary small" type="button" aria-label="Next item">→</button>
+                    <input id="project-preview-scrubber" type="range" min="0" max="0" step="0.01" value="0" aria-label="Preview position" />
+                    <span id="project-preview-time" class="mono">0:00 / 0:00</span>
+                    <button id="project-preview-loop" class="button secondary small" type="button" aria-pressed="false">Loop off</button>
+                  </div>
+                  <p id="project-preview-label" class="plans-muted"></p>
+                </div>
                 <div id="plan-items" class="plans-stack"></div>
-                <p id="plan-items-empty" class="plans-muted">No selects yet. Add a candidate from either column.</p>
+                <p id="plan-items-empty" class="plans-muted">No sequence yet. Add a suggestion above to begin.</p>
               </section>
               <section class="plans-revisions" aria-labelledby="plan-revisions-title">
-                <h2 id="plan-revisions-title">Saved versions</h2>
+                <p class="workflow-step">Step 3</p>
+                <h2 id="plan-revisions-title">Save a version</h2>
                 <form id="plan-revision-form" class="plans-actions">
                   <label>Version note<input id="plan-revision-label" placeholder="First selects" /></label>
                   <button class="button secondary" type="submit">Save version</button>
                 </form>
                 <div id="plan-revisions" class="plans-stack"></div>
-                <p class="plans-muted">Rendering and export arrive in Task 021. This plan is not a rendered file or a publication approval.</p>
+                <p class="plans-muted">A saved version preserves this edit document. It is not a rendered file or publication approval.</p>
               </section>
             </section>
           </div>
@@ -230,11 +248,11 @@
         <header class="toolbar">
           <div>
             <p class="eyebrow">Previous work as evidence</p>
-            <h1 id="style-title">Style</h1>
+            <h1 id="style-title">Preferences</h1>
           </div>
           <div class="toolbar-actions">
-            <button id="style-retrain" class="button secondary" type="button">Retrain profile</button>
-            <button id="style-reset" class="button danger" type="button">Reset profile</button>
+            <button id="style-retrain" class="button secondary" type="button">Update recommendations</button>
+            <button id="style-reset" class="button danger" type="button">Reset recommendations</button>
           </div>
         </header>
 
@@ -242,7 +260,7 @@
 
         <section id="style-content" class="library-content style-content" aria-live="polite">
           <div class="style-status-card">
-            <p class="eyebrow">Ranking profile</p>
+            <p class="eyebrow">How recommendations are ordered</p>
             <p id="style-status-line" class="style-status-line general">General model only</p>
             <p id="style-status-meta" class="style-status-meta"></p>
           </div>
@@ -253,7 +271,7 @@
             <input id="style-set-context" type="text" autocomplete="off" spellcheck="false"
               placeholder="Context (default)" aria-label="Context key" />
             <input id="style-set-description" type="text" autocomplete="off"
-              placeholder="What this set says about your style" aria-label="Description" />
+              placeholder="What this set says about your creative taste" aria-label="Description" />
             <label class="style-scope-control"><span class="sr-only">Set scope</span>
               <select id="style-set-scope" aria-label="Set scope">
                 <option value="whole_set">Whole set counts</option>
@@ -287,6 +305,8 @@
 
         <section class="review-controls">
           <form id="review-filters" class="review-filters">
+            <input id="filter-search" type="search" autocomplete="off" spellcheck="false"
+              placeholder="Search file names…" aria-label="Search file names" />
             <label class="filter-control"><span class="sr-only">Kind</span>
               <select id="filter-kind" aria-label="Kind">
                 <option value="">Photos + shots</option>
@@ -294,7 +314,12 @@
                 <option value="shot">Shots</option>
               </select>
             </label>
-            <label class="filter-control"><span class="sr-only">Status</span>
+            <button id="filter-apply" class="button primary small" type="submit">Show results</button>
+            <button id="filter-more" class="button secondary small" type="button" aria-expanded="false" aria-controls="review-advanced-filters">
+              More filters <span id="filter-more-count" aria-hidden="true"></span>
+            </button>
+            <div id="review-advanced-filters" class="review-advanced-filters" hidden>
+              <label class="filter-control"><span class="sr-only">Status</span>
               <select id="filter-status" aria-label="Status">
                 <option value="">Any status</option>
                 <option value="done">Done</option>
@@ -304,39 +329,40 @@
                 <option value="transcribed">Transcribed</option>
                 <option value="failed">Failed</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Usable</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Usable</span>
               <select id="filter-usable" aria-label="Usable">
                 <option value="">Usable any</option>
                 <option value="true">Usable</option>
                 <option value="false">Unusable</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Blur required</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Blur required</span>
               <select id="filter-blur" aria-label="Blur required">
                 <option value="">Blur any</option>
                 <option value="true">Blur required</option>
                 <option value="false">No blur needed</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Collection</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Collection</span>
               <select id="filter-collection" aria-label="Collection">
                 <option value="">Any collection</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Version stack</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Version stack</span>
               <select id="filter-stack" aria-label="Version stack">
                 <option value="">Any stack</option>
               </select>
-            </label>
-            <input id="filter-context" type="text" autocomplete="off" spellcheck="false"
-              placeholder="Context" aria-label="Context key" />
-            <input id="filter-search" type="search" autocomplete="off" spellcheck="false"
-              placeholder="File name…" aria-label="Search file names" />
-            <button id="filter-apply" class="button secondary" type="submit">Apply</button>
-            <button id="filter-reset" class="button secondary" type="button">Reset</button>
+              </label>
+              <input id="filter-context" type="text" autocomplete="off" spellcheck="false"
+                placeholder="Purpose" aria-label="Purpose key" />
+              <button id="filter-reset" class="button secondary small" type="button">Clear all</button>
+            </div>
           </form>
-          <form id="saved-search-form" class="saved-search-form">
+          <div id="review-active-filters" class="review-active-filters" aria-live="polite" hidden></div>
+          <details id="saved-search-tools" class="saved-search-tools">
+            <summary>Saved searches</summary>
+            <form id="saved-search-form" class="saved-search-form">
             <label class="filter-control"><span class="sr-only">Saved searches</span>
               <select id="saved-search-select" aria-label="Saved searches">
                 <option value="">Saved searches…</option>
@@ -347,7 +373,8 @@
             <input id="saved-search-name" type="text" autocomplete="off" spellcheck="false"
               placeholder="Save current filters as…" aria-label="Saved search name" />
             <button id="saved-search-save" class="button secondary small" type="submit">Save</button>
-          </form>
+            </form>
+          </details>
         </section>
 
         <div id="batch-bar" class="batch-bar" hidden>
@@ -390,6 +417,13 @@
           <img id="detail-photo" alt="Selected photo" hidden />
           <div id="player-hint" class="player-hint" aria-hidden="true">Space play/pause · L loop · ← → shots</div>
         </div>
+        <div id="detail-playback" class="detail-playback" hidden>
+          <button id="detail-play" class="button primary small" type="button">Play</button>
+          <button id="detail-go-in" class="button secondary small" type="button">Go to In</button>
+          <input id="detail-scrubber" type="range" min="0" max="0" step="0.01" value="0" aria-label="Clip position" />
+          <span id="detail-position" class="mono">0:00 / 0:00</span>
+          <button id="detail-loop" class="button secondary small" type="button" aria-pressed="false">Loop off</button>
+        </div>
         <div class="detail-times">
           <span id="detail-timecodes" class="mono"></span>
           <span id="detail-shot-index" class="detail-shot-index"></span>
@@ -401,7 +435,7 @@
           <button id="compare-open" class="button secondary" type="button">Compare…</button>
         </div>
         <div class="detail-feedback" aria-label="Editorial feedback">
-          <span class="eyebrow">Teach my style</span>
+          <span class="eyebrow">Editorial feedback</span>
           <button id="feedback-pick" class="button secondary" type="button">Pick</button>
           <button id="feedback-reject" class="button secondary" type="button">Reject</button>
           <label class="rating-control"><span class="sr-only">Quality rating</span>
@@ -411,8 +445,8 @@
             </select>
           </label>
         </div>
-        <div class="detail-style" aria-label="Style evidence">
-          <span class="eyebrow">Style evidence</span>
+        <div class="detail-style" aria-label="Preference evidence">
+          <span class="eyebrow">Preference evidence</span>
           <select id="detail-style-set" aria-label="Reference set">
             <option value="">No reference sets yet</option>
           </select>
@@ -499,7 +533,7 @@
     </dialog>
 
     <dialog id="plan-confirm" class="doctor-dialog" aria-labelledby="plan-confirm-title">
-      <h2 id="plan-confirm-title">Confirm plan action</h2>
+      <h2 id="plan-confirm-title">Confirm project action</h2>
       <p id="plan-confirm-copy"></p>
       <form method="dialog" class="plans-actions">
         <button class="button secondary" value="cancel" autofocus>Keep editing</button>

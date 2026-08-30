@@ -37,6 +37,12 @@
     video: $("#detail-video"),
     photo: $("#detail-photo"),
     playerHint: $("#player-hint"),
+    playback: $("#detail-playback"),
+    play: $("#detail-play"),
+    goIn: $("#detail-go-in"),
+    scrubber: $("#detail-scrubber"),
+    position: $("#detail-position"),
+    loop: $("#detail-loop"),
     timecodes: $("#detail-timecodes"),
     shotIndex: $("#detail-shot-index"),
     copy: $("#copy-timecodes"),
@@ -89,6 +95,12 @@
   const fileName = (path) => path.split(/[\\/]/).at(-1) || path;
   const displayScore = (score) => Math.round(Math.min(1, Math.max(0, score)) * 100);
   const signedPercent = (value) => `${value >= 0 ? "+" : ""}${Math.round(value * 100)}`;
+  const shortTime = (seconds) => {
+    const total = Math.max(0, Number(seconds) || 0);
+    const minutes = Math.floor(total / 60);
+    const remainder = Math.floor(total % 60);
+    return `${minutes}:${pad(remainder)}`;
+  };
 
   function showMessage(text, { error = false, action = null } = {}) {
     clearTimeout(state.messageTimer);
@@ -225,7 +237,7 @@
       ["semantic match", breakdown.semantic],
       ["transcript match", breakdown.transcript_boost],
       ["general quality", breakdown.general_aesthetic],
-      ["your style", breakdown.personal_affinity],
+      ["creative fit", breakdown.personal_affinity],
       ["context fit", breakdown.context_fit],
       ["safety penalty", breakdown.penalties],
       [breakdown.editorial < 0 ? "editorial penalty" : "editorial context", breakdown.editorial],
@@ -306,7 +318,7 @@
         ? `Strong ${Math.round(result.aesthetic_score * 100)}`
         : "";
       const personal = Number.isFinite(result.personal_style_score)
-        ? `Style ${signedPercent(result.personal_style_score)}`
+        ? `Preference fit ${signedPercent(result.personal_style_score)}`
         : "";
       const styleLine = document.createElement("div");
       styleLine.className = "result-style";
@@ -383,6 +395,7 @@
     el.video.hidden = isPhoto;
     el.photo.hidden = !isPhoto;
     el.playerHint.hidden = isPhoto;
+    el.playback.hidden = isPhoto;
     el.exportClip.hidden = isPhoto;
     el.prev.hidden = isPhoto;
     el.next.hidden = isPhoto;
@@ -398,7 +411,7 @@
       if (Number.isFinite(d.technicalScore)) scores.push(`technical ${Math.round(d.technicalScore * 100)}`);
       if (Number.isFinite(d.compositionScore)) scores.push(`design ${Math.round(d.compositionScore * 100)}`);
       if (Number.isFinite(d.momentScore)) scores.push(`moment ${Math.round(d.momentScore * 100)}`);
-      if (Number.isFinite(d.personalStyleScore)) scores.push(`your style ${signedPercent(d.personalStyleScore)}`);
+      if (Number.isFinite(d.personalStyleScore)) scores.push(`preference fit ${signedPercent(d.personalStyleScore)}`);
       el.shotIndex.textContent = scores.join(" · ") || "Unreviewed";
       el.photo.src = fileSrc(d.photoPath);
       renderPhotoContext(d);
@@ -413,7 +426,7 @@
     if (Number.isFinite(d.technicalScore)) analysis.push(`technical ${Math.round(d.technicalScore * 100)}`);
     if (Number.isFinite(d.compositionScore)) analysis.push(`design ${Math.round(d.compositionScore * 100)}`);
     if (Number.isFinite(d.momentScore)) analysis.push(`moment ${Math.round(d.momentScore * 100)}`);
-    if (Number.isFinite(d.personalStyleScore)) analysis.push(`your style ${signedPercent(d.personalStyleScore)}`);
+    if (Number.isFinite(d.personalStyleScore)) analysis.push(`preference fit ${signedPercent(d.personalStyleScore)}`);
     el.shotIndex.textContent = [`shot ${d.idx + 1} of ${d.shotCount}`, ...analysis].join(" · ");
     el.prev.disabled = d.idx <= 0;
     el.next.disabled = d.idx + 1 >= d.shotCount;
@@ -431,6 +444,10 @@
       el.video.src = src;
       el.video.load();
     }
+    el.scrubber.max = String(length);
+    el.scrubber.value = "0";
+    el.position.textContent = `${shortTime(0)} / ${shortTime(length)}`;
+    updatePlayButton();
     seekAndPlay();
   }
 
@@ -454,9 +471,39 @@
     else el.video.addEventListener("loadedmetadata", start, { once: true });
   }
 
+  function updatePlayButton() {
+    el.play.textContent = el.video.paused ? "Play" : "Pause";
+    el.play.setAttribute("aria-label", el.video.paused ? "Play clip" : "Pause clip");
+  }
+
+  function updatePlaybackPosition() {
+    const d = state.detail;
+    if (!d || d.kind !== "video") return;
+    const length = Math.max(0, d.endS - d.startS);
+    const relative = Math.max(0, Math.min(length, el.video.currentTime - d.startS));
+    el.scrubber.value = String(relative);
+    el.position.textContent = `${shortTime(relative)} / ${shortTime(length)}`;
+  }
+
+  function setLoop(loop) {
+    state.loop = loop;
+    el.loop.setAttribute("aria-pressed", String(loop));
+    el.loop.textContent = loop ? "Loop on" : "Loop off";
+  }
+
+  function toggleDetailPlayback() {
+    const d = state.detail;
+    if (!d || d.kind !== "video") return;
+    if (el.video.paused) {
+      if (el.video.currentTime < d.startS || el.video.currentTime >= d.endS - 0.02) el.video.currentTime = d.startS;
+      el.video.play().catch(() => {});
+    } else el.video.pause();
+  }
+
   el.video.addEventListener("timeupdate", () => {
     const d = state.detail;
     if (!d) return;
+    if (el.video.currentTime < d.startS) el.video.currentTime = d.startS;
     if (el.video.currentTime >= d.endS - 0.02) {
       if (state.loop) {
         el.video.currentTime = d.startS;
@@ -465,7 +512,10 @@
         el.video.currentTime = Math.max(d.startS, d.endS - 0.04);
       }
     }
+    updatePlaybackPosition();
   });
+  el.video.addEventListener("play", updatePlayButton);
+  el.video.addEventListener("pause", updatePlayButton);
   el.video.addEventListener("error", () => {
     showMessage(`Could not play ${fileName(state.detail?.videoPath || "")}. Is the drive mounted?`, { error: true });
   });
@@ -604,8 +654,9 @@
       el.input.select();
       return;
     }
-    if (state.view !== "search") return;
-    const inInput = event.target === el.input;
+    const inInput = event.target instanceof HTMLInputElement
+      || event.target instanceof HTMLTextAreaElement
+      || event.target instanceof HTMLSelectElement;
     const detailOpen = !el.detail.hidden;
 
     if (event.key === "Escape") {
@@ -618,18 +669,19 @@
       return;
     }
     if (detailOpen) {
+      if (inInput) return;
       if (state.detail?.kind === "photo") return;
       if (event.key === "ArrowLeft") { event.preventDefault(); stepShot(-1); }
       else if (event.key === "ArrowRight") { event.preventDefault(); stepShot(1); }
       else if (event.key === " " && !inInput) {
         event.preventDefault();
-        if (el.video.paused) el.video.play().catch(() => {}); else el.video.pause();
+        toggleDetailPlayback();
       } else if (event.key.toLowerCase() === "l" && !inInput) {
-        state.loop = !state.loop;
-        showMessage(state.loop ? "Loop on" : "Loop off");
+        setLoop(!state.loop);
       }
       return;
     }
+    if (state.view !== "search") return;
     if (!state.results.length) return;
     const columns = 4;
     const moves = { ArrowDown: columns, ArrowUp: -columns, ArrowRight: 1, ArrowLeft: -1 };
@@ -668,6 +720,18 @@
   });
   el.top.addEventListener("change", () => state.query && runSearch());
   el.detailClose.addEventListener("click", closeDetail);
+  el.play.addEventListener("click", toggleDetailPlayback);
+  el.goIn.addEventListener("click", () => {
+    if (state.detail?.kind !== "video") return;
+    el.video.currentTime = state.detail.startS;
+    updatePlaybackPosition();
+  });
+  el.scrubber.addEventListener("input", () => {
+    if (state.detail?.kind !== "video") return;
+    el.video.currentTime = state.detail.startS + Number(el.scrubber.value);
+    updatePlaybackPosition();
+  });
+  el.loop.addEventListener("click", () => setLoop(!state.loop));
   el.copy.addEventListener("click", copyTimecodes);
   el.exportClip.addEventListener("click", exportClip);
   el.reveal.addEventListener("click", revealFile);

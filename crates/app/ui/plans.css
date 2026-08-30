@@ -15,6 +15,19 @@
 .plans-fields, .plans-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .plans-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .plans-candidates, .plans-sequence, .plans-revisions { border-top: 1px solid #35353d; margin-top: 22px; padding-top: 8px; }
+.workflow-step { margin: 10px 0 2px; color: #719ef8; font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.project-preview { margin: 14px 0; padding: 12px; border: 1px solid #3a3a44; border-radius: 9px; background: #18181c; }
+.project-preview-stage { position: relative; display: grid; place-items: center; min-height: 240px; overflow: hidden; border-radius: 7px; background: #0b0b0d; }
+.project-preview-stage video, .project-preview-stage img { display: block; width: 100%; max-height: 420px; object-fit: contain; }
+.project-preview-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.project-preview-controls input[type="range"] { flex: 1 1 180px; width: 100%; accent-color: #4f8cff; }
+#project-preview-time { color: #aaaab4; font-size: 11px; white-space: nowrap; }
+#project-preview-label { margin: 8px 0 0; }
+.plans-item.previewing { border-color: #719ef8; box-shadow: 0 0 0 1px rgb(113 158 248 / 20%); }
+.plans-item-heading { display: flex; align-items: center; gap: 8px; }
+.plans-item-heading strong { margin-right: auto; }
+.plans-item-options { padding: 8px 10px; border: 1px solid #303038; border-radius: 6px; background: #1b1b20; }
+.plans-item-options > summary, .plans-item > details > summary { color: #aaaab4; cursor: pointer; }
 .plans-candidate, .plans-item { min-width: 0; border: 1px solid #35353d; border-radius: 7px; background: #202026; padding: 12px; overflow-wrap: anywhere; }
 .plans-candidate img { width: 100%; height: 100px; object-fit: contain; background: #141416; border-radius: 3px; }
 .plans-candidate strong, .plans-item strong { display: block; margin: 6px 0; }

@@ -18,6 +18,7 @@ does not support hard links, export fails safely; choose a supported local files
 - Blueprint: `docs/project-blueprint.md`
 - DAM and feedback direction: `docs/dam-feedback-blueprint.md`
 - Review + build protocol: `docs/blueprint-review.md`
+- Cross-platform runtime roadmap: `docs/platform-architecture.md`
 - Agents start here: `docs/HANDOFF.md`
 - Testing on the Mac: `docs/testing-on-macbook.md`
 

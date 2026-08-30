@@ -1,8 +1,65 @@
 # TASK-021 — implementation plan and progress
 
-Status: **in progress, safety foundation only**. The parent acceptance in `TASK-021.md`
+Status: **in progress, durable safety/recipe foundation plus UX work**. The parent acceptance in `TASK-021.md`
 is unchanged. This extends the existing engineering and editorial/DAM blueprints; it does
 not replace them. Task 022 stays next, after the render-golden human review.
+
+## User-review UX requirements (2026-08-29)
+
+These are release acceptance requirements, not optional follow-up polish:
+
+- Replace the abstract **Plans** presentation with a clear **Projects / reel editor** workflow:
+  create a project, find or add selects, arrange the sequence, preview the actual in/out edits,
+  choose an export preset and destination, then render. The UI must always distinguish saved edit
+  intent from rendered media.
+- Make reel playback feel continuous and controllable. At minimum, provide an obvious play/pause
+  control, scrubber/time readout, in/out preview, loop state and previous/next sequence navigation;
+  playback must remain inside the selected boundaries and keyboard shortcuts must have visible
+  equivalents.
+- Reduce Review filter and dropdown clutter through progressive disclosure. Keep the common media,
+  decision and search controls visible; move collection, version-stack, privacy and saved-search
+  controls behind a clearly labeled secondary surface; show active filters as removable summaries
+  and make reset behavior obvious.
+- Rename the user-facing **Style** area to **Preferences** (with “creative taste” explanatory copy).
+  “Style” is reserved for visual treatment such as filters and color grading, and the learning
+  surface must not imply that it edits media appearance.
+- Add deterministic browser-harness coverage for the renamed navigation, progressive filters and
+  boundary-safe reel playback/editor interactions. The Task 023 clean-machine test must exercise
+  the same natural path without requiring knowledge of internal terms such as plan, recipe or
+  context key.
+
+## Cross-platform architecture requirements (2026-08-29)
+
+Task 021 remains the current Mac/product milestone, including its human render-golden stop, while
+introducing the portable boundaries in `docs/platform-architecture.md`:
+
+- Recipes and presets describe intended media results, never `videotoolbox`, CUDA, NVENC, CoreML,
+  Metal or another platform backend. Manifests record the actual provider/encoder and fallback.
+- CPU correctness is mandatory. macOS uses CoreML/Metal and VideoToolbox where validated; Windows
+  may later use optional CUDA/DirectML and NVENC while retaining CPU/software fallbacks.
+- PyTorch is a development/training/export tool. Shipped model identity is a validated ONNX
+  artifact and installing Crush never requires Python, PyTorch, CUDA Toolkit or compiler tools.
+- Source decode, media probe/render, process supervision and exclusive publication get narrow
+  platform-neutral contracts. ImageIO and Unix process groups remain macOS adapters, not recipe
+  semantics.
+- Goldens assert versioned output properties and tolerances rather than incidental bytes from one
+  hardware encoder. Source hashes, frozen intent, provenance and no-clobber behavior remain exact.
+
+## Task 022 compatibility discovered from Reel Studio
+
+The Task 021 schema/renderer must leave an honest path for the real Reel Studio recipe contract:
+
+- global theme/vibe/music/target length/beat snap/aspect/music volume/watermark/cover;
+- ordered per-item relative in/out, static and keyframed crop, caption/position, transition,
+  speed, motion, natural-audio volume and grade controls; and
+- exact conversion from segment-relative timing to original-source timing.
+
+Unsupported treatments must remain explicit capability errors, but Task 021 cannot pass its final
+gate while the documented fields needed by Task 022 are silently discarded. Task 022 must also add
+first-class imported/manual source spans because a historical segment can cross auto scene cuts,
+and an honest historical/imported provenance type rather than mislabeling prior human choices as
+general or personalized. Those importer migrations stay in Task 022; this task keeps frozen recipe
+and source contracts capable of carrying them.
 
 ## Implemented first slice
 
@@ -22,9 +79,25 @@ there is no overwriting-copy fallback. Process death can leave a hidden staging 
 durable job recovery below must manage those directories before resumability is claimed.
 The existing clip verifier does not constitute the full color/audio/frame golden matrix.
 
+## Implemented durable store slice
+
+- Schema v10 stores append-only recipe versions, immutable owner-scoped frozen job inputs,
+  lifecycle attempts, verified outputs and separately checksummed manifests.
+- Queueing freezes a portable source snapshot, explicit model identities/`not_used` values,
+  recipe identity/schema and an optional append-only plan revision. Reel recipes require a plan
+  revision; photo/clip recipes reject one.
+- Strict schema v1 validation accepts only documented crop/rotation/basic-grade/audio/cut/preset
+  values and rejects unknown fields or treatments. Advanced reel semantics listed above require a
+  later schema version before Task 021 can pass; they are not silently ignored.
+- State transitions enforce queued -> running -> verifying -> done, with failed/cancelled attempts
+  safely retryable under a new attempt number. Progress cannot move backward or reach 100% before
+  verification. Terminal attempts and frozen job inputs are immutable at the database layer.
+- Store integration tests cover migration, owner isolation, immutable inputs, portable snapshots,
+  unsupported intent, progress/state guards, retry/cancel and verified output round trips.
+
 ## Remaining implementation, in order
 
-### 1. Durable recipe, source snapshot and job contracts
+### 1. Durable recipe, source snapshot and job contracts — foundation implemented
 
 - Add an owner-scoped migration and typed store APIs for immutable, versioned recipes,
   render jobs/attempts and verified outputs. Keep append-only plan revision identity alongside
@@ -38,6 +111,10 @@ The existing clip verifier does not constitute the full color/audio/frame golden
 - Persist queued/running/verifying/done/failed/cancelled state and progress. Restart an
   incomplete attempt from the frozen recipe with tracked staging; never trust a partial
   output merely because its filename exists. Resume must be idempotent.
+
+Remaining in this section: connect the store state machine to pipeline execution/recovery, define
+the advanced reel schema required above, recheck frozen hashes at execution, and reconcile tracked
+staging after process/app death.
 
 ### 2. Photo derivatives and documented presets
 
@@ -70,7 +147,7 @@ The existing clip verifier does not constitute the full color/audio/frame golden
 - Every output manifest includes source IDs/hashes, frozen recipe and plan revision,
   relevant model/tool versions, actual command/options, output checksum, and measured
   verification results. Validate manifests on resume and completed-output reuse.
-- Expose render/preset/destination actions from Plans, plus job progress, cancellation,
+- Expose render/preset/destination actions from Projects, plus job progress, cancellation,
   retry/resume, errors and verified output/manifest locations. Never imply that editing
   a plan already rendered the media. Exporting alone is not learning approval.
 
@@ -96,3 +173,6 @@ The existing clip verifier does not constitute the full color/audio/frame golden
   smoke remains ignored. The targeted clip-export test passes again with source/existing
   output hash assertions. Format and diff checks pass. PR results are recorded separately
   from the unimplemented render-golden acceptance above.
+- `cargo test -p crush-store`: 35 tests pass, including the schema-v10 render contract, immutable
+  frozen inputs, owner isolation, unsupported-treatment rejection, retry/cancel and verified
+  output/manifest state.

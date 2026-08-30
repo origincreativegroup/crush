@@ -72,6 +72,24 @@ Next: **TASK-021** non-destructive recipes and media rendering per
 safety foundation. Do not proceed to 022 or call 021 complete until the full render contract and
 John's render-golden review are satisfied; 023 retains its clean-machine human stop.
 
+The 2026-08-29 user review is part of acceptance for this continuation: user-facing Plans becomes
+Projects with a guided selects -> sequence -> preview -> export flow; Style becomes Preferences
+and is described as creative-taste evidence, never color treatment; Review filters use progressive
+disclosure and removable active summaries; reel playback exposes boundary-safe play/pause,
+scrubbing, looping and sequence navigation. Browser and clean-machine tests must use this language
+and workflow.
+
+Cross-platform direction is now fixed in `docs/platform-architecture.md`: keep the production core
+Rust-native and CPU-correct, preserve CoreML/Metal on Mac, add optional CUDA/DirectML/NVENC in the
+later Windows track, and use PyTorch only for training/evaluation plus validated ONNX export.
+Task 021 recipes and manifests must remain backend-neutral now. Tasks 028–031 are the additive
+Windows delivery track; they do not replace or bypass Tasks 021–023 or their human gates.
+
+Task 022 reconnaissance against `/Users/origin/GitHub/reel-studio-main` found two required schema
+changes for that task: exact imported/manual video spans that survive re-splitting, and honest
+historical/imported plan provenance. Its real recipe fields are recorded in the Task 021/022 plans.
+Do not start importer writes before the Task 021 render-golden review.
+
 ## Previous implementation state (2026-08-28)
 
 - TASK-001 is complete: workspace build, all tests, Clippy with warnings denied, and rustfmt pass
