@@ -4,12 +4,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crush_core::cancellation::CancellationToken;
+use crush_core::paths::AppPaths;
+use crush_core::Config;
 use crush_core::DEFAULT_OWNER_ID;
 use crush_pipeline::reel_studio_import::{import_reel_studio, ImportOptions};
-use crush_pipeline::sha256_file;
+use crush_pipeline::{sha256_file, Pipeline};
 use crush_store::{
     MediaKind, PlanOrigin, RenderRecipeKind, Shot, SpanBoundaryBasis, Store, Video, VideoStatus,
 };
+use crush_store::{NewRenderJob, RenderRecipe};
 use rusqlite::Connection;
 
 fn fixture(name: &str) -> PathBuf {
@@ -37,7 +41,17 @@ fn indexed_video(id: &str, path: &Path, duration_s: Option<f64>) -> Video {
 }
 
 /// (segment_id, clip_id, tc_in, tc_out, description, quality, standout, used_in, crop_x)
-type SegmentRow<'a> = (&'a str, &'a str, f64, f64, &'a str, i64, i64, &'a str, f64);
+type SegmentRow<'a> = (
+    &'a str,
+    &'a str,
+    f64,
+    f64,
+    &'a str,
+    i64,
+    i64,
+    &'a str,
+    Option<f64>,
+);
 
 /// Reel Studio's published schema, verbatim from `schema/schema.sql`.
 fn write_catalogue(path: &Path, rows: &[SegmentRow<'_>]) {
@@ -123,7 +137,7 @@ fn dry_run_reports_mappings_then_apply_is_idempotent_and_honest() {
                 4,
                 1,
                 "reel-01",
-                0.42,
+                Some(0.42),
             ),
             (
                 "V1-0002_S1",
@@ -134,7 +148,7 @@ fn dry_run_reports_mappings_then_apply_is_idempotent_and_honest() {
                 3,
                 0,
                 "",
-                0.5,
+                Some(0.5),
             ),
             (
                 "V1-0002_S2",
@@ -145,7 +159,7 @@ fn dry_run_reports_mappings_then_apply_is_idempotent_and_honest() {
                 2,
                 0,
                 "",
-                0.5,
+                Some(0.5),
             ),
             (
                 "V1-0003_S1",
@@ -156,7 +170,7 @@ fn dry_run_reports_mappings_then_apply_is_idempotent_and_honest() {
                 5,
                 1,
                 "reel-02",
-                0.5,
+                Some(0.5),
             ),
         ],
     );
@@ -395,5 +409,155 @@ fn dry_run_reports_mappings_then_apply_is_idempotent_and_honest() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+/// An imported historical project renders through Task 021's durable ordered-reel path using
+/// span sources. Uses the bundled FFmpeg, so it runs on macOS only.
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_span_project_renders_through_the_reel_executor() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let mut store = Store::open(&data_dir).unwrap();
+    let speech = fixture("synthetic-speech.mp4");
+    let source_hash = sha256_file(&speech).unwrap();
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &indexed_video("video-speech", &speech, Some(5.0)),
+        )
+        .unwrap();
+    let catalogue = temp.path().join("clips.db");
+    write_catalogue(
+        &catalogue,
+        &[
+            (
+                "V1-0002_S1",
+                "V1-0002",
+                0.0,
+                2.0,
+                "opening",
+                4,
+                1,
+                "reel-01",
+                None,
+            ),
+            (
+                "V1-0002_S2",
+                "V1-0002",
+                3.0,
+                5.0,
+                "closing",
+                4,
+                0,
+                "reel-01",
+                None,
+            ),
+        ],
+    );
+    let recipes_dir = temp.path().join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+    let recipe = recipe_json(
+        &recipes_dir,
+        "two-cuts.json",
+        r#"{"reel": {"theme": "Two cuts", "sequence": [
+            {"id": "V1-0002_S1", "in": 0.25, "out": 1.25},
+            {"id": "V1-0002_S2", "in": 0.25, "out": 1.25}
+        ]}}"#,
+    );
+    let mut options = ImportOptions::dry_run(&catalogue);
+    options.originals = vec![speech.parent().unwrap().to_path_buf()];
+    options.recipes = vec![recipe];
+    options.apply = true;
+    let report = import_reel_studio(&mut store, &options).unwrap();
+    // The shared catalogue helper also lists an unindexed and a missing source; the speech clip
+    // and its recipe themselves import cleanly.
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|issue| issue.subject == "V1-0001" || issue.subject == "V1-0003"),
+        "{:?}",
+        report.issues
+    );
+    let plan = store.plan_list(DEFAULT_OWNER_ID).unwrap().remove(0);
+    let items = store.plan_items(DEFAULT_OWNER_ID, &plan.id).unwrap();
+    assert_eq!(items.len(), 2);
+    let revision = store.plan_revisions(DEFAULT_OWNER_ID, &plan.id).unwrap()[0].revision;
+
+    // Queue an ordered reel (v1 executor contract) over the imported span items.
+    let now = chrono::Utc::now();
+    store
+        .render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: "imported-reel-mp4".to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::Reel,
+                name: "Imported reel MP4".to_owned(),
+                schema_json: serde_json::json!({
+                    "schema_version": 1, "kind": "reel",
+                    "transition": {"kind": "cut"}, "audio": {"mode": "source"},
+                    "output": {"preset": "mp4-h264-sdr-v1"}
+                })
+                .to_string(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    let destination = temp.path().join("imported-reel.mp4");
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-imported-reel".to_owned(),
+                recipe_id: "imported-reel-mp4".to_owned(),
+                recipe_version: 1,
+                plan_id: Some(plan.id.clone()),
+                plan_revision: Some(revision),
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": plan.context_key,
+                    "selection_provenance": {"origin": "historical"},
+                    "sources": items.iter().map(|item| serde_json::json!({
+                        "media_kind": "span",
+                        "media_id": item.media_id,
+                        "source_id": "video-speech",
+                        "sha256": source_hash,
+                        "path": speech.to_string_lossy(),
+                    })).collect::<Vec<_>>()
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {"clip": "not_used", "aesthetic": "not_used", "personal_style": "not_used"}
+                })
+                .to_string(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    drop(store);
+    let mut config = Config::default();
+    config.data_dir = Some(data_dir.clone());
+    let paths = AppPaths::resolve(config.data_dir.as_ref()).unwrap();
+    let output = Pipeline::new(config, paths, CancellationToken::default())
+        .execute_render_job(DEFAULT_OWNER_ID, "render-imported-reel")
+        .unwrap();
+    assert!(Path::new(&output.output_path).is_file());
+    assert!(Path::new(&output.manifest_path).is_file());
+    let duration = output.duration_s.expect("reel duration");
+    assert!(
+        (duration - 2.0).abs() < 0.2,
+        "two one-second cuts, got {duration}"
+    );
+    assert_eq!(
+        sha256_file(&speech).unwrap(),
+        source_hash,
+        "source untouched"
     );
 }

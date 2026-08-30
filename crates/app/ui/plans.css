@@ -50,6 +50,8 @@
 .plans-candidate strong, .plans-item strong { display: block; margin: 6px 0; }
 .plans-pill { display: inline-block; border: 1px solid #546171; border-radius: 4px; padding: 3px 6px; margin: 4px 0; font-size: 11px; color: #bed2ef; background: #253041; }
 .plans-pill.personal { border-color: #73658d; color: #d3c2ef; background: #342a43; }
+.plans-pill.historical { border-color: #8d7a4a; color: #efdfb0; background: #3f3521; }
+.plans-pill.imported { border-color: #4a7a8d; color: #b0dfef; background: #213a3f; }
 .plans-breakdown { font-variant-numeric: tabular-nums; margin: 8px 0; color: #c0c0cc; font-size: 11px; line-height: 1.6; }
 .plans-item .plans-fields { margin: 10px 0; }
 .plans-item details { margin-top: 10px; }

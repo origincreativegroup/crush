@@ -704,7 +704,28 @@ pub fn import_reel_studio(
                         crop_x: span.crop_x,
                         grade_json: None,
                         reason: format!("Reel Studio segment {segment_id} (historical choice)"),
-                        signals_json: "{}".to_owned(),
+                        signals_json: json!({
+                            "candidate": {
+                                "kind": "span",
+                                "path": store
+                                    .video_by_id(DEFAULT_OWNER_ID, &span.video_id)?
+                                    .map(|video| video.path)
+                                    .unwrap_or_default(),
+                                "start_s": span.start_s,
+                                "end_s": span.end_s,
+                                "description": span.description,
+                                "boundary_basis": crush_store::span_boundary_basis_to_str(span.boundary_basis),
+                                "boundary_tolerance_s": span.boundary_tolerance_s,
+                            },
+                            "historical": {
+                                "source": IMPORT_SOURCE,
+                                "external_id": segment_id,
+                                "used_in": span.used_in,
+                                "quality": span.quality,
+                                "standout": span.standout,
+                            },
+                        })
+                        .to_string(),
                         origin: PlanOrigin::Historical,
                         rank: None,
                         profile_version: None,

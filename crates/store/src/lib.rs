@@ -2886,7 +2886,7 @@ impl Store {
             RenderRecipeKind::Reel => ensure!(
                 sources.iter().all(|source| matches!(
                     source.get("media_kind").and_then(serde_json::Value::as_str),
-                    Some("photo" | "shot")
+                    Some("photo" | "shot" | "span")
                 )),
                 "reel recipes require owned photo or shot sources"
             ),
@@ -2934,6 +2934,23 @@ impl Store {
                         .video_by_id(owner_id, &shot.video_id)?
                         .with_context(|| {
                             format!("render shot {media_id} has no owned source video")
+                        })?;
+                    (video.sha256, video.path)
+                }
+                "span" => {
+                    let span = self
+                        .manual_span_by_id(owner_id, media_id)?
+                        .with_context(|| {
+                            format!("render span {media_id} is not owned by {owner_id}")
+                        })?;
+                    ensure!(
+                        source_id == span.video_id,
+                        "render span source_id must identify its owning video"
+                    );
+                    let video = self
+                        .video_by_id(owner_id, &span.video_id)?
+                        .with_context(|| {
+                            format!("render span {media_id} has no owned source video")
                         })?;
                     (video.sha256, video.path)
                 }
@@ -7043,7 +7060,7 @@ fn validate_source_snapshot_json(value: &str) -> anyhow::Result<()> {
             .and_then(serde_json::Value::as_str)
             .context("render source media_kind is required")?;
         ensure!(
-            matches!(media_kind, "photo" | "shot" | "video"),
+            matches!(media_kind, "photo" | "shot" | "video" | "span"),
             "unsupported render source media_kind {media_kind:?}"
         );
         let media_id = required_json_string(source, "media_id", "render source")?;
