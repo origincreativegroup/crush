@@ -361,6 +361,8 @@ impl Runner {
             OsString::from("1"),
             OsString::from("-i"),
             concat_list.as_os_str().to_owned(),
+            OsString::from("-t"),
+            OsString::from(format!("{:.9}", validated.duration_s)),
             OsString::from("-map"),
             OsString::from("0:v:0"),
             OsString::from("-map"),

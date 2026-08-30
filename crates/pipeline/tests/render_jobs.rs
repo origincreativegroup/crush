@@ -134,6 +134,29 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn preserve_review_artifact(source: &Path, name: &str) {
+    let Ok(directory) = std::env::var("CRUSH_RENDER_REVIEW_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    fs::create_dir_all(&directory).unwrap();
+    let destination = directory.join(name);
+    assert!(
+        !destination.exists(),
+        "review artifact already exists: {}",
+        destination.display()
+    );
+    fs::copy(source, &destination).unwrap();
+}
+
+fn preserve_review_output(output: &crush_store::RenderOutput, name: &str) {
+    preserve_review_artifact(Path::new(&output.output_path), name);
+    preserve_review_artifact(
+        Path::new(&output.manifest_path),
+        &format!("{name}.crush-manifest.json"),
+    );
+}
+
 #[test]
 fn frozen_photo_job_publishes_verified_output_and_manifest_without_touching_source() {
     let directory = tempfile::tempdir().unwrap();
@@ -219,6 +242,10 @@ fn documented_photo_presets_are_deterministic_through_the_durable_executor() {
         assert_eq!(sha256_file(&second_source).unwrap(), second_source_hash);
         assert!(first_destination.is_file());
         assert!(second_destination.is_file());
+        preserve_review_output(&first, &format!("photo-derivative.{extension}"));
+        if preset == "jpeg-srgb-v1" {
+            preserve_review_artifact(&first_source, "photo-source.png");
+        }
     }
 }
 
@@ -642,6 +669,7 @@ fn frozen_video_clip_job_encodes_and_publishes_measured_manifest() {
     assert_eq!(manifest["render"]["preset"], "mp4-h264-sdr-v1");
     assert_eq!(manifest["tool_versions"]["backend"], "videotoolbox");
     assert_eq!(manifest["verification"]["source_unchanged"], true);
+    preserve_review_output(&output, "clip-earth.mp4");
 }
 
 #[cfg(target_os = "macos")]
@@ -829,4 +857,5 @@ fn frozen_ordered_reel_job_renders_project_order_and_publishes_one_manifest() {
     assert_eq!(manifest["sources"].as_array().unwrap().len(), 2);
     assert_eq!(manifest["verification"]["sources_unchanged"], true);
     assert_eq!(manifest["verification"]["item_count"], 2);
+    preserve_review_output(&output, "reel-speech-two-cuts.mp4");
 }
