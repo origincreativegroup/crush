@@ -620,6 +620,21 @@
         plans.set(plan.id, plan); return clone(planView(plan));
       }
       case "plan_delete": return plans.delete(args.id);
+      case "render_project_photo": {
+        if (scenario === "plans-errors") throw "Source photo changed after it was selected";
+        return {
+          jobId: "render-job-demo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "a".repeat(64),
+          manifestSha256: "b".repeat(64),
+          sizeBytes: 3145728,
+          mediaType: args.preset.startsWith("jpeg") ? "image/jpeg" : args.preset.startsWith("tiff") ? "image/tiff" : "image/png",
+          width: 2400,
+          height: 1600,
+          completedAt: "2026-08-29T12:30:00Z",
+        };
+      }
       case "models_status":
         return modelsStatus();
       case "models_download":

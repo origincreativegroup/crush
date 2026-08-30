@@ -189,6 +189,41 @@
                     <button id="project-preview-loop" class="button secondary small" type="button" aria-pressed="false">Loop off</button>
                   </div>
                   <p id="project-preview-label" class="plans-muted"></p>
+                  <section id="project-photo-export" class="project-photo-export" hidden aria-labelledby="project-photo-export-title">
+                    <div>
+                      <p class="workflow-step">Export selected photo</p>
+                      <h3 id="project-photo-export-title">Create a finished copy</h3>
+                      <p class="plans-muted">Your original stays untouched. Crush verifies the new file before showing it here.</p>
+                    </div>
+                    <div class="photo-export-fields">
+                      <label>File type
+                        <select id="project-photo-preset">
+                          <option value="jpeg-srgb-v1">JPEG — smaller, easy to share</option>
+                          <option value="png-srgb-v1">PNG — lossless</option>
+                          <option value="tiff-srgb-v1">TIFF — lossless 8-bit copy</option>
+                        </select>
+                      </label>
+                      <label>Save to
+                        <span class="photo-export-destination">
+                          <input id="project-photo-destination" readonly placeholder="Choose where to save…" />
+                          <button id="project-photo-choose" class="button secondary small" type="button">Choose…</button>
+                        </span>
+                      </label>
+                    </div>
+                    <div class="plans-actions">
+                      <button id="project-photo-render" class="button primary" type="button" disabled>Render photo</button>
+                      <progress id="project-photo-progress" hidden aria-label="Photo render progress"></progress>
+                      <span id="project-photo-status" class="plans-muted" role="status">Choose where to save the finished copy.</span>
+                    </div>
+                    <section id="project-photo-result" class="photo-export-result" hidden aria-label="Verified photo export">
+                      <div><strong>Finished photo</strong><code id="project-photo-output-path"></code><button id="project-photo-show-output" class="button secondary small" type="button">Show in Finder</button></div>
+                      <div><strong>Verification manifest</strong><code id="project-photo-manifest-path"></code><button id="project-photo-show-manifest" class="button secondary small" type="button">Show in Finder</button></div>
+                      <details>
+                        <summary>Verification details</summary>
+                        <dl id="project-photo-verification" class="photo-export-verification"></dl>
+                      </details>
+                    </section>
+                  </section>
                 </div>
                 <div id="plan-items" class="plans-stack"></div>
                 <p id="plan-items-empty" class="plans-muted">No sequence yet. Add a suggestion above to begin.</p>

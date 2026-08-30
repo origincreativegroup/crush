@@ -69,8 +69,26 @@ const tests = {
     assert.equal(Number(await frame.locator("#project-preview-scrubber").getAttribute("max")), 2.75);
     await frame.locator("#project-preview-next").click();
     assert.equal(await frame.locator("#project-preview-photo").isVisible(), true);
+    await frame.locator("#project-photo-export").waitFor({ state: "visible" });
+    await frame.locator("#project-photo-preset").selectOption("png-srgb-v1");
+    await frame.locator("#project-photo-choose").click();
+    assert.match(await frame.locator("#project-photo-destination").inputValue(), /select_export\.png$/);
+    await frame.locator("#project-photo-render").click();
+    await frame.locator("#project-photo-result").waitFor({ state: "visible" });
+    assert.match(await visibleText(frame.locator("#project-photo-status")), /Rendered and verified.*original photo was not changed/);
+    assert.match(await visibleText(frame.locator("#project-photo-output-path")), /select_export\.png$/);
+    assert.match(await visibleText(frame.locator("#project-photo-manifest-path")), /crush-manifest\.json$/);
+    await frame.locator("#project-photo-result summary").click();
+    assert.match(await visibleText(frame.locator("#project-photo-verification")), /2400 × 1600.*3.00 MB.*Photo checksum/s);
+    await frame.locator("#project-photo-show-manifest").click();
+    const renderCall = (await mockCalls(page)).find((call) => call.command === "render_project_photo");
+    assert.equal(renderCall.args.projectId, "plan-1");
+    assert.equal(renderCall.args.photoId, "photo-0");
+    assert.equal(renderCall.args.preset, "png-srgb-v1");
+    assert.equal((await mockCalls(page)).filter((call) => call.command === "open_in_finder").at(-1).args.path, renderCall.args.destination + ".crush-manifest.json");
     await frame.locator("#project-preview-prev").click();
     assert.equal(await frame.locator("#project-preview-video").isVisible(), true);
+    assert.equal(await frame.locator("#project-photo-export").isHidden(), true);
     assert.equal(await frame.locator("#plan-general .plans-candidate button:disabled").count(), 2);
     const original = (await mockCalls(page)).filter((call) => call.command === "plan_add_item");
     assert.equal(original[0].args.item.origin, "general");
@@ -181,6 +199,15 @@ const tests = {
     await item.locator('button[type="submit"]').click();
     assert.match(await visibleText(frame.locator("#plans-message")), /Out must be after In/);
     assert.equal((await mockCalls(page)).filter((call) => call.command === "plan_update_item").length, callsBefore);
+    await frame.locator("#plan-general .plans-candidate").nth(1).locator("button").click();
+    await frame.locator('#plan-confirm button[value="confirm"]').click();
+    await poll(async () => await frame.locator("#plan-items .plans-item").count() === 2);
+    await frame.locator("#plan-items .plans-item").nth(1).getByRole("button", { name: "Preview", exact: true }).click();
+    await frame.locator("#project-photo-choose").click();
+    await frame.locator("#project-photo-render").click();
+    assert.match(await visibleText(frame.locator("#project-photo-status")), /Render failed:.*Source photo changed/);
+    assert.equal(await frame.locator("#project-photo-render").isDisabled(), false);
+    assert.equal(await frame.locator("#project-photo-result").isHidden(), true);
   },
 
   async empty(page) {

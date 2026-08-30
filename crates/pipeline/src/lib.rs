@@ -1,5 +1,6 @@
 //! End-to-end, resumable, one-video-at-a-time ingestion orchestration.
 
+pub mod reel_recipe;
 pub mod render;
 pub mod source;
 pub mod video_source;

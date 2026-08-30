@@ -47,9 +47,22 @@ staging is removed only when its marker exactly matches the tracked owner, job, 
 destination. Unknown directories and mismatched user files are preserved. Interrupted jobs become
 explicitly failed and can start a new numbered attempt.
 
-## Video presets
+## Video clip presets v1
 
-`mp4-h264-sdr-v1` and `mov-h264-sdr-v1` are valid frozen recipe intents, but their full clip/reel
-renderers and golden verification remain in progress under Task 021. The application must report
-them as unavailable until crop, grade, boundary, audio, HDR/SDR and sequence semantics are all
-implemented; it must not silently emit an untreated export.
+`mp4-h264-sdr-v1` and `mov-h264-sdr-v1` always encode boundary-sensitive clip recipes; they never
+stream-copy and then imply that crop, grade, audio or exact boundaries were applied. Both produce
+8-bit H.264 `yuv420p`, limited-range BT.709 with AAC source audio when present and requested, or no
+audio for mute. The MP4 and MOV containers carry `avc1` and fast-start metadata.
+
+Normalized crops are interpreted in displayed/autorotated source space and quantized outward to
+even chroma-aligned pixels. Basic grade controls use the same declared ranges as photo v1 and map
+to explicit FFmpeg filters. The v1 backend accepts known 8-bit BT.709 SDR or wholly untagged input;
+untagged input is recorded as assumed BT.709. HDR, wide-gamut, full-range, unknown-depth and
+greater-than-8-bit sources fail until a real conversion/tone-map policy is versioned. Uncropped odd
+dimensions also fail rather than being silently padded.
+
+The actual backend and encoder are capability results in the manifest. The current macOS provider
+is VideoToolbox; it is not part of recipe intent. Reels remain in progress under Task 021. Until
+their ordered sequence, photo holds, transitions, crops, grades, captions and audio policies are
+implemented together, the application must report reel rendering as unavailable rather than emit
+an incomplete export.

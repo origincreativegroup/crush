@@ -23,6 +23,21 @@
 .project-preview-controls input[type="range"] { flex: 1 1 180px; width: 100%; accent-color: #4f8cff; }
 #project-preview-time { color: #aaaab4; font-size: 11px; white-space: nowrap; }
 #project-preview-label { margin: 8px 0 0; }
+.project-photo-export { margin-top: 12px; padding: 12px; border-top: 1px solid #35353d; }
+.project-photo-export h3 { margin-top: 2px !important; }
+.photo-export-fields { display: grid; grid-template-columns: minmax(190px, .7fr) minmax(280px, 1.3fr); gap: 12px; margin: 12px 0; }
+.photo-export-fields select { min-height: 34px; padding: 0 8px; border: 1px solid #42424a; border-radius: 5px; color: #f0f0f3; background: #17171b; }
+.photo-export-destination { display: flex; gap: 8px; }
+.photo-export-destination input { flex: 1; }
+#project-photo-progress { width: 110px; accent-color: #719ef8; }
+#project-photo-status.error { color: #ff9f9f; }
+.photo-export-result { display: grid; gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid #355846; border-radius: 7px; background: #18231d; }
+.photo-export-result > div { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.photo-export-result code { min-width: 0; overflow: hidden; color: #c9d8ce; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.photo-export-result summary { color: #b9c9bf; cursor: pointer; font-size: 12px; }
+.photo-export-verification { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 12px; margin: 10px 0 0; font-size: 11px; }
+.photo-export-verification dt { color: #8fa297; }
+.photo-export-verification dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #d6e0da; }
 .plans-item.previewing { border-color: #719ef8; box-shadow: 0 0 0 1px rgb(113 158 248 / 20%); }
 .plans-item-heading { display: flex; align-items: center; gap: 8px; }
 .plans-item-heading strong { margin-right: auto; }
@@ -42,3 +57,4 @@
 #plans-controls:disabled { opacity: .7; }
 #plan-dirty { color: #f2c66d; }
 @media (min-width: 1400px) { .plans-layout { grid-template-columns: 230px minmax(0, 1fr); } .plans-main { max-width: 1200px; } }
+@media (max-width: 800px) { .photo-export-fields { grid-template-columns: 1fr; } .photo-export-result > div { grid-template-columns: 1fr; } }

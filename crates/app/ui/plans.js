@@ -8,6 +8,7 @@
   const state = {
     plans: [], plan: null, items: [], revisions: [], candidates: null,
     busy: false, dirty: new Set(), loaded: false, previewKey: null, previewLoop: false,
+    photoExportKey: null, photoExportBusy: false, photoExportResult: null,
   };
   const kind = (value) => value === "photo" ? "photo" : "video";
   const itemKey = (item) => `${kind(item.mediaKind)}:${item.mediaId}`;
@@ -39,6 +40,20 @@
     empty: $("project-preview-empty"), prev: $("project-preview-prev"), play: $("project-preview-play"),
     next: $("project-preview-next"), scrubber: $("project-preview-scrubber"),
     time: $("project-preview-time"), loop: $("project-preview-loop"), label: $("project-preview-label"),
+  };
+  const photoExport = {
+    root: $("project-photo-export"), preset: $("project-photo-preset"),
+    destination: $("project-photo-destination"), choose: $("project-photo-choose"),
+    render: $("project-photo-render"), progress: $("project-photo-progress"),
+    status: $("project-photo-status"), result: $("project-photo-result"),
+    outputPath: $("project-photo-output-path"), manifestPath: $("project-photo-manifest-path"),
+    showOutput: $("project-photo-show-output"), showManifest: $("project-photo-show-manifest"),
+    verification: $("project-photo-verification"),
+  };
+  const photoPresets = {
+    "jpeg-srgb-v1": { extension: "jpg", filter: { name: "JPEG image", extensions: ["jpg", "jpeg"] } },
+    "png-srgb-v1": { extension: "png", filter: { name: "PNG image", extensions: ["png"] } },
+    "tiff-srgb-v1": { extension: "tif", filter: { name: "TIFF image", extensions: ["tif", "tiff"] } },
   };
   async function run(action) {
     if (state.busy) return;
@@ -196,6 +211,45 @@
     const end = Math.max(sourceStart, Math.min(sourceEnd, draftEnd));
     return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : null;
   }
+  function clearPhotoExport(item = null) {
+    const key = item && item.mediaKind === "photo" ? itemKey(item) : null;
+    if (state.photoExportKey === key) return;
+    state.photoExportKey = key;
+    state.photoExportResult = null;
+    photoExport.destination.value = "";
+    photoExport.result.hidden = true;
+    photoExport.status.textContent = "Choose where to save the finished copy.";
+    photoExport.status.classList.remove("error");
+    photoExport.render.disabled = true;
+  }
+  function renderPhotoExport(item) {
+    const isPhoto = item?.mediaKind === "photo";
+    photoExport.root.hidden = !isPhoto;
+    clearPhotoExport(isPhoto ? item : null);
+  }
+  function showPhotoRenderResult(result) {
+    state.photoExportResult = result;
+    photoExport.outputPath.textContent = result.outputPath;
+    photoExport.outputPath.title = result.outputPath;
+    photoExport.manifestPath.textContent = result.manifestPath;
+    photoExport.manifestPath.title = result.manifestPath;
+    const facts = [
+      ["Dimensions", result.width && result.height ? `${result.width} × ${result.height}` : "Verified"],
+      ["File size", `${(result.sizeBytes / 1048576).toFixed(2)} MB`],
+      ["Media type", result.mediaType],
+      ["Photo checksum", result.outputSha256],
+      ["Manifest checksum", result.manifestSha256],
+    ];
+    photoExport.verification.replaceChildren(...facts.flatMap(([term, detail]) => [node("dt", term), node("dd", detail)]));
+    photoExport.result.hidden = false;
+  }
+  function setPhotoExportBusy(value) {
+    state.photoExportBusy = value;
+    photoExport.preset.disabled = value;
+    photoExport.choose.disabled = value;
+    photoExport.render.disabled = value || !photoExport.destination.value;
+    photoExport.progress.hidden = !value;
+  }
   function setPreviewLoop(value) {
     state.previewLoop = value;
     preview.loop.setAttribute("aria-pressed", String(value));
@@ -236,6 +290,7 @@
     const item = previewItem();
     preview.root.hidden = state.items.length === 0;
     if (!item) {
+      renderPhotoExport(null);
       preview.video.pause();
       preview.video.removeAttribute("src");
       preview.video.removeAttribute("data-src");
@@ -252,6 +307,7 @@
     const path = candidate.path || "";
     const title = filename(path || item.mediaId);
     const isPhoto = item.mediaKind === "photo";
+    renderPhotoExport(item);
     preview.empty.hidden = true;
     preview.video.hidden = isPhoto;
     preview.photo.hidden = !isPhoto;
@@ -468,6 +524,77 @@
   });
   preview.video.addEventListener("error", () => message(`Could not preview ${filename(parse(previewItem()?.signalsJson).candidate?.path || "this clip")}. Is its drive mounted?`, true));
   preview.photo.addEventListener("error", () => message(`Could not preview ${filename(parse(previewItem()?.signalsJson).candidate?.path || "this photo")}. Is its drive mounted?`, true));
+  photoExport.preset.addEventListener("change", () => {
+    photoExport.destination.value = "";
+    photoExport.result.hidden = true;
+    state.photoExportResult = null;
+    photoExport.status.textContent = "Choose where to save the finished copy.";
+    photoExport.status.classList.remove("error");
+    photoExport.render.disabled = true;
+  });
+  photoExport.choose.addEventListener("click", async () => {
+    if (state.photoExportBusy) return;
+    const item = previewItem();
+    if (!item || item.mediaKind !== "photo") return;
+    const preset = photoPresets[photoExport.preset.value];
+    const candidate = parse(item.signalsJson).candidate || {};
+    const sourceName = filename(candidate.path || item.mediaId).replace(/\.[^.]+$/, "") || "photo";
+    try {
+      const destination = await bridge.dialog.save({
+        title: "Export selected photo",
+        defaultPath: `${sourceName}_export.${preset.extension}`,
+        filters: [preset.filter],
+      });
+      if (!destination) return;
+      photoExport.destination.value = destination;
+      photoExport.render.disabled = false;
+      photoExport.result.hidden = true;
+      state.photoExportResult = null;
+      photoExport.status.textContent = "Ready to render a new verified copy.";
+      photoExport.status.classList.remove("error");
+    } catch (error) {
+      photoExport.status.textContent = `Could not choose a destination: ${String(error)}`;
+      photoExport.status.classList.add("error");
+    }
+  });
+  photoExport.render.addEventListener("click", async () => {
+    if (state.photoExportBusy || state.busy) return;
+    const item = previewItem();
+    if (!state.plan || !item || item.mediaKind !== "photo" || !photoExport.destination.value) return;
+    const expectedKey = itemKey(item);
+    photoExport.result.hidden = true;
+    photoExport.status.textContent = "Rendering and verifying the finished copy…";
+    photoExport.status.classList.remove("error");
+    setPhotoExportBusy(true);
+    try {
+      const result = await invoke("render_project_photo", {
+        projectId: state.plan.id,
+        photoId: item.mediaId,
+        preset: photoExport.preset.value,
+        destination: photoExport.destination.value,
+      });
+      if (state.photoExportKey !== expectedKey) return;
+      showPhotoRenderResult(result);
+      photoExport.status.textContent = "Rendered and verified. Your original photo was not changed.";
+    } catch (error) {
+      if (state.photoExportKey !== expectedKey) return;
+      photoExport.status.textContent = `Render failed: ${String(error)}`;
+      photoExport.status.classList.add("error");
+    } finally {
+      setPhotoExportBusy(false);
+    }
+  });
+  for (const [control, field] of [[photoExport.showOutput, "outputPath"], [photoExport.showManifest, "manifestPath"]]) {
+    control.addEventListener("click", async () => {
+      const path = state.photoExportResult?.[field];
+      if (!path) return;
+      try { await invoke("open_in_finder", { path }); }
+      catch (error) {
+        photoExport.status.textContent = `Could not show that file: ${String(error)}`;
+        photoExport.status.classList.add("error");
+      }
+    });
+  }
   document.addEventListener("crush:plans-shown", () => run(async () => {
     // Navigation must not wipe local drafts. A full refresh is explicit through plan reopen.
     await refreshList();

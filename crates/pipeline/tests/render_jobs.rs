@@ -8,6 +8,7 @@ use crush_core::{Config, DEFAULT_OWNER_ID};
 use crush_pipeline::{sha256_file, Pipeline};
 use crush_store::{
     NewRenderJob, Photo, PhotoStatus, RenderJobStatus, RenderRecipe, RenderRecipeKind, Store,
+    Video, VideoStatus,
 };
 use image::{Rgb, RgbImage};
 
@@ -125,6 +126,10 @@ fn setup_photo_job(
         ),
         source,
     )
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 #[test]
@@ -517,4 +522,122 @@ fn recovery_finishes_a_fully_published_verifying_attempt() {
             .output_sha256,
         output_hash
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn frozen_video_clip_job_encodes_and_publishes_measured_manifest() {
+    if crush_stage_split::ffmpeg::resolve().is_err() {
+        eprintln!("skipping video render: bundled/development FFmpeg is unavailable");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = repo_root().join("fixtures/clips/earth-timelapse-silent.mp4");
+    let source_hash = sha256_file(&source).unwrap();
+    let destination = directory.path().join("exports/earth-clip.mp4");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &Video {
+                id: "video-earth".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                sha256: source_hash.clone(),
+                duration_s: Some(6.0),
+                fps: Some(30.0),
+                width: Some(1280),
+                height: Some(720),
+                has_audio: false,
+                status: VideoStatus::Done,
+                indexed_at: Some(Utc::now()),
+            },
+        )
+        .unwrap();
+    store
+        .render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: "clip-mp4".to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::VideoClip,
+                name: "MP4 clip".to_owned(),
+                schema_json: serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "video_clip",
+                    "in_s": 0.25,
+                    "out_s": 1.25,
+                    "crop": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                    "grade": {"mode": "none"},
+                    "transition": {"kind": "cut"},
+                    "audio": {"mode": "mute"},
+                    "output": {"preset": "mp4-h264-sdr-v1"}
+                })
+                .to_string(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-video-clip".to_owned(),
+                recipe_id: "clip-mp4".to_owned(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "render-test",
+                    "selection_provenance": {"origin": "general"},
+                    "sources": [{
+                        "media_kind": "video",
+                        "media_id": "video-earth",
+                        "source_id": "video-earth",
+                        "sha256": source_hash,
+                        "path": source,
+                    }]
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used"
+                    }
+                })
+                .to_string(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    drop(store);
+    let pipeline = Pipeline::new(
+        Config {
+            data_dir: Some(directory.path().to_path_buf()),
+            ..Config::default()
+        },
+        AppPaths {
+            root: directory.path().to_path_buf(),
+        },
+        CancellationToken::default(),
+    );
+
+    let output = pipeline
+        .execute_render_job(DEFAULT_OWNER_ID, "render-video-clip")
+        .unwrap();
+
+    assert_eq!(output.media_type, "video/mp4");
+    assert!(output.duration_s.unwrap() >= 0.95);
+    assert!(output.duration_s.unwrap() <= 1.05);
+    assert_eq!(sha256_file(&source).unwrap(), source_hash);
+    assert!(destination.is_file());
+    let manifest: serde_json::Value = serde_json::from_str(&output.manifest_json).unwrap();
+    assert_eq!(manifest["render"]["preset"], "mp4-h264-sdr-v1");
+    assert_eq!(manifest["tool_versions"]["backend"], "videotoolbox");
+    assert_eq!(manifest["verification"]["source_unchanged"], true);
 }

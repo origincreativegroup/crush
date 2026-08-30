@@ -1,6 +1,6 @@
 # TASK-021 — implementation plan and progress
 
-Status: **in progress, photo renderer and durable recovery implemented**. The parent acceptance in `TASK-021.md`
+Status: **in progress, photo and clip renderers plus durable recovery implemented**. The parent acceptance in `TASK-021.md`
 is unchanged. This extends the existing engineering and editorial/DAM blueprints; it does
 not replace them. Task 022 stays next, after the render-golden human review.
 
@@ -161,6 +161,15 @@ post-publication crash.
 - Apply real HDR/SDR and gamut conversion where supported; reject unsupported conversion
   with a capability error. Preserve source orientation and distinguish tone-mapped output.
 
+Clip rendering is implemented in the third slice. The backend-neutral v1 request always encodes
+through the bundled FFmpeg path, supports exact in/out, displayed-space normalized crop, basic
+grade, cut, source/mute audio and MP4/MOV output, and returns actual command/backend plus measured
+probe facts. Durable pipeline jobs recheck source bytes, verify duration within frame tolerance,
+dimensions/audio/codec/color, write the manifest and publish through the common recovery protocol.
+HDR, wide-gamut, full-range, unknown/high-depth sources and odd uncropped dimensions currently fail
+explicitly. Reel parsing and exact source-span resolution are implemented, including preservation
+of segment-relative crop-keyframe timing; ordered mixed-media reel rendering remains.
+
 ### 4. Verified, recoverable publication and UI
 
 - Extend the private staging/no-clobber primitive to photo outputs, reels and manifests.
@@ -172,6 +181,13 @@ post-publication crash.
 - Expose render/preset/destination actions from Projects, plus job progress, cancellation,
   retry/resume, errors and verified output/manifest locations. Never imply that editing
   a plan already rendered the media. Exporting alone is not learning approval.
+
+The selected-photo path is now exposed beside the Projects preview with plain JPEG/PNG/TIFF labels,
+a native save destination, explicit Render action, busy/error/success states, Finder actions and
+progressively disclosed verification. The app creates the frozen owner-scoped job and requires both
+verified files before reporting success. It refuses unsafe photos and project framing/color edits
+that the current photo UI cannot reproduce; it never silently drops those edits. Clip/reel project
+render actions, active cancellation and retry controls remain.
 
 ### 5. Automated matrix, then John's human hard stop
 
@@ -202,3 +218,7 @@ post-publication crash.
   pass 20 tests; durable render integration passes 6 tests; app library tests pass 3 tests; targeted
   store/pipeline clippy passes with warnings denied. These tests do not constitute the required
   visual render-golden approval.
+- Third-slice verification: stage-split passes 18 library and 12 FFmpeg fixture tests; pipeline
+  passes 24 library and 8 durable integration tests (including a real frozen clip render on macOS);
+  app tests pass 4 and all 17 browser scenarios pass. Targeted stage/pipeline/app clippy passes with
+  warnings denied. Reel render goldens and John's visual approval are still outstanding.

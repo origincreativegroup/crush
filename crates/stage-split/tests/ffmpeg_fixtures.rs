@@ -1,6 +1,10 @@
 #![cfg(target_os = "macos")]
 
-use crush_stage_split::ffmpeg::{self, CancellationToken, Error, ExportMode, Runner, Source};
+use crush_stage_split::ffmpeg::{
+    self, BasicVideoGrade, CancellationToken, ClipAudio, ClipOutputPreset, ClipRenderBackend,
+    ClipRenderRequest, ClipTransition, Error, ExportMode, NormalizedVideoCrop, Runner, Source,
+    VideoGrade,
+};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -168,6 +172,127 @@ fn export_reports_progress_and_starts_within_one_frame() {
     let source_mean = mean_pixel(&runner.resolved().path, &input, 3.2);
     let output_mean = mean_pixel(&runner.resolved().path, &output, 0.0);
     assert!((source_mean - output_mean).abs() / source_mean < 0.02);
+}
+
+#[test]
+fn recipe_clip_render_encodes_and_returns_manifest_probe_facts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let input = fixture("synthetic-speech.mp4");
+    let input_bytes = std::fs::read(&input).unwrap();
+    let output = temporary.path().join("private-staging.mp4");
+    let request = ClipRenderRequest {
+        in_s: 2.0,
+        out_s: 4.0,
+        crop: None,
+        grade: VideoGrade::None,
+        transition: ClipTransition::Cut,
+        audio: ClipAudio::Source,
+        output: ClipOutputPreset::Mp4H264SdrV1,
+    };
+    let result = runner.render_clip(&input, &request, &output).unwrap();
+    assert_eq!(result.backend, ClipRenderBackend::VideoToolbox);
+    assert_eq!(result.backend.as_str(), "videotoolbox");
+    assert_eq!(result.encoder, "h264_videotoolbox");
+    assert_eq!(result.preset, "mp4-h264-sdr-v1");
+    assert_eq!(result.source_color_handling, "untagged-assumed-sdr-bt709");
+    assert!(result.command.contains("-n"));
+    assert!(result.command.contains("h264_videotoolbox"));
+    assert!(!result.command.contains("-c copy"));
+    assert!(result.probe_command.contains("ffprobe"));
+    assert_eq!(result.output_probe.video_codec.as_deref(), Some("h264"));
+    assert_eq!(result.output_probe.pixel_format.as_deref(), Some("yuv420p"));
+    assert_eq!(result.output_probe.bit_depth, Some(8));
+    assert_eq!(
+        (
+            result.output_probe.width,
+            result.output_probe.height,
+            result.output_probe.has_audio,
+        ),
+        (640, 360, true)
+    );
+    assert!((result.output_probe.duration_s - 2.0).abs() <= 1.0 / 30.0 + 0.05);
+    assert_eq!(std::fs::read(&input).unwrap(), input_bytes);
+    assert!(!std::fs::read_dir(temporary.path())
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".crush-clip-render-")));
+}
+
+#[test]
+fn recipe_clip_render_applies_crop_grade_and_mute_without_stream_copy() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let input = fixture("synthetic-speech.mp4");
+    let output = temporary.path().join("private-staging.mov");
+    let request = ClipRenderRequest {
+        in_s: 1.0,
+        out_s: 3.0,
+        crop: Some(NormalizedVideoCrop {
+            x: 0.25,
+            y: 0.0,
+            width: 0.5,
+            height: 1.0,
+        }),
+        grade: VideoGrade::Basic(BasicVideoGrade {
+            exposure_ev: 0.5,
+            contrast: 0.2,
+            saturation: 0.8,
+            temperature: 0.1,
+            tint: -0.1,
+        }),
+        transition: ClipTransition::Cut,
+        audio: ClipAudio::Mute,
+        output: ClipOutputPreset::MovH264SdrV1,
+    };
+    let result = runner.render_clip(&input, &request, &output).unwrap();
+    assert_eq!(result.preset, "mov-h264-sdr-v1");
+    assert_eq!(
+        (result.output_probe.width, result.output_probe.height),
+        (320, 360)
+    );
+    assert!(!result.output_probe.has_audio);
+    assert!(result.command.contains("crop=320:360:160:0"));
+    assert!(result.command.contains("exposure=exposure=0.5"));
+    assert!(result.command.contains("colorlevels="));
+    assert!(result.command.contains("hue=s=0.8"));
+    assert!(result.command.contains("colorbalance="));
+    assert!(result.command.contains("-an"));
+    assert!(result.command.contains("-f mov"));
+    assert!(!result.command.contains("-c copy"));
+}
+
+#[test]
+fn recipe_clip_render_rejects_existing_staging_and_pre_cancelled_work() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let input = fixture("synthetic-speech.mp4");
+    let request = ClipRenderRequest {
+        in_s: 0.0,
+        out_s: 1.0,
+        crop: None,
+        grade: VideoGrade::None,
+        transition: ClipTransition::Cut,
+        audio: ClipAudio::Mute,
+        output: ClipOutputPreset::Mp4H264SdrV1,
+    };
+    let existing = temporary.path().join("existing.mp4");
+    std::fs::write(&existing, b"another job owns this").unwrap();
+    let error = runner.render_clip(&input, &request, &existing).unwrap_err();
+    assert!(error.to_string().contains("already exists"));
+    assert_eq!(std::fs::read(&existing).unwrap(), b"another job owns this");
+
+    let cancelled_output = temporary.path().join("cancelled.mp4");
+    let cancellation = CancellationToken::default();
+    cancellation.cancel();
+    let error = runner
+        .render_clip_with_control(&input, &request, &cancelled_output, &cancellation, |_| {})
+        .unwrap_err();
+    assert!(matches!(error, Error::Cancelled { .. }));
+    assert!(!cancelled_output.exists());
 }
 
 #[test]

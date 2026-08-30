@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context};
 use chrono::Utc;
+use crush_stage_split::ffmpeg::{
+    self, BasicVideoGrade, ClipAudio, ClipOutputPreset, ClipRenderRequest, ClipTransition,
+    NormalizedVideoCrop, VideoGrade,
+};
 use crush_store::{
     RenderAttempt, RenderJob, RenderJobStatus, RenderOutput, RenderRecipeKind, Store,
 };
@@ -37,6 +41,21 @@ struct PhotoSourceSnapshot {
     source_id: String,
     sha256: String,
     frozen_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct VideoSourceSnapshot {
+    media_kind: String,
+    media_id: String,
+    source_id: String,
+    sha256: String,
+    frozen_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct ResolvedVideoSource {
+    path: PathBuf,
+    has_audio: bool,
 }
 
 #[derive(Debug)]
@@ -109,11 +128,6 @@ impl Pipeline {
             .render_job_by_id(owner_id, job_id)?
             .with_context(|| format!("render job {job_id} was not found for this owner"))?;
         ensure!(
-            job.recipe_kind == RenderRecipeKind::Photo,
-            "{} render execution is not implemented yet",
-            recipe_kind_name(job.recipe_kind)
-        );
-        ensure!(
             matches!(
                 job.status,
                 RenderJobStatus::Queued | RenderJobStatus::Failed | RenderJobStatus::Cancelled
@@ -124,6 +138,13 @@ impl Pipeline {
             !self.cancellation.is_cancelled(),
             "photo render was cancelled before it started"
         );
+        match job.recipe_kind {
+            RenderRecipeKind::VideoClip => {
+                return self.execute_video_clip_job(&mut store, owner_id, &job)
+            }
+            RenderRecipeKind::Reel => bail!("reel render execution is not implemented yet"),
+            RenderRecipeKind::Photo => {}
+        }
 
         let recipe = parse_photo_recipe(&job.frozen_recipe_json)?;
         let source_snapshot = parse_photo_source_snapshot(&job.source_snapshot_json)?;
@@ -221,6 +242,249 @@ impl Pipeline {
                 Err(error)
             }
         }
+    }
+
+    fn execute_video_clip_job(
+        &self,
+        store: &mut Store,
+        owner_id: &str,
+        job: &RenderJob,
+    ) -> anyhow::Result<RenderOutput> {
+        let recipe = parse_video_clip_recipe(&job.frozen_recipe_json)?;
+        let source_snapshot = parse_video_source_snapshot(&job.source_snapshot_json)?;
+        let resolved = resolve_video_source(store, owner_id, &source_snapshot, &recipe)?;
+        let source_hash_before = sha256_file(&resolved.path)
+            .with_context(|| format!("failed to hash render source {}", resolved.path.display()))?;
+        ensure!(
+            source_hash_before.eq_ignore_ascii_case(&source_snapshot.sha256),
+            "video source bytes changed after this render was queued"
+        );
+        let destination = PathBuf::from(&job.destination_path);
+        validate_video_destination(&destination, recipe.output)?;
+        let staging = ManagedStaging::create(&destination)?;
+        let attempt = store.render_job_start(
+            owner_id,
+            &job.id,
+            &staging.output.to_string_lossy(),
+            Utc::now(),
+        )?;
+        let execution = (|| {
+            staging.write_marker(owner_id, &job.id, attempt.attempt, &destination)?;
+            store.render_attempt_set_commands(
+                owner_id,
+                &job.id,
+                attempt.attempt,
+                &json!([{
+                    "executor": "crush-video-clip-v1",
+                    "phase": "started",
+                    "staging_output": staging.output,
+                    "destination": destination,
+                }])
+                .to_string(),
+            )?;
+            self.execute_video_clip_attempt(
+                store,
+                owner_id,
+                job,
+                &attempt,
+                &source_snapshot,
+                &resolved,
+                &destination,
+                &staging,
+                &recipe,
+            )
+        })();
+        match execution {
+            Ok(output) => Ok(output),
+            Err(error) => {
+                if let Some(current) = store.render_job_by_id(owner_id, &job.id)? {
+                    if matches!(
+                        current.status,
+                        RenderJobStatus::Running | RenderJobStatus::Verifying
+                    ) {
+                        if self.cancellation.is_cancelled() {
+                            let _ = store.render_job_cancel(owner_id, &job.id, Utc::now());
+                        } else if destination.is_file()
+                            && manifest_path(&destination).is_file()
+                            && current.status == RenderJobStatus::Verifying
+                        {
+                            // Recovery will finalize the already-published checksummed pair.
+                        } else {
+                            let _ = store.render_job_fail(
+                                owner_id,
+                                &job.id,
+                                &format!("{error:#}"),
+                                Utc::now(),
+                            );
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_video_clip_attempt(
+        &self,
+        store: &mut Store,
+        owner_id: &str,
+        job: &RenderJob,
+        attempt: &RenderAttempt,
+        source_snapshot: &VideoSourceSnapshot,
+        source: &ResolvedVideoSource,
+        destination: &Path,
+        staging: &ManagedStaging,
+        recipe: &ClipRenderRequest,
+    ) -> anyhow::Result<RenderOutput> {
+        store.render_job_set_progress(owner_id, &job.id, 0.1)?;
+        let runner = ffmpeg::Runner::new(
+            ffmpeg::resolve()?,
+            self.config.limits.threads,
+            job.id.clone(),
+        );
+        let rendered = runner.render_clip_with_control(
+            &source.path,
+            recipe,
+            &staging.output,
+            &self.cancellation,
+            |_| {},
+        )?;
+        store.render_job_set_progress(owner_id, &job.id, 0.75)?;
+        ensure!(!self.cancellation.is_cancelled(), "video render cancelled");
+        let source_hash_after = sha256_file(&source.path)?;
+        ensure!(
+            source_hash_after.eq_ignore_ascii_case(&source_snapshot.sha256),
+            "video source changed while it was rendering"
+        );
+        let output_size = i64::try_from(fs::metadata(&staging.output)?.len())
+            .context("render output size overflowed i64")?;
+        let output_sha256 = sha256_file(&staging.output)?;
+        let duration_tolerance_s = if rendered.output_probe.fps > 0.0 {
+            (2.0 / rendered.output_probe.fps).max(0.05)
+        } else {
+            0.1
+        };
+        let duration_delta_s =
+            (rendered.output_probe.duration_s - rendered.requested_duration_s).abs();
+        ensure!(
+            duration_delta_s <= duration_tolerance_s,
+            "rendered clip duration differs from requested duration beyond frame tolerance"
+        );
+        match recipe.audio {
+            ClipAudio::Mute => ensure!(
+                !rendered.output_probe.has_audio,
+                "muted clip unexpectedly contains audio"
+            ),
+            ClipAudio::Source if source.has_audio => ensure!(
+                rendered.output_probe.has_audio,
+                "source-audio clip lost its audio stream"
+            ),
+            ClipAudio::Source => {}
+        }
+        let verification = json!({
+            "source_hash_before": source_snapshot.sha256,
+            "source_hash_after": source_hash_after,
+            "source_unchanged": true,
+            "requested_duration_s": rendered.requested_duration_s,
+            "measured_duration_s": rendered.output_probe.duration_s,
+            "duration_delta_s": duration_delta_s,
+            "duration_tolerance_s": duration_tolerance_s,
+            "dimensions": {
+                "width": rendered.output_probe.width,
+                "height": rendered.output_probe.height,
+            },
+            "fps": rendered.output_probe.fps,
+            "has_audio": rendered.output_probe.has_audio,
+            "video_codec": rendered.output_probe.video_codec,
+            "pixel_format": rendered.output_probe.pixel_format,
+            "color_space": rendered.output_probe.color_space,
+            "color_primaries": rendered.output_probe.color_primaries,
+            "color_transfer": rendered.output_probe.color_transfer,
+        });
+        let created_at = Utc::now();
+        let media_type = match recipe.output {
+            ClipOutputPreset::Mp4H264SdrV1 => "video/mp4",
+            ClipOutputPreset::MovH264SdrV1 => "video/quicktime",
+        }
+        .to_owned();
+        let manifest_destination = manifest_path(destination);
+        let manifest = json!({
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "job": {
+                "id": job.id,
+                "attempt": attempt.attempt,
+                "owner_id": owner_id,
+                "created_at": created_at,
+            },
+            "source": {
+                "media_kind": source_snapshot.media_kind,
+                "media_id": source_snapshot.media_id,
+                "source_id": source_snapshot.source_id,
+                "sha256": source_snapshot.sha256,
+                "frozen_path": source_snapshot.frozen_path,
+                "resolved_path": source.path,
+            },
+            "frozen_recipe": serde_json::from_str::<Value>(&job.frozen_recipe_json)?,
+            "frozen_plan": job.frozen_plan_json.as_deref().map(serde_json::from_str::<Value>).transpose()?,
+            "model_versions": serde_json::from_str::<Value>(&job.model_versions_json)?,
+            "tool_versions": {
+                "crush_pipeline": env!("CARGO_PKG_VERSION"),
+                "executor": "crush-video-clip-v1",
+                "backend": rendered.backend.as_str(),
+                "encoder": rendered.encoder,
+            },
+            "commands": [rendered.command, rendered.probe_command],
+            "render": {
+                "preset": rendered.preset,
+                "source_color_handling": rendered.source_color_handling,
+                "output_path": destination,
+                "media_type": media_type,
+                "checksum_sha256": output_sha256,
+                "size_bytes": output_size,
+            },
+            "verification": verification,
+        });
+        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        write_new_synced(&staging.manifest, manifest_json.as_bytes())?;
+        let manifest_sha256 = sha256_file(&staging.manifest)?;
+        File::open(&staging.output)?.sync_all()?;
+        let output = RenderOutput {
+            owner_id: owner_id.to_owned(),
+            id: format!("render-output-{}", Uuid::new_v4()),
+            job_id: job.id.clone(),
+            attempt: attempt.attempt,
+            output_path: destination.to_string_lossy().into_owned(),
+            output_sha256,
+            size_bytes: output_size,
+            media_type,
+            width: Some(i64::from(rendered.output_probe.width)),
+            height: Some(i64::from(rendered.output_probe.height)),
+            duration_s: Some(rendered.output_probe.duration_s),
+            verification_json: verification.to_string(),
+            manifest_path: manifest_destination.to_string_lossy().into_owned(),
+            manifest_json,
+            manifest_sha256,
+            created_at,
+        };
+        store.render_attempt_set_commands(
+            owner_id,
+            &job.id,
+            attempt.attempt,
+            &recovery_command_json(&output, &staging.manifest),
+        )?;
+        store.render_job_mark_verifying(owner_id, &job.id)?;
+        reject_existing(&manifest_destination, "render manifest destination")?;
+        reject_existing(destination, "render destination")?;
+        fs::hard_link(&staging.manifest, &manifest_destination)
+            .context("filesystem does not support exclusive render-manifest publication")?;
+        if let Err(error) = fs::hard_link(&staging.output, destination) {
+            let _ = fs::remove_file(&manifest_destination);
+            return Err(error).context("filesystem does not support exclusive render publication");
+        }
+        sync_parent(destination)?;
+        store.render_job_finish(owner_id, &output)?;
+        Ok(output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -473,6 +737,95 @@ fn parse_photo_recipe(frozen: &str) -> anyhow::Result<PhotoRenderRecipe> {
     })
 }
 
+fn parse_video_clip_recipe(frozen: &str) -> anyhow::Result<ClipRenderRequest> {
+    let frozen: Value = serde_json::from_str(frozen).context("frozen recipe is invalid JSON")?;
+    let schema = frozen
+        .get("schema")
+        .and_then(Value::as_object)
+        .context("frozen recipe schema is missing")?;
+    ensure!(
+        schema.get("schema_version").and_then(Value::as_u64) == Some(1),
+        "video clip executor supports only recipe schema version 1"
+    );
+    ensure!(
+        schema.get("kind").and_then(Value::as_str) == Some("video_clip"),
+        "frozen recipe is not a video clip"
+    );
+    let crop = match schema.get("crop") {
+        Some(Value::Null) => None,
+        Some(value) => {
+            let crop = value
+                .as_object()
+                .context("video clip crop must be an object")?;
+            Some(NormalizedVideoCrop {
+                x: required_f64(crop, "x", "video clip crop")?,
+                y: required_f64(crop, "y", "video clip crop")?,
+                width: required_f64(crop, "width", "video clip crop")?,
+                height: required_f64(crop, "height", "video clip crop")?,
+            })
+        }
+        None => bail!("video clip crop is missing"),
+    };
+    let grade_object = schema
+        .get("grade")
+        .and_then(Value::as_object)
+        .context("video clip grade is missing")?;
+    let grade = match grade_object.get("mode").and_then(Value::as_str) {
+        Some("none") => VideoGrade::None,
+        Some("basic") => VideoGrade::Basic(BasicVideoGrade {
+            exposure_ev: required_f64(grade_object, "exposure_ev", "video clip grade")?,
+            contrast: required_f64(grade_object, "contrast", "video clip grade")?,
+            saturation: required_f64(grade_object, "saturation", "video clip grade")?,
+            temperature: required_f64(grade_object, "temperature", "video clip grade")?,
+            tint: required_f64(grade_object, "tint", "video clip grade")?,
+        }),
+        Some(other) => bail!("unsupported video clip grade mode {other:?}"),
+        None => bail!("video clip grade mode is missing"),
+    };
+    ensure!(
+        schema
+            .get("transition")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("cut"),
+        "video clip transition must be cut"
+    );
+    let audio = match schema
+        .get("audio")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+    {
+        Some("source") => ClipAudio::Source,
+        Some("mute") => ClipAudio::Mute,
+        Some(other) => bail!("unsupported video clip audio mode {other:?}"),
+        None => bail!("video clip audio mode is missing"),
+    };
+    let output = match schema
+        .get("output")
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("preset"))
+        .and_then(Value::as_str)
+    {
+        Some("mp4-h264-sdr-v1") => ClipOutputPreset::Mp4H264SdrV1,
+        Some("mov-h264-sdr-v1") => ClipOutputPreset::MovH264SdrV1,
+        Some(other) => bail!("unsupported video clip output preset {other:?}"),
+        None => bail!("video clip output preset is missing"),
+    };
+    let recipe = ClipRenderRequest {
+        in_s: required_f64(schema, "in_s", "video clip")?,
+        out_s: required_f64(schema, "out_s", "video clip")?,
+        crop,
+        grade,
+        transition: ClipTransition::Cut,
+        audio,
+        output,
+    };
+    recipe.validate()?;
+    Ok(recipe)
+}
+
 fn parse_photo_source_snapshot(value: &str) -> anyhow::Result<PhotoSourceSnapshot> {
     let value: Value = serde_json::from_str(value).context("source snapshot is invalid JSON")?;
     let sources = value
@@ -495,6 +848,89 @@ fn parse_photo_source_snapshot(value: &str) -> anyhow::Result<PhotoSourceSnapsho
         source_id: required_string(source, "source_id", "photo source")?.to_owned(),
         sha256: required_string(source, "sha256", "photo source")?.to_owned(),
         frozen_path: PathBuf::from(required_string(source, "path", "photo source")?),
+    })
+}
+
+fn parse_video_source_snapshot(value: &str) -> anyhow::Result<VideoSourceSnapshot> {
+    let value: Value = serde_json::from_str(value).context("source snapshot is invalid JSON")?;
+    let sources = value
+        .get("sources")
+        .and_then(Value::as_array)
+        .context("source snapshot sources are missing")?;
+    ensure!(
+        sources.len() == 1,
+        "a video clip recipe requires exactly one frozen source"
+    );
+    let source = sources[0]
+        .as_object()
+        .context("video source snapshot must be an object")?;
+    let media_kind = required_string(source, "media_kind", "video source")?;
+    ensure!(
+        matches!(media_kind, "video" | "shot"),
+        "video clip source must have media_kind video or shot"
+    );
+    Ok(VideoSourceSnapshot {
+        media_kind: media_kind.to_owned(),
+        media_id: required_string(source, "media_id", "video source")?.to_owned(),
+        source_id: required_string(source, "source_id", "video source")?.to_owned(),
+        sha256: required_string(source, "sha256", "video source")?.to_owned(),
+        frozen_path: PathBuf::from(required_string(source, "path", "video source")?),
+    })
+}
+
+fn resolve_video_source(
+    store: &Store,
+    owner_id: &str,
+    snapshot: &VideoSourceSnapshot,
+    recipe: &ClipRenderRequest,
+) -> anyhow::Result<ResolvedVideoSource> {
+    let video = match snapshot.media_kind.as_str() {
+        "video" => {
+            ensure!(
+                snapshot.source_id == snapshot.media_id,
+                "video source_id must match media_id"
+            );
+            store
+                .video_by_id(owner_id, &snapshot.media_id)?
+                .with_context(|| {
+                    format!("video {} is not owned by this owner", snapshot.media_id)
+                })?
+        }
+        "shot" => {
+            let shot = store
+                .shot_by_id(owner_id, &snapshot.media_id)?
+                .with_context(|| {
+                    format!("shot {} is not owned by this owner", snapshot.media_id)
+                })?;
+            ensure!(
+                shot.video_id == snapshot.source_id,
+                "shot source_id does not match its owner-scoped video"
+            );
+            ensure!(
+                recipe.in_s >= shot.start_s && recipe.out_s <= shot.end_s,
+                "video clip boundaries must stay inside the selected shot"
+            );
+            store
+                .video_by_id(owner_id, &shot.video_id)?
+                .with_context(|| format!("shot {} has no owned source video", snapshot.media_id))?
+        }
+        _ => unreachable!("snapshot parser accepts video or shot"),
+    };
+    ensure!(
+        video.sha256.eq_ignore_ascii_case(&snapshot.sha256),
+        "library video hash changed after this render was queued"
+    );
+    if let Some(duration) = video.duration_s {
+        ensure!(
+            recipe.out_s <= duration,
+            "video clip boundary exceeds the source duration"
+        );
+    }
+    let path = PathBuf::from(video.path);
+    ensure!(path.is_absolute(), "library video path is not absolute");
+    Ok(ResolvedVideoSource {
+        path,
+        has_audio: video.has_audio,
     })
 }
 
@@ -532,6 +968,23 @@ fn validate_photo_destination(path: &Path, preset: PhotoOutputPreset) -> anyhow:
         PhotoOutputPreset::TiffSrgbV1 => {
             extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
         }
+    };
+    ensure!(
+        valid,
+        "destination extension does not match preset {}",
+        preset.as_str()
+    );
+    Ok(())
+}
+
+fn validate_video_destination(path: &Path, preset: ClipOutputPreset) -> anyhow::Result<()> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .context("video render destination needs a file extension")?;
+    let valid = match preset {
+        ClipOutputPreset::Mp4H264SdrV1 => extension.eq_ignore_ascii_case("mp4"),
+        ClipOutputPreset::MovH264SdrV1 => extension.eq_ignore_ascii_case("mov"),
     };
     ensure!(
         valid,
@@ -585,14 +1038,6 @@ fn sync_parent(path: &Path) -> anyhow::Result<()> {
 
 fn source_hash_before(source: &PhotoSourceSnapshot) -> &str {
     &source.sha256
-}
-
-fn recipe_kind_name(kind: RenderRecipeKind) -> &'static str {
-    match kind {
-        RenderRecipeKind::Photo => "photo",
-        RenderRecipeKind::VideoClip => "video clip",
-        RenderRecipeKind::Reel => "reel",
-    }
 }
 
 fn recovery_command_json(output: &RenderOutput, staging_manifest: &Path) -> String {

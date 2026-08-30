@@ -24,10 +24,11 @@ mod macos {
     use crush_store::{
         reference_scope_from_str, reference_scope_to_str, reference_status_to_str, AssetFilter,
         Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta, FeedbackEvent,
-        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, PhotoStatus, Plan, PlanItem,
-        PlanItemPatch, PlanOrigin, ReferenceItemRole, ReferenceSet, ReferenceSetItem,
-        ReferenceSetScope, ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch, StackItem,
-        StackItemRole, StackMediaKind, Store, VersionStack, VideoStatus,
+        FeedbackSignal, JobFilter, LibraryAsset, MediaKind, NewRenderJob, PhotoStatus, Plan,
+        PlanItem, PlanItemPatch, PlanOrigin, ReferenceItemRole, ReferenceSet, ReferenceSetItem,
+        ReferenceSetScope, ReferenceSetStatus, RenderRecipe, RenderRecipeKind, ReviewOp,
+        SafetyFlags, SavedSearch, StackItem, StackItemRole, StackMediaKind, Store, VersionStack,
+        VideoStatus,
     };
     use serde::{Deserialize, Serialize};
     use tauri::{AppHandle, Emitter, Manager, State};
@@ -1774,6 +1775,214 @@ mod macos {
         media_id: String,
     }
 
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PhotoRenderView {
+        job_id: String,
+        output_path: String,
+        manifest_path: String,
+        output_sha256: String,
+        manifest_sha256: String,
+        size_bytes: i64,
+        media_type: String,
+        width: Option<i64>,
+        height: Option<i64>,
+        completed_at: String,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct PhotoPresetSpec {
+        id: &'static str,
+        name: &'static str,
+        preset: &'static str,
+        extensions: &'static [&'static str],
+    }
+
+    fn photo_preset_spec(value: &str) -> anyhow::Result<PhotoPresetSpec> {
+        match value {
+            "jpeg-srgb-v1" => Ok(PhotoPresetSpec {
+                id: "crush-photo-jpeg-srgb",
+                name: "JPEG — smaller, easy to share",
+                preset: "jpeg-srgb-v1",
+                extensions: &["jpg", "jpeg"],
+            }),
+            "png-srgb-v1" => Ok(PhotoPresetSpec {
+                id: "crush-photo-png-srgb",
+                name: "PNG — lossless",
+                preset: "png-srgb-v1",
+                extensions: &["png"],
+            }),
+            "tiff-srgb-v1" => Ok(PhotoPresetSpec {
+                id: "crush-photo-tiff-srgb",
+                name: "TIFF — lossless 8-bit copy",
+                preset: "tiff-srgb-v1",
+                extensions: &["tif", "tiff"],
+            }),
+            other => anyhow::bail!("unsupported photo export preset {other:?}"),
+        }
+    }
+
+    fn ensure_photo_render_recipe(store: &Store, spec: PhotoPresetSpec) -> anyhow::Result<()> {
+        let schema_json = serde_json::json!({
+            "schema_version": 1,
+            "kind": "photo",
+            "crop": null,
+            "rotation_degrees": 0,
+            "grade": { "mode": "none" },
+            "output": { "preset": spec.preset },
+        })
+        .to_string();
+        if let Some(existing) = store.render_recipe_get(DEFAULT_OWNER_ID, spec.id, 1)? {
+            ensure!(
+                existing.kind == RenderRecipeKind::Photo
+                    && existing.name == spec.name
+                    && serde_json::from_str::<serde_json::Value>(&existing.schema_json)?
+                        == serde_json::from_str::<serde_json::Value>(&schema_json)?,
+                "saved photo export preset {} version 1 does not match this app version",
+                spec.id
+            );
+            return Ok(());
+        }
+        store.render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: spec.id.to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::Photo,
+                name: spec.name.to_owned(),
+                schema_json,
+                created_at: chrono::Utc::now(),
+            },
+        )
+    }
+
+    fn render_project_photo_job(
+        config: &Config,
+        paths: &AppPaths,
+        project_id: &str,
+        photo_id: &str,
+        preset: &str,
+        destination: &str,
+    ) -> anyhow::Result<PhotoRenderView> {
+        let spec = photo_preset_spec(preset)?;
+        let destination_path = PathBuf::from(destination);
+        ensure!(
+            destination_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| spec
+                    .extensions
+                    .iter()
+                    .any(|allowed| value.eq_ignore_ascii_case(allowed))),
+            "the selected file type requires a .{} destination",
+            spec.extensions[0]
+        );
+
+        let mut store = Store::open(&paths.root)?;
+        let project = store
+            .plan_get(DEFAULT_OWNER_ID, project_id)?
+            .with_context(|| format!("project {project_id} was not found"))?;
+        let selected = store
+            .plan_items(DEFAULT_OWNER_ID, project_id)?
+            .into_iter()
+            .find(|item| item.media_kind == MediaKind::Photo && item.media_id == photo_id)
+            .with_context(|| format!("photo {photo_id} is not selected in this project"))?;
+        ensure!(
+            selected.crop_x.is_none(),
+            "this photo has a framing edit that the current photo renderer cannot reproduce yet"
+        );
+        if let Some(grade_json) = selected.grade_json.as_deref() {
+            let grade: serde_json::Value = serde_json::from_str(grade_json)
+                .context("the selected photo color edit is invalid JSON")?;
+            let untreated = grade.as_object().is_some_and(|object| {
+                object.is_empty()
+                    || (object.len() == 1
+                        && object.get("mode").and_then(serde_json::Value::as_str) == Some("none"))
+            });
+            ensure!(
+                untreated,
+                "this photo has a color edit that the current photo renderer cannot reproduce yet"
+            );
+        }
+        let photo = store
+            .photo_by_id(DEFAULT_OWNER_ID, photo_id)?
+            .with_context(|| format!("photo {photo_id} was not found"))?;
+        let annotation =
+            store.editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Photo, photo_id)?;
+        ensure!(
+            !annotation.is_some_and(|value| !value.usable || value.blur_required),
+            "this photo is flagged unusable or blur-required and cannot be rendered"
+        );
+
+        ensure_photo_render_recipe(&store, spec)?;
+        let origin = match selected.origin {
+            PlanOrigin::General => "general",
+            PlanOrigin::Personal => "personal",
+        };
+        let job_id = format!("render-job-{}", Uuid::new_v4());
+        store.render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: job_id.clone(),
+                recipe_id: spec.id.to_owned(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": project.context_key,
+                    "selection_provenance": {
+                        "project_id": project.id,
+                        "position": selected.position,
+                        "origin": origin,
+                        "rank": selected.rank,
+                        "profile_version": selected.profile_version,
+                    },
+                    "sources": [{
+                        "media_kind": "photo",
+                        "media_id": photo.id,
+                        "source_id": photo.id,
+                        "sha256": photo.sha256,
+                        "path": photo.path,
+                    }],
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used",
+                    },
+                })
+                .to_string(),
+                destination_path: destination_path.to_string_lossy().into_owned(),
+                created_at: chrono::Utc::now(),
+            },
+        )?;
+        drop(store);
+
+        let output = Pipeline::new(config.clone(), paths.clone(), CancellationToken::default())
+            .execute_render_job(DEFAULT_OWNER_ID, &job_id)?;
+        ensure!(
+            Path::new(&output.output_path).is_file() && Path::new(&output.manifest_path).is_file(),
+            "render completed without both verified files"
+        );
+        Ok(PhotoRenderView {
+            job_id: output.job_id,
+            output_path: output.output_path,
+            manifest_path: output.manifest_path,
+            output_sha256: output.output_sha256,
+            manifest_sha256: output.manifest_sha256,
+            size_bytes: output.size_bytes,
+            media_type: output.media_type,
+            width: output.width,
+            height: output.height,
+            completed_at: output.created_at.to_rfc3339(),
+        })
+    }
+
     fn plan_view(store: &Store, plan: Plan) -> anyhow::Result<PlanView> {
         let item_count = store.plan_items(DEFAULT_OWNER_ID, &plan.id)?.len();
         Ok(PlanView {
@@ -2433,6 +2642,30 @@ mod macos {
     }
 
     #[tauri::command]
+    async fn render_project_photo(
+        project_id: String,
+        photo_id: String,
+        preset: String,
+        destination: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<PhotoRenderView> {
+        let config = state.config.clone();
+        let paths = state.paths.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            command_result(render_project_photo_job(
+                &config,
+                &paths,
+                &project_id,
+                &photo_id,
+                &preset,
+                &destination,
+            ))
+        })
+        .await
+        .map_err(|error| format!("photo render worker failed: {error}"))?
+    }
+
+    #[tauri::command]
     async fn export_clip(
         id: String,
         out: String,
@@ -2755,6 +2988,7 @@ mod macos {
                 plan_restore_revision,
                 plan_duplicate,
                 selects_candidates,
+                render_project_photo,
                 export_clip,
                 open_in_finder
             ])
@@ -2822,6 +3056,25 @@ mod macos {
             let summary = recover_interrupted_renders(&Config::default(), &paths).unwrap();
 
             assert_eq!(summary, RenderRecoverySummary::default());
+        }
+
+        #[test]
+        fn photo_export_presets_are_versioned_and_reused() {
+            let temporary = tempfile::tempdir().unwrap();
+            let store = Store::open(temporary.path()).unwrap();
+
+            for preset in ["jpeg-srgb-v1", "png-srgb-v1", "tiff-srgb-v1"] {
+                let spec = photo_preset_spec(preset).unwrap();
+                ensure_photo_render_recipe(&store, spec).unwrap();
+                ensure_photo_render_recipe(&store, spec).unwrap();
+            }
+
+            let recipes = store
+                .render_recipes(DEFAULT_OWNER_ID, Some(RenderRecipeKind::Photo))
+                .unwrap();
+            assert_eq!(recipes.len(), 3);
+            assert!(recipes.iter().all(|recipe| recipe.version == 1));
+            assert!(photo_preset_spec("webp").is_err());
         }
     }
 }
