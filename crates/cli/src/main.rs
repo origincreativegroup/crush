@@ -134,6 +134,45 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Import historical evidence from another tool (Task 022).
+    Import {
+        #[command(subcommand)]
+        command: ImportCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportCommand {
+    /// Import a Reel Studio catalogue (`clips.db`) and exported reel recipes. Dry-run by default.
+    ReelStudio {
+        /// Path to the Reel Studio `clips.db`.
+        #[arg(long)]
+        catalogue: PathBuf,
+        /// Directory containing the original source files (repeatable).
+        #[arg(long = "originals")]
+        originals: Vec<PathBuf>,
+        /// Reel Studio library folder holding `clips/<segment_id>.mp4` (improves boundary basis).
+        #[arg(long)]
+        library: Option<PathBuf>,
+        /// Exported reel recipe JSON (repeatable).
+        #[arg(long = "recipe")]
+        recipes: Vec<PathBuf>,
+        /// Context key for the imported projects.
+        #[arg(long, default_value = "default")]
+        context: String,
+        /// Also match originals by SHA-256 when the stored path differs (slow on 4K footage).
+        #[arg(long)]
+        match_by_hash: bool,
+        /// Tolerance recorded for keyframe-aligned library copies, in seconds.
+        #[arg(long, default_value_t = crush_pipeline::reel_studio_import::DEFAULT_KEYFRAME_TOLERANCE_S)]
+        keyframe_tolerance: f64,
+        /// Write the planned changes. Without this flag only the report is produced.
+        #[arg(long)]
+        apply: bool,
+        /// Print the full report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -248,7 +287,120 @@ fn main() -> anyhow::Result<()> {
             json,
         } => selects(&cfg, &paths, brief, context, top, json),
         Cmd::Plans { items, json } => plans(&paths, items, json),
+        Cmd::Import {
+            command:
+                ImportCommand::ReelStudio {
+                    catalogue,
+                    originals,
+                    library,
+                    recipes,
+                    context,
+                    match_by_hash,
+                    keyframe_tolerance,
+                    apply,
+                    json,
+                },
+        } => import_reel_studio(
+            &cfg,
+            &paths,
+            crush_pipeline::reel_studio_import::ImportOptions {
+                catalogue,
+                originals,
+                library,
+                recipes,
+                context_key: context,
+                apply,
+                match_by_hash,
+                keyframe_tolerance_s: keyframe_tolerance,
+                threads: cfg.limits.threads,
+            },
+            json,
+        ),
     }
+}
+
+fn import_reel_studio(
+    _cfg: &Config,
+    paths: &AppPaths,
+    options: crush_pipeline::reel_studio_import::ImportOptions,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut store = Store::open(&paths.root)?;
+    let report = crush_pipeline::reel_studio_import::import_reel_studio(&mut store, &options)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!("{}", report.summary_line());
+    println!(
+        "import {} · catalogue sha256 {}",
+        report.import_id, report.catalogue_sha256
+    );
+    println!("\nsources");
+    for source in &report.sources {
+        println!(
+            "  {:<12} {:<12} {}",
+            source.clip_id,
+            source.matched_by,
+            source.video_id.as_deref().unwrap_or("-")
+        );
+    }
+    println!("\nsegments");
+    for segment in &report.segments {
+        println!(
+            "  {:<16} {:<9} {:>8.3}..{:<8.3} {:<13} ±{:.3}s {}",
+            segment.segment_id,
+            segment.outcome,
+            segment.start_s,
+            segment.end_s,
+            segment.boundary_basis,
+            segment.boundary_tolerance_s,
+            segment.reason.as_deref().unwrap_or("")
+        );
+    }
+    if !report.recipes.is_empty() {
+        println!("\nrecipes");
+        for recipe in &report.recipes {
+            println!(
+                "  {:<40} {:<9} items={} finished={} {}",
+                recipe.file,
+                recipe.outcome,
+                recipe.items,
+                recipe.finished_project,
+                recipe.reason.as_deref().unwrap_or("")
+            );
+        }
+    }
+    if !report.issues.is_empty() {
+        println!("\nissues");
+        for issue in &report.issues {
+            println!(
+                "  {:<15} {:<20} {}",
+                issue.kind, issue.subject, issue.detail
+            );
+        }
+    }
+    let writes = &report.planned_writes;
+    println!(
+        "\nplanned writes: spans +{} ~{} · recipes +{} · projects +{} (items {}) · feedback +{} · reference sets +{}",
+        writes.manual_spans_insert,
+        writes.manual_spans_update,
+        writes.render_recipes_insert,
+        writes.plans_insert,
+        writes.plan_items_insert,
+        writes.feedback_events_insert,
+        writes.reference_sets_insert
+    );
+    if !report.reference_set_candidates.is_empty() {
+        println!(
+            "finished projects eligible as previous-work reference sets (confirm explicitly in Preferences): {}",
+            report.reference_set_candidates.join(", ")
+        );
+    }
+    if !options.apply {
+        println!("\ndry run only — re-run with --apply to write these changes");
+    }
+    Ok(())
 }
 
 fn ingest(
