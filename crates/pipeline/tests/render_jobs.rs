@@ -8,8 +8,9 @@ use crush_core::{Config, DEFAULT_OWNER_ID};
 use crush_pipeline::{sha256_file, Pipeline};
 use crush_store::{
     NewRenderJob, Photo, PhotoStatus, RenderJobStatus, RenderRecipe, RenderRecipeKind, Store,
-    Video, VideoStatus,
 };
+#[cfg(target_os = "macos")]
+use crush_store::{Video, VideoStatus};
 use image::{Rgb, RgbImage};
 
 fn setup_photo_job(
@@ -128,6 +129,7 @@ fn setup_photo_job(
     )
 }
 
+#[cfg(target_os = "macos")]
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
