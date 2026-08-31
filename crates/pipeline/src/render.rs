@@ -522,8 +522,9 @@ impl Pipeline {
                 (rendered.video_duration_s - rendered.requested_duration_s).abs(),
             "frame_rule": "each item delivers round((out_s - in_s) * fps) frames starting at \
                            the first source frame at or after in_s; cuts land exactly at the \
-                           previous item's video duration; audio is trimmed to the item video \
-                           duration so it never outlasts video",
+                           previous item's video duration; audio is trimmed and \
+                           silence-padded to exactly the item video duration so it never \
+                           outlasts video and never shifts later items' audio early",
             "items": rendered.item_verifications.iter().map(|item| json!({
                 "index": item.index,
                 "source_path": item.source_path,

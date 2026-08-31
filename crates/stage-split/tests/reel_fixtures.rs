@@ -316,6 +316,131 @@ fn single_item_source_audio_reel_renders_without_the_concat_filter() {
     assert!(audio_duration <= result.video_duration_s + 0.002);
 }
 
+/// Generate a deterministic source clip in-test with the bundled FFmpeg — no tracked fixture,
+/// so no license/determinism review (review MEDIUM-1 preferred in-test generation). The
+/// `testsrc` video is 320x180 @ 30 fps for exactly 1.0 s; the 1 kHz @ 44.1 kHz sine tone runs
+/// for `audio_duration_s`, so `audio_duration_s < 1.0` produces a source whose audio track
+/// ends early inside the requested item interval — the ordinary real-world clip shape the
+/// review's MEDIUM-1 covers. Pinned lavfi/sine parameters keep the generation reproducible.
+fn generate_tone_source(ffmpeg: &Path, output: &Path, audio_duration_s: f64) {
+    let status = Command::new(ffmpeg)
+        .args(["-v", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x180:rate=30:duration=1",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=1000:sample_rate=44100:duration={audio_duration_s}"),
+        ])
+        .args(["-map", "0:v", "-map", "1:a"])
+        .args(["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p"])
+        .args([
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-tag:v",
+            "avc1",
+        ])
+        .args(["-c:a", "aac", "-b:a", "192k"])
+        .arg(output)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// Root mean square of the mono f32 PCM in `[t0, t1)` — proves where the tone actually plays
+/// in the rendered reel, which is the A/V alignment ground truth for this test.
+fn audio_window_rms(ffmpeg: &Path, input: &Path, t0: f64, t1: f64) -> f64 {
+    const SAMPLE_RATE: usize = 44_100;
+    let output = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(input)
+        .args(["-vn", "-ac", "1", "-ar", "44100", "-f", "f32le", "pipe:1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let samples: Vec<f32> = output
+        .stdout
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect();
+    let start = (t0 * SAMPLE_RATE as f64) as usize;
+    let end = (t1 * SAMPLE_RATE as f64) as usize;
+    let window = &samples[start.min(samples.len())..end.min(samples.len())];
+    assert!(
+        !window.is_empty(),
+        "decoded reel audio is shorter than {t1}s"
+    );
+    f64::from(
+        (window.iter().map(|sample| sample * sample).sum::<f32>() / window.len() as f32).sqrt(),
+    )
+}
+
+/// Review MEDIUM-1: a source whose audio track ends early inside the requested interval is
+/// silence-padded to the item's exact video duration, and a multi-item reel stays A/V
+/// aligned. The concat filter joins item audio end-to-end, so without the pad item B's tone
+/// would start at 0.5 s (where item A's short audio ended) while item B's video starts at the
+/// 1.0 s frame-exact cut — progressive desync published silently.
+#[test]
+fn short_item_audio_is_silence_padded_so_the_reel_stays_aligned() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let ffmpeg = runner.resolved().path.clone();
+    let short_source = temporary.path().join("tone-short-audio.mp4");
+    let full_source = temporary.path().join("tone-full-audio.mp4");
+    generate_tone_source(&ffmpeg, &short_source, 0.5);
+    generate_tone_source(&ffmpeg, &full_source, 1.0);
+    let output = temporary.path().join("short-audio-reel.mp4");
+    let request = ResolvedReelRequest {
+        items: vec![item(&short_source, 0.0, 1.0), item(&full_source, 0.0, 1.0)],
+        format: ReelFormat::Source,
+        music: None,
+        master_volume: 1.0,
+        watermark: None,
+        cover: None,
+        output: ClipOutputPreset::Mp4H264SdrV1,
+    };
+
+    let result = runner.render_reel(&request, &output).unwrap();
+
+    // The pad is in the item command, and verification is fail-closed on the result: each
+    // item's audio duration EQUALS its video duration, never merely "not longer".
+    assert!(result.item_commands[0].contains("apad=whole_dur=1"));
+    assert!(result.item_commands[1].contains("apad=whole_dur=1"));
+    assert_eq!(result.video_frame_count, 60);
+    assert!((result.video_duration_s - 2.0).abs() <= 0.002);
+    let item_a = &result.item_verifications[0];
+    let item_b = &result.item_verifications[1];
+    assert!((item_a.audio_duration_s.unwrap() - 1.0).abs() <= 0.002);
+    assert!((item_b.audio_duration_s.unwrap() - 1.0).abs() <= 0.002);
+    let audio_duration = result.output_probe.audio_duration_s.unwrap();
+    assert!((audio_duration - result.video_duration_s).abs() <= 0.002);
+
+    // Alignment ground truth from the tone: item A's 1 kHz tone plays [0, 0.5) and its
+    // padded silence covers [0.5, 1.0); item B's tone must start at the 1.0 s cut. Without
+    // the pad, [0.55, 0.95) would carry item B's tone and [1.55, 1.95) would be silent.
+    assert!(audio_window_rms(&ffmpeg, &output, 0.05, 0.45) > 0.04);
+    assert!(audio_window_rms(&ffmpeg, &output, 0.55, 0.95) < 0.01);
+    assert!(audio_window_rms(&ffmpeg, &output, 1.05, 1.45) > 0.04);
+    assert!(audio_window_rms(&ffmpeg, &output, 1.55, 1.95) > 0.04);
+}
+
 #[test]
 fn ordered_reel_never_overwrites_a_staging_destination() {
     let temporary = tempfile::tempdir().unwrap();

@@ -945,8 +945,13 @@ impl Runner {
     /// - `-frames:v` delivers exactly `frame_count` frames from that first frame, which is
     ///   `round((out_s - in_s) * fps)` frames — the requested content, no more, no fewer;
     /// - `setpts=PTS-STARTPTS` starts the item's video at zero with no lead dead zone;
-    /// - audio is trimmed to `video_duration_s` (the item's exact video length), so audio
-    ///   never outlasts video inside an item. The native AAC encoder's priming packet stays
+    /// - audio is trimmed to `video_duration_s` (the item's exact video length) and then
+    ///   silence-padded to exactly that duration (`atrim` + `apad`), so item audio is never
+    ///   longer AND never shorter than its video: a source whose audio track ends early
+    ///   inside the item interval is ordinary real-world media, and the silence fill is the
+    ///   editorially expected behavior — but leaving the shortfall would shift every later
+    ///   item's audio early at the concat join (progressive A/V desync). The native AAC
+    ///   encoder's priming packet stays
     ///   at a negative raw timestamp and is presented from zero through the MP4 edit list;
     ///   `-avoid_negative_ts make_zero` is intentionally NOT used because shifting the whole
     ///   item by the audio priming is what created the reel's head dead zone and cut drift.
@@ -1033,10 +1038,14 @@ impl Runner {
             &spec.frame_count.to_string(),
         ]);
         if spec.audio == ClipAudio::Source {
+            // Trim to the exact video duration, then silence-pad to that same duration:
+            // `apad` is a no-op for full-length audio but fills a source track that ends
+            // early inside the item interval, so the item's audio equals its video exactly.
             spec_command = spec_command.args([
                 "-af",
                 &format!(
-                    "asetpts=PTS-STARTPTS,atrim=end={}",
+                    "asetpts=PTS-STARTPTS,atrim=end={},apad=whole_dur={}",
+                    format_number(spec.video_duration_s),
                     format_number(spec.video_duration_s)
                 ),
             ]);

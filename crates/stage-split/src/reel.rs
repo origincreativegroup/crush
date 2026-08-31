@@ -6,10 +6,18 @@
 //!
 //! TASK-036 boundary contract: every item delivers `round((out_s - in_s) * fps)` frames starting
 //! at the first source frame at or after `in_s`, its video timeline starts at zero, and the
-//! assembly places each cut exactly at the previous item's video duration. Within an item the
-//! audio is TRIMMED to the item's video duration (not the reverse): the requested video frames
-//! are the content contract, and padding video to cover audio would invent frames nobody asked
-//! for. The assembly stream-copies the video track and re-encodes one audio track from the
+//! assembly places each cut exactly at the previous item's video duration. When
+//! `(out_s - in_s) * fps` lands exactly on `.5`, `round` (half away from zero) is inclusive: the
+//! item delivers the frame whose PTS equals `out_s`. Within an item the audio is TRIMMED to the
+//! item's video duration and then SILENCE-PADDED to exactly that duration (not the reverse):
+//! the requested video frames are the content contract, and padding video to cover audio would
+//! invent frames nobody asked for. A source whose audio track ends early inside the item
+//! interval is ordinary real-world media — silence-fill is the editorially expected behavior,
+//! and a fail-closed rejection would refuse it — while leaving the shortfall would shift every
+//! later item's audio early at the concat join (progressive A/V desync, published silently).
+//! Verification is therefore fail-closed on the padded result: item and concat audio durations
+//! must EQUAL their video durations within probe tolerance, never merely "not be longer".
+//! The assembly stream-copies the video track and re-encodes one audio track from the
 //! items, because stream-copying item audio would carry each item's AAC encoder-priming packet
 //! (a negative raw timestamp the MP4 edit list normally hides), and the concat demuxer's
 //! per-file timestamp normalization turns that priming into a reel-wide head dead zone and a
@@ -234,9 +242,13 @@ pub struct ReelItemVerification {
     pub in_s: f64,
     pub out_s: f64,
     pub fps: f64,
-    /// First source frame at or after `in_s` — the frame the item must start with.
+    /// First source frame at or after `in_s` — the frame the item must start with. PLANNED by
+    /// the frame rule (fps math from the source probe), not decoded-measured per render; the
+    /// fixture golden content-verifies it against the burned-in frame counter.
     pub first_source_frame: i64,
-    /// Last source frame the item delivers: `first_source_frame + frame_count - 1`.
+    /// Last source frame the item delivers: `first_source_frame + frame_count - 1`. PLANNED by
+    /// the same frame rule and content-verified on the fixture golden — the manifest is not a
+    /// per-render decode measurement.
     pub last_source_frame: i64,
     pub requested_frame_count: i64,
     pub rendered_frame_count: i64,
@@ -476,6 +488,12 @@ impl Runner {
         // Source audio is decoded from the full items, trimmed of the encoder-priming frames
         // that live at negative raw timestamps, joined with the concat filter, and encoded
         // once; the MP4 edit list then presents it from zero without shifting the video.
+        // Every item's audio was already silence-padded to its exact video duration at the
+        // item render (the documented pad-with-silence decision: real-world clips whose
+        // audio ends early are common, and the concat filter joins audio end-to-end, so a
+        // shortfall would start every later item's audio early while its video starts on the
+        // frame-exact boundary). The concat-level verification below re-asserts the totals:
+        // total audio duration must equal total video duration, not merely not exceed it.
         // Re-encoding the reel audio is the documented TASK-036 decision: stream-copying it
         // would carry each item's AAC priming packet, and the concat demuxer's per-file
         // timestamp normalization turns that priming into the reel-wide head dead zone and
@@ -905,7 +923,7 @@ fn plan_item_frames(in_s: f64, out_s: f64, fps: f64) -> Result<ItemFramePlan> {
 }
 
 /// Verify one rendered reel item against its frame plan: exact video frame count, exact
-/// video stream duration, and audio that never outlasts the video.
+/// video stream duration, and audio exactly equal to the video duration (silence-padded).
 fn verify_reel_item(
     output: &Probe,
     index: usize,
@@ -941,11 +959,20 @@ fn verify_reel_item(
             output.has_audio, expected_audio
         )));
     }
-    if let Some(audio_duration) = output.audio_duration_s {
-        if audio_duration > plan.video_duration_s + STREAM_DURATION_TOLERANCE_S {
+    if expected_audio {
+        // Fail-closed equality, not a one-sided cap: the item render silence-pads audio to
+        // exactly the video duration, so BOTH longer and shorter are defects. Shorter audio
+        // would shift every later item's audio early at the concat join (progressive A/V
+        // desync), which a "not longer" check publishes silently.
+        let audio_duration = output.audio_duration_s.ok_or_else(|| {
+            Error::InvalidProbe(format!(
+                "reel item {index} reports no audio stream duration; A/V alignment cannot be verified"
+            ))
+        })?;
+        if (audio_duration - plan.video_duration_s).abs() > STREAM_DURATION_TOLERANCE_S {
             return Err(Error::InvalidProbe(format!(
-                "reel item {index} audio stream lasts {audio_duration:.6}s, longer than its {:.6}s video; \
-                 reel items trim audio to the video duration",
+                "reel item {index} audio stream lasts {audio_duration:.6}s, expected exactly {:.6}s \
+                 (silence-padded); audio longer or shorter than its video desyncs the reel",
                 plan.video_duration_s
             )));
         }
@@ -978,13 +1005,18 @@ fn verify_reel_video_copy(
             plan.frame_count
         )));
     }
-    if let Some(duration) = output.video_duration_s {
-        if (duration - plan.video_duration_s).abs() > STREAM_DURATION_TOLERANCE_S {
-            return Err(Error::InvalidProbe(format!(
-                "reel item {index} video-only copy duration is {duration:.6}s, expected {:.6}s",
-                plan.video_duration_s
-            )));
-        }
+    // A missing duration is an error, not a skip: the concat demuxer offsets each file by
+    // its duration, so an unverified copy duration is an unverified cut position.
+    let duration = output.video_duration_s.ok_or_else(|| {
+        Error::InvalidProbe(format!(
+            "reel item {index} video-only copy reports no video stream duration"
+        ))
+    })?;
+    if (duration - plan.video_duration_s).abs() > STREAM_DURATION_TOLERANCE_S {
+        return Err(Error::InvalidProbe(format!(
+            "reel item {index} video-only copy duration is {duration:.6}s, expected {:.6}s",
+            plan.video_duration_s
+        )));
     }
     Ok(())
 }
@@ -1044,11 +1076,21 @@ fn verify_reel_render(
             output.has_audio, expected_audio
         )));
     }
-    if let Some(audio_duration) = output.audio_duration_s {
-        if audio_duration > video_duration + STREAM_DURATION_TOLERANCE_S {
+    if expected_audio {
+        // Fail-closed equality at the concat level too: every item's audio is silence-padded
+        // to its exact video duration, so the joined track must equal the total video
+        // duration. Shorter means some item's audio started a later item's audio early
+        // (progressive A/V desync); longer means tail audio over a frozen last frame.
+        let audio_duration = output.audio_duration_s.ok_or_else(|| {
+            Error::InvalidProbe(
+                "reel output reports no audio stream duration; A/V alignment cannot be verified"
+                    .to_owned(),
+            )
+        })?;
+        if (audio_duration - video_duration).abs() > STREAM_DURATION_TOLERANCE_S {
             return Err(Error::InvalidProbe(format!(
-                "reel audio stream lasts {audio_duration:.6}s, longer than the {video_duration:.6}s \
-                 video; tail audio must never play over a frozen last frame"
+                "reel audio stream lasts {audio_duration:.6}s, expected exactly {video_duration:.6}s \
+                 to match the video; audio longer or shorter than the video desyncs the reel"
             )));
         }
     }

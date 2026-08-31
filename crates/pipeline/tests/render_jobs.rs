@@ -786,6 +786,18 @@ fn frozen_video_clip_job_encodes_and_publishes_measured_manifest() {
     assert_eq!(manifest["render"]["preset"], "mp4-h264-sdr-v1");
     assert_eq!(manifest["tool_versions"]["backend"], "videotoolbox");
     assert_eq!(manifest["verification"]["source_unchanged"], true);
+    // The approved clip properties are test-enforced, not just documented (review LOW-2):
+    // exactly 15 frames, 1.000 s, 512x288 (the declared 10% inset of 640x360), no audio.
+    let resolved = crush_stage_split::ffmpeg::resolve().unwrap();
+    let probe = crush_stage_split::ffmpeg::Runner::new(resolved, 2, "clip-earth-golden")
+        .probe(&destination)
+        .unwrap()
+        .value;
+    assert_eq!(probe.video_frame_count, Some(15));
+    assert_eq!((probe.width, probe.height), (512, 288));
+    assert!(!probe.has_audio);
+    assert!((probe.duration_s - 1.0).abs() <= 0.05);
+    assert!((probe.video_duration_s.unwrap() - 1.0).abs() <= 0.002);
     preserve_review_output(&output, "clip-earth.mp4");
 }
 
