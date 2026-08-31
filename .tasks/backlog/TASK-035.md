@@ -7,9 +7,9 @@ cancel-vs-published ordering, swallowed transitions, orphan recipes, and queue-t
 rejection). Verify each against the current merged head before coding; several may shrink.
 
 ## Acceptance
-- [ ] One documented duration-tolerance rule shared by `ffmpeg.rs` (frame_tolerance + 0.05) and both
-      executor re-checks in `render.rs`; a 60 fps AAC-priming case cannot pass the encoder check and
-      then fail the executor.
+- [ ] One documented duration-tolerance rule shared by `crates/stage-split/src/ffmpeg.rs`
+      (frame_tolerance + 0.05, ~line 1086) and both executor re-checks in `render.rs` (~481, ~630);
+      a 60 fps AAC-priming case cannot pass the encoder check and then fail the executor.
 - [ ] Startup render recovery leaves the Tauri setup thread (spawn_blocking + event/log), with a
       cheap size/metadata short-circuit before any full SHA-256 of published outputs.
 - [ ] Reel source hashing memoized per resolved path for the before AND after passes; one ffprobe

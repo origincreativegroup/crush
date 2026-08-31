@@ -33,7 +33,7 @@ Local packet: `target/render-golden-review/task-021-pr37-initial/`
 Record approval or rejection with the packet commit and specific artifact names. Do not update
 goldens or mark Task 021 accepted solely because checksums and automated tolerances passed.
 
-## Review record — 2026-08-30 (human hard stop, acting reviewer)
+## Review record — 2026-08-30 (human hard stop — OpenCode, acting reviewer at John's direction)
 
 Packet: `target/render-golden-review/task-021-pr37-initial/`, generated from commit `25b756a`;
 all 11 files verified against `SHA256SUMS` before review. Reviewed on the M4 Pro host; verdicts

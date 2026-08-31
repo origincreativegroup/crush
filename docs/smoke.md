@@ -62,5 +62,4 @@ exists to verify a `.dmg.sha256` against.
 
 Clean-machine route: **NOT EXECUTED** — every checklist item above remains open. Result: **Blocked**
 (not runnable here; also downstream-blocked by the Task 021 render-golden review, which rejected
-the ordered-reel artifact on 2026-08-30 — see `docs/task-021-render-review.md`). Reviewer: acting
-reviewer for the human hard stop. Date: 2026-08-30. No release claim is made or implied.
+the ordered-reel artifact on 2026-08-30 — see `docs/task-021-render-review.md`). Reviewer: OpenCode, acting for the human hard stop at John's direction. Date: 2026-08-30. No release claim is made or implied.

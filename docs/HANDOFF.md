@@ -60,6 +60,15 @@ Task 023 has no automated gate that is release approval either: clean-machine ac
 review. Do not let a green Linux/macOS CI, a passing harness, or a successful `verify-release.sh`
 be written up as a release.
 
+2026-08-30 human-gate review pass (OpenCode, acting reviewer at John's direction): the 021 packet
+was reviewed — photo derivatives and `clip-earth.mp4` APPROVED, `reel-speech-two-cuts.mp4`
+REJECTED for boundary-frame drops (TASK-036 now gates the reel re-render and re-review); the 018
+proof was re-run on HEAD (planted 1.00 vs 0.50, noise refused) and the "learned" claim stays
+WITHHELD pending TASK-032; 023 tooling passed but the clean-machine route was NOT executed (no
+clean machine, no DMG, ad-hoc signature). OpenCode next stretch order lives in `TASKS.md`:
+032 → 033 → 034 → 035; TASK-036 is Lane A's unless idle. Full records:
+`docs/task-021-render-review.md`, `.tasks/done/TASK-018a.md`, `docs/smoke.md`.
+
 Older entries below (2026-08-28 → 2026-08-29) remain the recorded task history; the branch note
 about `generate_handler!` conflict-prone lists is unchanged (rebase onto the merged branch and run
 rustfmt before opening a PR).

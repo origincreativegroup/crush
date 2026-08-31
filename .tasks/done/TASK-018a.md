@@ -35,7 +35,7 @@ to the general ranker (test-enforced); ranking-time gate re-check ignores unlear
 crushctl style retrain/status/reset. HUMAN HARD STOP (docs/HANDOFF.md): the held-out style proof output
 in PR #25 requires John's review before the UI may claim learned status (018b).
 
-## Held-out style proof review — 2026-08-30 (human hard stop, acting reviewer)
+## Held-out style proof review — 2026-08-30 (human hard stop — OpenCode, acting reviewer at John's direction)
 
 - Probes re-run on current HEAD (`838d557`): planted-direction 12 held-out pairs, personal 1.00 vs
   baseline 0.50 → `learned=true`; identical-vector noise 12 pairs, 0.00 vs 0.50 → `learned=false`.
