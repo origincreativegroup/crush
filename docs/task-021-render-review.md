@@ -72,6 +72,30 @@ ordered-reel path must be fixed (reel concat drops tail/step frames while passin
 tolerance), the reel artifact re-rendered by the renderer from a fix commit, and this packet's
 reel item re-reviewed. Do not mark Task 021 accepted on the strength of the passing items alone.
 
+## Re-review request — TASK-036 (2026-08-31)
+
+The ordered-reel boundary-frame defect is fixed on `task/36-reel-frames` (TASK-036). The reel
+artifact was re-rendered by the renderer alone from the fix commit into
+`target/render-golden-review/task-036-reel-fix/` (see its `README.md` and `SHA256SUMS`).
+
+What changed against the rejected artifact, per the burned-in frame counter:
+
+- Requested 0.25–1.25 s + 3.25–4.25 s now renders source frames **8–37 then 98–127** — all 60
+  requested frames; the rejected artifact had 8–36 then 98–124 (56 frames, ~133 ms missing).
+- The ~80 ms dead zone before the first frame is gone: the first video frame presents at PTS 0.
+- The cut lands exactly at 1.000 s (previous item's video duration); the rejected artifact held
+  the last segment-A frame ~113 ms past the cut (PTS 1.0131 → 1.1262).
+- Audio no longer outlasts video: each item's audio is trimmed to that item's exact video
+  duration, so the tail audio over a frozen frame 124 is gone. The reel audio is re-encoded once
+  during assembly (documented decision — see the TASK-036 PR); video is still stream-copied.
+- The manifest now counts the VIDEO stream per item and for the concat (`video_frame_count: 60`,
+  `fps: 30.0`), and records each item's first/last source frame, so this defect class can no
+  longer hide behind an audio-padded container duration.
+
+**Requested from the human reviewer:** re-review only the `reel-speech-two-cuts.mp4` item of
+this packet (cut, two-second rhythm, audio continuity at the cut, orientation, playback). The
+photo and clip items remain as approved in the initial packet and are not re-requested.
+
 ## Deliberate limits of this packet
 
 This packet does not approve advanced mixed-media reels, photo holds, fixed social canvases, music,
