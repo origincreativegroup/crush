@@ -21,6 +21,11 @@ pub const EMBEDDING_DIM: usize = 512;
 /// Weight of the personal residual term in the composed score (the previously magic 0.15).
 pub const PERSONAL_WEIGHT: f32 = 0.15;
 
+/// Weight of the general aesthetic `overall` adjustment in the composed score (the previously
+/// magic 0.16). The style evaluation composes the same weight beside [`PERSONAL_WEIGHT`] so
+/// the eval margin and the production margin cannot drift.
+pub const GENERAL_AESTHETIC_WEIGHT: f64 = 0.16;
+
 /// Named persisted aesthetic features the personal residual may weight, in fixed order.
 /// `aesthetic_feature_vector` fills them in exactly this order from an assessment row.
 pub(crate) const AESTHETIC_FEATURES: [&str; 28] = [
@@ -546,7 +551,9 @@ impl SearchEngine {
 }
 
 fn general_aesthetic_adjustment(assessment: Option<&crush_store::AestheticAssessment>) -> f32 {
-    assessment.map_or(0.0, |value| ((value.overall - 0.5) * 0.16) as f32)
+    assessment.map_or(0.0, |value| {
+        ((value.overall - 0.5) * GENERAL_AESTHETIC_WEIGHT) as f32
+    })
 }
 
 /// The general editorial term with the usability penalty moved out, so the breakdown can show
@@ -1203,6 +1210,26 @@ mod tests {
     fn planted_style_marks_learned_and_beats_the_baseline() {
         let (_directory, mut store) = style_store();
         append_default_picks_and_rejects(&mut store);
+        // Differing general assessments so the composed margin is genuinely exercised: the
+        // owner picks shots the general model scores LOW (overall 0.3) over shots it scores
+        // HIGH (overall 0.7). Every pair then carries a nonzero production-scale general
+        // margin that OPPOSES the personal residual — the composed ranker must override the
+        // general term, while the baseline (general term alone) gets every held-out pair
+        // wrong.
+        for index in 0..6 {
+            store
+                .upsert_aesthetic_assessment(
+                    DEFAULT_OWNER_ID,
+                    &aesthetic_assessment(&format!("shot-good-{index}"), 0.3),
+                )
+                .unwrap();
+            store
+                .upsert_aesthetic_assessment(
+                    DEFAULT_OWNER_ID,
+                    &aesthetic_assessment(&format!("shot-bad-{index}"), 0.7),
+                )
+                .unwrap();
+        }
         let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
             .unwrap()
             .unwrap();
@@ -1223,6 +1250,9 @@ mod tests {
         assert_eq!(metrics["split"], "media-disjoint-every-3rd");
         assert_eq!(metrics["trainer"], "personal-residual-v1");
         assert!(metrics["held_out_pairs"].as_u64().unwrap() >= 4);
+        // The general term is nonzero on every pair (it opposes the picks), so the baseline
+        // must fail every held-out pair while the composed ranker recovers them.
+        assert_eq!(metrics["baseline_accuracy"], 0.0);
     }
 
     #[test]
@@ -1604,6 +1634,53 @@ mod tests {
     }
 
     #[test]
+    fn composed_scoring_uses_the_production_general_margin_scale() {
+        // The composed margin must weight the general term exactly as production does —
+        // GENERAL_AESTHETIC_WEIGHT * (overall - 0.5) per side, so a pair margin is at most
+        // ±2 * 0.08 — never the raw ±1.0 `overall` difference (which would over-credit the
+        // general term ~6.25x and could certify a profile production makes worse).
+        //
+        // Pair 1: the production-maximum general margin (overall 1.0 vs 0.0 → 0.16) beside a
+        // -1.0 residual: the composed vote stays positive (0.16 - 0.15 > 0) while the
+        // residual alone is negative, so the composed accuracy must diverge from the
+        // residual-only accuracy.
+        let production_max = style::eval::RankedPair {
+            margin_features: vec![-1.0],
+            weight: 1.0,
+            plus_media: "shot:a".to_owned(),
+            minus_media: "shot:b".to_owned(),
+            general_margin: 2.0 * GENERAL_AESTHETIC_WEIGHT,
+        };
+        let four = vec![
+            &production_max,
+            &production_max,
+            &production_max,
+            &production_max,
+        ];
+        let outcome = style::eval::evaluate(&four, &[1.0]);
+        assert_eq!(outcome.personal_accuracy, 1.0);
+        assert_eq!(outcome.residual_only_accuracy, 0.0);
+        assert_ne!(
+            outcome.personal_accuracy, outcome.residual_only_accuracy,
+            "the composed vote must diverge from the residual-only vote"
+        );
+        // Pair 2: a mild general margin (overall 0.6 vs 0.4 → production margin 0.032)
+        // cannot outweigh the scaled residual (-0.15). Under the old raw-scale margin
+        // (0.2) this pair wrongly earned composed credit; at production scale it must not.
+        let mild = style::eval::RankedPair {
+            margin_features: vec![-1.0],
+            weight: 1.0,
+            plus_media: "shot:c".to_owned(),
+            minus_media: "shot:d".to_owned(),
+            general_margin: GENERAL_AESTHETIC_WEIGHT * 0.2,
+        };
+        let four = vec![&mild, &mild, &mild, &mild];
+        let outcome = style::eval::evaluate(&four, &[1.0]);
+        assert_eq!(outcome.personal_accuracy, 0.0);
+        assert_eq!(outcome.residual_only_accuracy, 0.0);
+    }
+
+    #[test]
     fn media_disjoint_split_never_shares_media_between_train_and_eval() {
         // Six media, held-out set {c, f} (every third sorted asset): the pair between the two
         // held-out media is the only held-out pair, the pair between two trained media is the
@@ -1648,31 +1725,39 @@ mod tests {
     }
 
     #[test]
-    fn repeated_and_conflicting_evidence_is_netted_not_duplicated() {
+    fn repeated_and_conflicting_prefer_evidence_is_netted_not_duplicated() {
+        // Store-level netting probe (documented beside the planted/noise probes for John's
+        // eval review): the planted 12-media setup plus two prefer votes for good-0 over
+        // bad-0 and one reversed prefer vote. The repeats must accumulate (+1 each) and the
+        // reversal subtract (-1), netting to exactly one extra unit of pair weight — never
+        // duplicated rows, never invented certainty from the conflict.
         let (_directory, mut store) = style_store();
-        // Repeated picks of the same asset (identical evidence) and an exact reversal of the
-        // same pair at equal strength: the conflict nets to zero and must not invent signal.
-        for repeat in 0..3 {
-            append_event(
-                &mut store,
-                &format!("pick-repeat-{repeat}"),
-                "shot-good-0",
-                FeedbackSignal::Pick,
-            );
-        }
-        append_event(
-            &mut store,
-            "reject-good-0",
-            "shot-good-0",
-            FeedbackSignal::Reject,
+        append_default_picks_and_rejects(&mut store);
+        append_prefer_event(&mut store, "prefer-good-0-a", "shot-good-0", "shot-bad-0");
+        append_prefer_event(&mut store, "prefer-good-0-b", "shot-good-0", "shot-bad-0");
+        append_prefer_event(&mut store, "prefer-bad-0", "shot-bad-0", "shot-good-0");
+        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .expect("12 media clear the sample floor; the netting probe must actually train");
+        eprintln!(
+            "repeated+conflicting prefer netting probe (not human approval): {}",
+            profile.metrics_json
         );
-        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID).unwrap();
-        // The three identical picks and one reject of the same media net out; whatever the
-        // outcome, the profile must not claim learned certainty from cancelled evidence.
-        if let Some(profile) = profile {
-            let metrics: serde_json::Value = serde_json::from_str(&profile.metrics_json).unwrap();
-            assert_eq!(metrics["learned"], false);
-        }
+        assert_eq!(profile.sample_count, 12);
+        assert!(profile.learned, "netted evidence must not break the gate");
+
+        // Two repeats minus one reversal net to a single prefer vote's worth of evidence:
+        // the profile trained on one lone prefer pair is identical, proving the conflicting
+        // rows were netted inside pair building instead of duplicating training rows.
+        let (_directory, mut single) = style_store();
+        append_default_picks_and_rejects(&mut single);
+        append_prefer_event(&mut single, "prefer-good-0", "shot-good-0", "shot-bad-0");
+        let single = retrain_style_profile(&mut single, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.embedding_weights, single.embedding_weights);
+        assert_eq!(profile.feature_weights_json, single.feature_weights_json);
+        assert_eq!(profile.metrics_json, single.metrics_json);
     }
 
     fn append_default_picks_and_rejects(store: &mut Store) {
@@ -1694,6 +1779,29 @@ mod tests {
 
     fn append_event(store: &mut Store, id: &str, media_id: &str, signal: FeedbackSignal) {
         append_context_event(store, id, media_id, signal, "default");
+    }
+
+    /// A pairwise `prefer` event: `media_id` preferred over `compared_media_id`. The plain
+    /// `append_event` helper leaves `compared_media_*` unset, which the trainer reads as a
+    /// non-pair event.
+    fn append_prefer_event(store: &mut Store, id: &str, media_id: &str, compared_media_id: &str) {
+        store
+            .append_feedback(
+                DEFAULT_OWNER_ID,
+                &FeedbackEvent {
+                    id: id.to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    media_kind: MediaKind::Shot,
+                    media_id: media_id.to_owned(),
+                    signal: FeedbackSignal::Prefer,
+                    value: None,
+                    compared_media_kind: Some(MediaKind::Shot),
+                    compared_media_id: Some(compared_media_id.to_owned()),
+                    context_json: "{}".to_owned(),
+                    created_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
     }
 
     fn append_context_event(

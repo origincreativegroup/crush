@@ -11,7 +11,7 @@
 //! invents certainty.
 //!
 //! Everything here is hand-written and deterministic: fixed iteration count, fixed learning
-//! rate, deterministically ordered pairs, and a deterministic every-third-pair held-out split.
+//! rate, deterministically ordered pairs, and a deterministic every-third-media held-out split.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -22,7 +22,7 @@ use serde_json::json;
 use crate::{
     media_vector,
     style::eval::{self, RankedPair},
-    AESTHETIC_FEATURES, EMBEDDING_DIM,
+    AESTHETIC_FEATURES, EMBEDDING_DIM, GENERAL_AESTHETIC_WEIGHT,
 };
 
 pub const TRAINER_VERSION: &str = "personal-residual-v1";
@@ -366,13 +366,15 @@ fn ranked_pair(plus: &Sample, minus: &Sample, weight: f64) -> RankedPair {
     for (index, value) in minus.aesthetic.iter().enumerate() {
         margin_features[EMBEDDING_DIM + index] -= f64::from(*value);
     }
-    // The general ranker's pair margin without any personal term: the difference of the
-    // general aesthetic `overall` signal when both sides have assessments, else 0.0. Its sign
-    // is also the non-personalized baseline vote, so evaluation has one source of truth.
-    let general_margin = match (plus.overall, minus.overall) {
-        (Some(plus_overall), Some(minus_overall)) => plus_overall - minus_overall,
-        _ => 0.0,
+    // The production general-aesthetic margin for the pair: the difference of the general
+    // adjustment `GENERAL_AESTHETIC_WEIGHT * (overall - 0.5)` that the composed ranker adds
+    // beside the personal term. A missing side is neutral (adjustment 0, i.e. `overall` 0.5),
+    // matching production's missing-assessment behavior. Its sign is also the
+    // non-personalized baseline vote, so evaluation has one source of truth.
+    let general_adjustment = |overall: Option<f64>| {
+        overall.map_or(0.0, |value| GENERAL_AESTHETIC_WEIGHT * (value - 0.5))
     };
+    let general_margin = general_adjustment(plus.overall) - general_adjustment(minus.overall);
     RankedPair {
         margin_features,
         weight,
@@ -445,5 +447,51 @@ fn cap_norm(weights: &mut [f64], max_norm: f64) {
         for value in weights.iter_mut() {
             *value *= scale;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prefer_sample(media_id: &str, label: f32) -> Sample {
+        Sample {
+            media_kind: MediaKind::Shot,
+            media_id: media_id.to_owned(),
+            label,
+            vector: vec![0.0; EMBEDDING_DIM],
+            aesthetic: [0.0; AESTHETIC_FEATURES.len()],
+            overall: None,
+        }
+    }
+
+    #[test]
+    fn reversed_prefer_pairs_net_to_zero_and_are_dropped() {
+        // (A over B) and (B over A) at equal strength cancel exactly: the netted pair is
+        // dropped rather than trained on as a contradiction or allowed to invent certainty.
+        let a = prefer_sample("a", 1.0);
+        let b = prefer_sample("b", -1.0);
+        let evidence = Evidence {
+            prefer_pairs: vec![(a.clone(), b.clone()), (b, a)],
+            ..Evidence::default()
+        };
+        assert!(build_pairs(&evidence).is_empty());
+    }
+
+    #[test]
+    fn repeated_prefer_pairs_accumulate_weight_not_rows() {
+        // Two identical prefer votes merge into ONE pair carrying weight 2.0: repeated
+        // evidence strengthens the pair, it never duplicates rows in the training set.
+        let a = prefer_sample("a", 1.0);
+        let b = prefer_sample("b", -1.0);
+        let evidence = Evidence {
+            prefer_pairs: vec![(a.clone(), b.clone()), (a, b)],
+            ..Evidence::default()
+        };
+        let pairs = build_pairs(&evidence);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].plus_media, "shot:a");
+        assert_eq!(pairs[0].minus_media, "shot:b");
+        assert_eq!(pairs[0].weight, 2.0);
     }
 }

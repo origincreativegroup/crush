@@ -1176,7 +1176,7 @@ mod macos {
     ) -> CommandResult<bool> {
         command_result((|| {
             let media_kind = parse_media_kind(&media_kind)?;
-            let store = Store::open(&state.paths.root)?;
+            let mut store = Store::open(&state.paths.root)?;
             store.reference_set_remove_item(DEFAULT_OWNER_ID, &set_id, media_kind, &media_id)
         })())
     }

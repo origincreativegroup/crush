@@ -10,9 +10,10 @@
 //!    train or evaluation, so no asset (and no pair touching it) appears on both sides: the
 //!    held-out pairs are always ranked with a residual that never saw their media. Pairs that
 //!    straddle the partition are counted and dropped from both sides.
-//! 2. **The scored margin is the composed production margin** — the general ranker's margin for
-//!    the pair plus the personal affinity scale times the residual margin — not the residual
-//!    alone. The residual-only accuracy is reported next to it for transparency.
+//! 2. **The scored margin is the composed production margin** — the production general
+//!    aesthetic adjustment for the pair plus the personal affinity scale times the residual
+//!    margin — not the residual alone. The residual-only accuracy is reported next to it for
+//!    transparency.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -40,9 +41,12 @@ pub struct RankedPair {
     pub plus_media: String,
     /// Pool key of the rejected side.
     pub minus_media: String,
-    /// The general ranker's margin for this pair without any personal term — the difference of
-    /// the general aesthetic signal when both sides have assessments, else `0.0` (unavailable
-    /// or tied). The composed margin is `general_margin + PERSONAL_AFFINITY_SCALE * residual`.
+    /// The production general-aesthetic margin for this pair without any personal term — the
+    /// difference of the general adjustment `GENERAL_AESTHETIC_WEIGHT * (overall - 0.5)`
+    /// ([`crate::GENERAL_AESTHETIC_WEIGHT`]) that production composes beside the personal
+    /// term. A missing side is neutral (adjustment 0, i.e. `overall` 0.5), matching
+    /// production's missing-assessment behavior. The composed margin is
+    /// `general_margin + PERSONAL_AFFINITY_SCALE * residual`.
     pub general_margin: f64,
 }
 
