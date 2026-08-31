@@ -137,3 +137,48 @@ Other honest caveats for the final post-merge build:
 Result: packaging pipeline **works end-to-end from the branch head** (app + DMG + checksum +
 verify script). Clean-machine route: **STILL NOT EXECUTED**. No release claim is made or implied.
 Reviewer: OpenCode (Lane C tooling trial). Date: 2026-08-31.
+
+## Tooling completion — 2026-08-31, dev M4 Pro host, commit e071484 (TOOLING RUN — not acceptance, not a release claim)
+
+Closes the three gaps the packaging trial found, so the final post-merge DMG build is one
+command (`scripts/package-macos.sh`). **This is a tooling run on a developer machine; every
+clean-machine checklist item above remains open, and the Task 021 render-golden review gate is
+unchanged.**
+
+What changed:
+
+- **Build provenance (gap: `build commit: unknown`):** `CRUSH_BUILD_COMMIT` is stamped at build
+  time into `crush-core` (build.rs + `BUILD_COMMIT` const) and surfaced by
+  `crush-app --build-info` and `crushctl --version`. Unset builds honestly report
+  `unknown-local`, never a fake commit. `scripts/verify-release.sh` now reads the commit from
+  the Info.plist-resolved bundle executable (`crush-app`, not the old wrong probe) and fails
+  visibly on any artifact that cannot self-report a stamped commit.
+- **Ad-hoc labeling (gap: unlabeled ad-hoc DMG):** `scripts/package-macos.sh` writes an
+  unmissable `BUILD-ADHOC.txt` marker next to the DMG (ad-hoc codesign evidence + build date +
+  build commit + DMG checksum) and removes any stale marker on signed builds. Documented in
+  `docs/release.md` ("Telling an ad-hoc build from a notarized one before installing").
+- **One command:** `scripts/package-macos.sh` = provenance stamp → `CI=true cargo tauri build
+  --bundles app,dmg` → DMG `.sha256` → ad-hoc label → release `crushctl` build.
+
+New verify-release.sh output lines against the fresh `.app` (full report:
+`/tmp/crush-tooling-completion-report.txt`):
+
+```
+bundle executable: crush-app
+build commit: e071484
+codesign verify: PASS
+  CodeDirectory v=20500 size=101646 flags=0x10002(adhoc,runtime) hashes=3170+3 location=embedded
+  Signature=adhoc
+```
+
+Artifacts: `Crush_0.0.1_aarch64.dmg` (sha256
+`7c338bcbeacb7f2be69b014c83ef52c2da845befa439c1241c101171fcd7f8ef`, recorded alongside as
+`.sha256`), `BUILD-ADHOC.txt` marker, app sha256
+`8e4e73974850130adf3edcf483e90155e7e12668dec250459aa7026bc4967974`. Same dev-host caveats as
+the trial apply (doctor resolved ffmpeg from the source checkout; existing data directory;
+notarization/Developer ID/tagged workflow unexercised — no release workflow exists in CI yet,
+and a future one must export `CRUSH_BUILD_COMMIT` the same way the packaging script does).
+
+Result: tooling gaps closed; verify script PASS with real provenance. Clean-machine route:
+**STILL NOT EXECUTED**. No release claim is made or implied. Reviewer: OpenCode (Lane C
+tooling). Date: 2026-08-31.
