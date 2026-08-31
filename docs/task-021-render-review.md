@@ -35,7 +35,8 @@ goldens or mark Task 021 accepted solely because checksums and automated toleran
 
 ## Review record — 2026-08-30 (human hard stop — OpenCode, acting reviewer at John's direction)
 
-Packet: `target/render-golden-review/task-021-pr37-initial/`, generated from commit `25b756a`;
+John confirmed on 2026-08-30 that he directed OpenCode to run this review; these verdicts carry
+that delegated authority. Packet: `target/render-golden-review/task-021-pr37-initial/`, generated from commit `25b756a`;
 all 11 files verified against `SHA256SUMS` before review. Reviewed on the M4 Pro host; verdicts
 are per artifact, not a blanket approval.
 

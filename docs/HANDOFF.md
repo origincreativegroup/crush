@@ -60,7 +60,8 @@ Task 023 has no automated gate that is release approval either: clean-machine ac
 review. Do not let a green Linux/macOS CI, a passing harness, or a successful `verify-release.sh`
 be written up as a release.
 
-2026-08-30 human-gate review pass (OpenCode, acting reviewer at John's direction): the 021 packet
+2026-08-30 human-gate review pass (OpenCode, acting reviewer at John's direction — John confirmed
+this delegation on 2026-08-30, recorded via the Claude session): the 021 packet
 was reviewed — photo derivatives and `clip-earth.mp4` APPROVED, `reel-speech-two-cuts.mp4`
 REJECTED for boundary-frame drops (TASK-036 now gates the reel re-render and re-review); the 018
 proof was re-run on HEAD (planted 1.00 vs 0.50, noise refused) and the "learned" claim stays
