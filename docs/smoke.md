@@ -63,3 +63,77 @@ exists to verify a `.dmg.sha256` against.
 Clean-machine route: **NOT EXECUTED** — every checklist item above remains open. Result: **Blocked**
 (not runnable here; also downstream-blocked by the Task 021 render-golden review, which rejected
 the ordered-reel artifact on 2026-08-30 — see `docs/task-021-render-review.md`). Reviewer: OpenCode, acting for the human hard stop at John's direction. Date: 2026-08-30. No release claim is made or implied.
+
+## Pre-merge packaging trial — 2026-08-31, dev M4 Pro host, commit 4765ca0 on `task/21-render-export` (TOOLING TRIAL — not acceptance, not a release claim)
+
+**This is a tooling trial from the pre-merge branch head. It is NOT clean-machine acceptance
+and NOT a release claim.** Its only purpose is to prove the DMG packaging pipeline works
+end-to-end before merge, so the final post-merge build is low-risk. Every clean-machine checklist
+item above remains open, and the Task 021 render-golden review gate is unchanged.
+
+Environment: developer machine (Xcode/Rust/Node/source checkout present) — same host limitation
+as the 2026-08-30 tooling run. Pinned `cargo-tauri` 2.11.4. Sidecars verified against the pinned
+CI digests before building: `ffmpeg` `73a21147…fae29d0d`, `ffprobe` `da8681f3…b3d6380d` (match
+`.github/workflows/ci.yml`).
+
+Commands used (exact):
+
+```sh
+CI=true cargo tauri build --bundles app,dmg
+# config bundle targets list only "app", so the DMG target is passed explicitly;
+# CI=true per TASK-023 for headless DMG creation. Ad-hoc signing comes from
+# tauri.macos.conf.json "signingIdentity": "-" (no Developer ID secrets on this host).
+CRUSH_APP="$PWD/target/release/bundle/macos/Crush.app" \
+  RELEASE_REPORT=/tmp/crush-packaging-trial-report.txt scripts/verify-release.sh
+cd target/release/bundle/dmg && shasum -a 256 Crush_0.0.1_aarch64.dmg \
+  > Crush_0.0.1_aarch64.dmg.sha256
+```
+
+Artifacts:
+
+- DMG: `target/release/bundle/dmg/Crush_0.0.1_aarch64.dmg` — 37,512,760 bytes (~36 MB)
+- DMG SHA-256: `327e75ac0de87691919efa790097489fe442685b5e22e65495a2925803ce0b45`
+  (recorded alongside as `Crush_0.0.1_aarch64.dmg.sha256`)
+- App bundle: `target/release/bundle/macos/Crush.app`, bundle version 0.0.1
+- App SHA-256 (verify-release.sh full-bundle digest): `385a8db1af1bfd590c5051045969c10b3a132b36322ca20150c5c2dff912ae9b`
+- The `.app` inside the mounted DMG was confirmed file-for-file and hash-for-hash identical
+  to the verified bundle (mounted read-only via `hdiutil`; per-file sha256 lists diff clean).
+- Wall clock: ~39 s end-to-end, but the release profile was largely incremental (compile step
+  19.3 s); a clean-machine or CI build from scratch will take much longer.
+
+`scripts/verify-release.sh` verdict: **PASS** — run against the freshly built `.app` via
+`CRUSH_APP` (the script verifies an .app bundle, not a DMG; `/Applications/Crush.app` was not
+touched). Summary: codesign deep-strict verify PASS (ad-hoc), 2 sidecars present in
+`Contents/MacOS`, models green, database integrity clean, doctor `active=coreml
+providers=cpu,coreml`, whisper Metal, 24 GiB RAM. Full report: `/tmp/crush-packaging-trial-report.txt`.
+
+Ad-hoc signature evidence (`codesign -dv --verbose=2` on the built bundle):
+
+```
+Identifier=dev.crush.app
+CodeDirectory v=20500 size=101614 flags=0x10002(adhoc,runtime) hashes=3169+3 location=embedded
+Signature=adhoc
+TeamIdentifier=not set
+```
+
+Build log also states `Signing with identity "-"` and `skipping app notarization, no APPLE_ID…`.
+**Ad-hoc labeling gap (honest caveat):** the DMG filename `Crush_0.0.1_aarch64.dmg` and bundle
+metadata do NOT themselves say "ad-hoc" — TASK-023's "labels an ad-hoc build unmistakably"
+requirement is not yet implemented in the build tooling (no release workflow exists yet). For
+this trial the ad-hoc status is evidenced only by the codesign output above and the recorded
+checksums. The final post-merge build should add the label (e.g., rename or a sidecar marker).
+
+Other honest caveats for the final post-merge build:
+
+- `verify-release.sh` printed `build commit: unknown`: it probes
+  `Contents/MacOS/crush --version`, but the bundled binary is named `crush-app`. Script/bundle
+  naming mismatch to reconcile before the release build.
+- Doctor resolved ffmpeg from the source checkout (`target/debug/ffmpeg`), impossible on a
+  clean machine — further proof this was a dev-host tooling trial, not acceptance.
+- Doctor ran against this machine's existing `dev.crush.app` data directory, not a fresh one.
+- Notarization, Developer ID signing, and the tagged release workflow remain unexercised
+  (secrets only exist in CI per the blueprint).
+
+Result: packaging pipeline **works end-to-end from the branch head** (app + DMG + checksum +
+verify script). Clean-machine route: **STILL NOT EXECUTED**. No release claim is made or implied.
+Reviewer: OpenCode (Lane C tooling trial). Date: 2026-08-31.

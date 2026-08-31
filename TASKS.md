@@ -26,7 +26,7 @@
 | TASK-019 | Mixed-media review and DAM organization | OpenCode | done — 019a PR #30, 019b PR #31 |
 | TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | OpenCode + Codex | 020a merged (#33/#34); 020b UI merged (#36); automatic sequence/repetition judgment remains open |
 | TASK-020b | Plans UI + selection provenance | Codex (Mac) | done — PR #36; Linux/macOS CI and local/browser acceptance green |
-| TASK-021 | Non-destructive recipes + photo/video render and export | Codex team (Mac) | in progress — 2026-08-30 human render-golden review (OpenCode acting reviewer): photo + single-clip APPROVED, ordered-reel REJECTED for boundary-frame drops (TASK-036); reel re-render + human re-review required |
+| TASK-021 | Non-destructive recipes + photo/video render and export | Codex team (Mac) | in progress — photo + single-clip APPROVED (2026-08-30); ordered-reel defect fixed via TASK-036 (PR #41, merged into this branch as `4765ca0`), packet re-rendered and machine-verified; **only the human reel re-review remains** (`docs/task-021-render-review.md` § re-review request) |
 | TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | merged onto the Task 021 branch — schema v11 spans/ledger/provenance, dry-run + idempotent importer, CLI + Library dialog, span rendering; waits behind 021 review |
 | TASK-023 | DAM release packaging, UI CI, and clean-machine acceptance | Codex (Mac) | in progress — `verify-release.sh`, `doctor --deep`, `docs/release.md`, real-language harness + smoke checklist in place; clean-machine human acceptance remains |
 | TASK-024 | Source-fidelity truthfulness + ranking breakdown export | OpenCode | done — PR #22; orientation truthful, real ICC tests, plain-language breakdown |
@@ -58,11 +58,11 @@ boundary/audio/manifest artifacts), **018 held-out style proof**, and **023 clea
 acceptance** (`docs/smoke.md`). No agent test or CI is release approval. 028–031 remain the additive
 Windows track. See `docs/platform-architecture.md`. PyTorch is reserved for training/evaluation and
 validated ONNX export; the shipped app always retains a CPU path.
-| TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | in progress — PR #39 (`task/32-style-eval`): media-disjoint split, composed-ranker gate, withdrawal invalidation; gates any "learned" claim |
-| TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | in progress — PR #40 (`task/33-sequence`, stacked on #37): sequence signals + one-click suggestions + selects duplicate cap |
+| TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | done — merged as PR #39 (`2766843`): media-disjoint split, production-scale composed-ranker gate, transactional withdrawal, netting probes; review fixes applied and confirmed |
+| TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | in review — PR #40 (`task/33-sequence`, stacked on #37): sequence signals + one-click suggestions + selects duplicate cap; reviewed MERGE, follow-ups applied (clique guard, CLI cap echo, median panic fix), CI green; merges after #37 |
 | TASK-034 | Imported-evidence search + explicit confirmation bridge (022 follow-up) | OpenCode | backlog — next stretch, after 021/022 merge |
 | TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | backlog — next stretch, after 021 merge; no golden changes |
-| TASK-036 | Ordered-reel boundary-frame drops (021 review rejection) | OpenCode (Lane A idle) | in review — PR #41 (`task/36-reel-frames`): frame-exact items + boundary-true concat, fixture goldens assert source frames 8–37/98–127; reel re-render packet at `target/render-golden-review/task-036-reel-fix/`; **human reel re-review still open — gates 021** |
+| TASK-036 | Ordered-reel boundary-frame drops (021 review rejection) | OpenCode (Lane A idle) | engineering done — PR #41 squash-merged into the 021 branch (`4765ca0`): frame-exact items, exact-cut concat, silence-padded audio, fail-closed VIDEO-stream verification, fixture golden; packet re-rendered + machine-verified (see `docs/task-021-render-review.md`); **human reel re-review pending — gates 021** |
 
 ## OpenCode next stretch (2026-08-30)
 
