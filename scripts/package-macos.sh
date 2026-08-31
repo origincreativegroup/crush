@@ -35,8 +35,9 @@ echo "==> build commit: $CRUSH_BUILD_COMMIT"
 #    the DMG target is passed explicitly because tauri.conf.json lists only "app".
 CI=true cargo tauri build --bundles app,dmg
 
-APP="target/release/bundle/macos/Crush.app"
-DMG_DIR="target/release/bundle/dmg"
+# Absolute paths: `defaults read` treats relative paths as domain names.
+APP="$ROOT/target/release/bundle/macos/Crush.app"
+DMG_DIR="$ROOT/target/release/bundle/dmg"
 EXECUTABLE_NAME="$(defaults read "$APP/Contents/Info" CFBundleExecutable 2>/dev/null || true)"
 if [ -z "$EXECUTABLE_NAME" ] || [ ! -x "$APP/Contents/MacOS/$EXECUTABLE_NAME" ]; then
   echo "error: expected bundle not found or incomplete at $APP" >&2
@@ -87,4 +88,4 @@ if [ -f "$MARKER" ]; then
 fi
 echo
 echo "Next: verify the bundle:"
-echo "  CRUSH_APP=\"$ROOT/$APP\" CRUSHCTL=\"$ROOT/target/release/crushctl\" scripts/verify-release.sh"
+echo "  CRUSH_APP=\"$APP\" CRUSHCTL=\"$ROOT/target/release/crushctl\" scripts/verify-release.sh"
