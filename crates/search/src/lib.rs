@@ -1220,7 +1220,7 @@ mod tests {
         assert!(held_out >= 0.6);
         let metrics: serde_json::Value = serde_json::from_str(&profile.metrics_json).unwrap();
         assert_eq!(metrics["learned"], true);
-        assert_eq!(metrics["split"], "loo-every-3rd");
+        assert_eq!(metrics["split"], "media-disjoint-every-3rd");
         assert_eq!(metrics["trainer"], "personal-residual-v1");
         assert!(metrics["held_out_pairs"].as_u64().unwrap() >= 4);
     }
@@ -1390,7 +1390,10 @@ mod tests {
             profile.metrics_json
         );
         assert_eq!(profile.held_out_metric, Some(0.0));
-        assert_eq!(profile.baseline_metric, Some(0.5));
+        // The media-disjoint composed evaluation: identical vectors carry no learnable
+        // direction, and general-margin ties give the baseline no credit either — the probe
+        // ends at 0.0 vs 0.0, far from any learned claim.
+        assert_eq!(profile.baseline_metric, Some(0.0));
 
         // The profile is active but unlearned: ranking must ignore it entirely.
         let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
@@ -1409,6 +1412,31 @@ mod tests {
     #[test]
     fn confirmed_reference_sets_train_but_unconfirmed_sets_stay_inert() {
         let (_directory, mut store) = style_store();
+        seed_confirmed_previous_work_set(&mut store);
+        // Before confirmation nothing trains: the set is inert until the explicit confirm.
+        // (The helper confirms at the end; unconfirmed-only behavior is covered below by
+        // re-creating an inert set.)
+        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .unwrap();
+        assert!(profile.learned);
+        assert_eq!(profile.sample_count, 12);
+        // Disabling mutes the evidence without deleting it AND invalidates the profile it
+        // trained: the active profile falls back to the general model immediately, and the
+        // next retrain has no positives to restore learning from.
+        store
+            .reference_set_disable(DEFAULT_OWNER_ID, "set-previous-work")
+            .unwrap();
+        assert!(store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+    }
+
+    fn seed_confirmed_previous_work_set(store: &mut Store) {
         let now = chrono::Utc::now();
         store
             .reference_set_create(
@@ -1445,34 +1473,81 @@ mod tests {
         // Negatives exist, but an unconfirmed set is inert: no curated evidence, no training.
         for index in 0..6 {
             append_event(
-                &mut store,
+                store,
                 &format!("reject-{index}"),
                 &format!("shot-bad-{index}"),
                 FeedbackSignal::Reject,
             );
         }
-        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+        assert!(retrain_style_profile(store, DEFAULT_OWNER_ID)
             .unwrap()
             .is_none());
-
         assert!(
             store
                 .reference_set_confirm(DEFAULT_OWNER_ID, "set-previous-work")
                 .unwrap(),
             "confirming an existing set must succeed"
         );
-        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
-            .unwrap()
-            .unwrap();
-        assert!(profile.learned);
-        assert_eq!(profile.sample_count, 12);
-        // Disabling mutes the evidence without deleting it; the next retrain has no positives.
+    }
+
+    #[test]
+    fn deleting_a_confirmed_set_also_invalidates_its_profile() {
+        let (_directory, mut store) = style_store();
+        seed_confirmed_previous_work_set(&mut store);
+        assert!(
+            retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+                .unwrap()
+                .unwrap()
+                .learned
+        );
         store
-            .reference_set_disable(DEFAULT_OWNER_ID, "set-previous-work")
+            .reference_set_delete(DEFAULT_OWNER_ID, "set-previous-work")
             .unwrap();
+        assert!(store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
         assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn disabling_an_unconfirmed_set_leaves_profiles_alone() {
+        let (_directory, mut store) = style_store();
+        seed_confirmed_previous_work_set(&mut store);
+        assert!(
+            retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+                .unwrap()
+                .unwrap()
+                .learned
+        );
+        // A second, never-confirmed set has contributed no evidence; disabling it must not
+        // invalidate a profile that was never trained on it.
+        store
+            .reference_set_create(
+                DEFAULT_OWNER_ID,
+                &crush_store::ReferenceSet {
+                    id: "set-other".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    name: "Other work".to_owned(),
+                    context_key: "default".to_owned(),
+                    description: String::new(),
+                    scope: crush_store::ReferenceSetScope::WholeSet,
+                    status: crush_store::ReferenceSetStatus::Unconfirmed,
+                    source_collection_id: None,
+                    created_at: chrono::Utc::now(),
+                    confirmed_at: None,
+                },
+            )
+            .unwrap();
+        store
+            .reference_set_disable(DEFAULT_OWNER_ID, "set-other")
+            .unwrap();
+        assert!(store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1512,17 +1587,92 @@ mod tests {
         let pair = style::eval::RankedPair {
             margin_features: vec![1.0],
             weight: 1.0,
-            baseline_vote: 0.5,
+            plus_media: "shot:a".to_owned(),
+            minus_media: "shot:b".to_owned(),
+            general_margin: 0.0,
         };
         let four = vec![&pair, &pair, &pair, &pair];
         let tied = style::eval::evaluate(&four, &[0.0]);
         assert_eq!(tied.personal_accuracy, 0.0);
-        assert_eq!(tied.baseline_accuracy, 0.5);
+        assert_eq!(tied.residual_only_accuracy, 0.0);
+        assert_eq!(tied.baseline_accuracy, 0.0);
         assert!(!tied.learned, "ties must count as failures");
         let winning = style::eval::evaluate(&four, &[1.0]);
         assert!(winning.learned);
         let too_few = vec![&pair, &pair, &pair];
         assert!(!style::eval::evaluate(&too_few, &[1.0]).learned);
+    }
+
+    #[test]
+    fn media_disjoint_split_never_shares_media_between_train_and_eval() {
+        // Six media, held-out set {c, f} (every third sorted asset): the pair between the two
+        // held-out media is the only held-out pair, the pair between two trained media is the
+        // only train pair, and the straddling pairs are dropped from both sides and counted.
+        let pair = |plus: &str, minus: &str| style::eval::RankedPair {
+            margin_features: vec![1.0],
+            weight: 1.0,
+            plus_media: plus.to_owned(),
+            minus_media: minus.to_owned(),
+            general_margin: 0.0,
+        };
+        let pairs = vec![
+            pair("shot:a", "shot:b"),
+            pair("shot:b", "shot:e"),
+            pair("shot:c", "shot:f"),
+            pair("shot:a", "shot:c"),
+            pair("shot:d", "shot:f"),
+        ];
+        let split = style::eval::split_pairs(&pairs);
+        let train_media: std::collections::BTreeSet<&str> = split
+            .train
+            .iter()
+            .flat_map(|pair| [pair.plus_media.as_str(), pair.minus_media.as_str()])
+            .collect();
+        let held_media: std::collections::BTreeSet<&str> = split
+            .held_out
+            .iter()
+            .flat_map(|pair| [pair.plus_media.as_str(), pair.minus_media.as_str()])
+            .collect();
+        assert!(
+            train_media.is_disjoint(&held_media),
+            "no media may appear on both sides of the split"
+        );
+        assert_eq!(
+            train_media,
+            ["shot:a", "shot:b", "shot:e"].into_iter().collect()
+        );
+        assert_eq!(held_media, ["shot:c", "shot:f"].into_iter().collect());
+        assert_eq!(split.train.len(), 2);
+        assert_eq!(split.held_out.len(), 1);
+        assert_eq!(split.straddling_pairs, 2);
+    }
+
+    #[test]
+    fn repeated_and_conflicting_evidence_is_netted_not_duplicated() {
+        let (_directory, mut store) = style_store();
+        // Repeated picks of the same asset (identical evidence) and an exact reversal of the
+        // same pair at equal strength: the conflict nets to zero and must not invent signal.
+        for repeat in 0..3 {
+            append_event(
+                &mut store,
+                &format!("pick-repeat-{repeat}"),
+                "shot-good-0",
+                FeedbackSignal::Pick,
+            );
+        }
+        append_event(
+            &mut store,
+            "reject-good-0",
+            "shot-good-0",
+            FeedbackSignal::Reject,
+        );
+        let profile = retrain_style_profile(&mut store, DEFAULT_OWNER_ID).unwrap();
+        // The three identical picks and one reject of the same media net out; whatever the
+        // outcome, the profile must not claim learned certainty from cancelled evidence.
+        if let Some(profile) = profile {
+            let metrics: serde_json::Value = serde_json::from_str(&profile.metrics_json).unwrap();
+            assert_eq!(metrics["learned"], false);
+        }
     }
 
     fn append_default_picks_and_rejects(store: &mut Store) {

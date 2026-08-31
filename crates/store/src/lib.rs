@@ -1402,7 +1402,9 @@ impl Store {
         self.reference_set_set_status(owner_id, set_id, ReferenceSetStatus::Confirmed)
     }
 
-    /// Mute a set without deleting it; the trainer stops reading its items.
+    /// Mute a set without deleting it; the trainer stops reading its items. Deactivating a
+    /// confirmed set also invalidates the affected context's active profile so withdrawn
+    /// evidence stops influencing ranking (retrain-or-fallback).
     pub fn reference_set_disable(&mut self, owner_id: &str, set_id: &str) -> anyhow::Result<bool> {
         self.reference_set_set_status(owner_id, set_id, ReferenceSetStatus::Disabled)
     }
@@ -1413,6 +1415,15 @@ impl Store {
         set_id: &str,
         status: ReferenceSetStatus,
     ) -> anyhow::Result<bool> {
+        let prior: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT status FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read reference set status")?;
         let changed = self
             .connection
             .execute(
@@ -1426,12 +1437,57 @@ impl Store {
                 ],
             )
             .context("failed to update reference set status")?;
+        // Withdrawing confirmed evidence must invalidate the profile it trained
+        // (docs/review-2026-08-29.md finding 3): the trainer intentionally retains the
+        // previous profile below the sample floor, so deactivation is what makes the ranker
+        // fall back to the general model until a retrain re-proves learning.
+        if changed == 1
+            && status == ReferenceSetStatus::Disabled
+            && prior.as_deref() == Some(reference_status_to_str(ReferenceSetStatus::Confirmed))
+        {
+            let context_key: String = self
+                .connection
+                .query_row(
+                    "SELECT context_key FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                    params![owner_id, set_id],
+                    |row| row.get(0),
+                )
+                .context("failed to read reference set context")?;
+            self.deactivate_style_profiles_for_context(owner_id, &context_key)?;
+        }
         Ok(changed == 1)
     }
 
+    /// Deactivate every active style profile for one (owner, context): withdrawn evidence
+    /// invalidates what it trained. Profile rows are versioned and never deleted.
+    fn deactivate_style_profiles_for_context(
+        &mut self,
+        owner_id: &str,
+        context_key: &str,
+    ) -> anyhow::Result<()> {
+        self.connection
+            .execute(
+                "UPDATE style_profiles SET active = 0
+                 WHERE owner_id = ?1 AND context_key = ?2 AND active = 1",
+                params![owner_id, context_key],
+            )
+            .context("failed to deactivate style profiles after evidence withdrawal")?;
+        Ok(())
+    }
+
     /// Delete a set; its items cascade and the next retrain reproduces the profile from the
-    /// remaining evidence.
+    /// remaining evidence. Deleting a confirmed set invalidates the affected context's active
+    /// profile the same way disabling does.
     pub fn reference_set_delete(&mut self, owner_id: &str, set_id: &str) -> anyhow::Result<bool> {
+        let prior: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT status, context_key FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to read reference set before delete")?;
         let changed = self
             .connection
             .execute(
@@ -1439,6 +1495,15 @@ impl Store {
                 params![owner_id, set_id],
             )
             .context("failed to delete reference set")?;
+        if changed == 1
+            && prior.as_ref().is_some_and(|(status, _)| {
+                status == reference_status_to_str(ReferenceSetStatus::Confirmed)
+            })
+        {
+            if let Some((_, context_key)) = prior {
+                self.deactivate_style_profiles_for_context(owner_id, &context_key)?;
+            }
+        }
         Ok(changed == 1)
     }
 
@@ -1477,6 +1542,15 @@ impl Store {
         media_kind: MediaKind,
         media_id: &str,
     ) -> anyhow::Result<bool> {
+        let confirmed: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT status FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read reference set before item removal")?;
         let changed = self
             .connection
             .execute(
@@ -1485,6 +1559,25 @@ impl Store {
                 params![owner_id, set_id, media_kind_to_str(media_kind), media_id],
             )
             .context("failed to remove reference set item")?;
+        if changed == 1
+            && confirmed.as_deref() == Some(reference_status_to_str(ReferenceSetStatus::Confirmed))
+        {
+            let context_key: String = self
+                .connection
+                .query_row(
+                    "SELECT context_key FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                    params![owner_id, set_id],
+                    |row| row.get(0),
+                )
+                .context("failed to read reference set context")?;
+            self.connection
+                .execute(
+                    "UPDATE style_profiles SET active = 0
+                     WHERE owner_id = ?1 AND context_key = ?2 AND active = 1",
+                    params![owner_id, context_key],
+                )
+                .context("failed to deactivate style profiles after item removal")?;
+        }
         Ok(changed == 1)
     }
 

@@ -71,10 +71,11 @@ pub fn retrain_style_profile_for_context(
     if pairs.is_empty() {
         return Ok(None);
     }
-    let (train, held_out) = eval::split_pairs(&pairs);
-    let lambda = BASE_LAMBDA / (1.0 + train.len() as f64);
-    let weights = train_weights(&train, lambda);
-    let outcome = eval::evaluate(&held_out, &weights);
+    let split = eval::split_pairs(&pairs);
+    let lambda = BASE_LAMBDA / (1.0 + split.train.len() as f64);
+    let weights = train_weights(&split.train, lambda);
+    let mut outcome = eval::evaluate(&split.held_out, &weights);
+    outcome.straddling_pairs = split.straddling_pairs;
 
     let clip_weights = weights[..EMBEDDING_DIM]
         .iter()
@@ -296,17 +297,59 @@ fn prefer_pair(
 }
 
 fn build_pairs(evidence: &Evidence) -> Vec<RankedPair> {
-    let mut pairs = Vec::new();
+    // Merge every evidence source into one map keyed by the ordered media pair, netting
+    // conflicting directions explicitly: a reverse pair subtracts from the forward one, and a
+    // fully cancelled pair is dropped rather than allowed to invent certainty. Repeated
+    // evidence accumulates weight; it never duplicates rows in the training set.
+    let mut merged: BTreeMap<(String, String), (f64, RankedPair)> = BTreeMap::new();
+    let mut insert = |pair: RankedPair| {
+        let forward = pair.plus_media <= pair.minus_media;
+        let (key, signed) = if forward {
+            (
+                (pair.plus_media.clone(), pair.minus_media.clone()),
+                pair.weight,
+            )
+        } else {
+            (
+                (pair.minus_media.clone(), pair.plus_media.clone()),
+                -pair.weight,
+            )
+        };
+        let base = if forward { pair } else { flip_pair(&pair) };
+        let entry = merged.entry(key).or_insert_with(|| (0.0, base));
+        entry.0 += signed;
+    };
     for (plus, minus) in &evidence.prefer_pairs {
-        pairs.push(ranked_pair(plus, minus, 1.0));
+        insert(ranked_pair(plus, minus, 1.0));
     }
     for plus in cap_pool(&evidence.positives) {
         for minus in cap_pool(&evidence.negatives) {
             let weight = f64::from(plus.label.abs().min(minus.label.abs()));
-            pairs.push(ranked_pair(plus, minus, weight));
+            insert(ranked_pair(plus, minus, weight));
         }
     }
-    pairs
+    merged
+        .into_values()
+        .filter(|(net, _)| net.abs() > f64::EPSILON)
+        .map(|(net, mut pair)| {
+            if net < 0.0 {
+                pair = flip_pair(&pair);
+            }
+            pair.weight = net.abs();
+            pair
+        })
+        .collect()
+}
+
+/// The same pair with its sides exchanged; margins and media keys negate together.
+fn flip_pair(pair: &RankedPair) -> RankedPair {
+    RankedPair {
+        margin_features: pair.margin_features.iter().map(|value| -value).collect(),
+        weight: pair.weight,
+        plus_media: pair.minus_media.clone(),
+        minus_media: pair.plus_media.clone(),
+        general_margin: -pair.general_margin,
+    }
 }
 
 fn ranked_pair(plus: &Sample, minus: &Sample, weight: f64) -> RankedPair {
@@ -323,10 +366,19 @@ fn ranked_pair(plus: &Sample, minus: &Sample, weight: f64) -> RankedPair {
     for (index, value) in minus.aesthetic.iter().enumerate() {
         margin_features[EMBEDDING_DIM + index] -= f64::from(*value);
     }
+    // The general ranker's pair margin without any personal term: the difference of the
+    // general aesthetic `overall` signal when both sides have assessments, else 0.0. Its sign
+    // is also the non-personalized baseline vote, so evaluation has one source of truth.
+    let general_margin = match (plus.overall, minus.overall) {
+        (Some(plus_overall), Some(minus_overall)) => plus_overall - minus_overall,
+        _ => 0.0,
+    };
     RankedPair {
         margin_features,
         weight,
-        baseline_vote: eval::baseline_vote(plus.overall, minus.overall),
+        plus_media: plus.pool_key(),
+        minus_media: minus.pool_key(),
+        general_margin,
     }
 }
 
