@@ -1539,7 +1539,9 @@ impl Store {
         self.reference_set_set_status(owner_id, set_id, ReferenceSetStatus::Confirmed)
     }
 
-    /// Mute a set without deleting it; the trainer stops reading its items.
+    /// Mute a set without deleting it; the trainer stops reading its items. Deactivating a
+    /// confirmed set also invalidates the affected context's active profile so withdrawn
+    /// evidence stops influencing ranking (retrain-or-fallback).
     pub fn reference_set_disable(&mut self, owner_id: &str, set_id: &str) -> anyhow::Result<bool> {
         self.reference_set_set_status(owner_id, set_id, ReferenceSetStatus::Disabled)
     }
@@ -1550,8 +1552,24 @@ impl Store {
         set_id: &str,
         status: ReferenceSetStatus,
     ) -> anyhow::Result<bool> {
-        let changed = self
+        // The status change and the profile invalidation it triggers must land in ONE
+        // transaction: as separate autocommitted statements, a crash between them would
+        // leave withdrawn evidence still influencing an active profile — the exact bug
+        // class this withdrawal path exists to close.
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Read the prior status and context BEFORE the update (consistent with delete) so
+        // the invalidation decision uses the pre-mutation state.
+        let prior: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT status, context_key FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to read reference set status")?;
+        let changed = transaction
             .execute(
                 "UPDATE reference_sets SET status = ?3, confirmed_at = ?4
                  WHERE owner_id = ?1 AND id = ?2",
@@ -1563,19 +1581,77 @@ impl Store {
                 ],
             )
             .context("failed to update reference set status")?;
+        // Withdrawing confirmed evidence must invalidate the profile it trained
+        // (docs/review-2026-08-29.md finding 3): the trainer intentionally retains the
+        // previous profile below the sample floor, so deactivation is what makes the ranker
+        // fall back to the general model until a retrain re-proves learning.
+        if changed == 1
+            && status == ReferenceSetStatus::Disabled
+            && prior.as_ref().is_some_and(|(prior_status, _)| {
+                prior_status == reference_status_to_str(ReferenceSetStatus::Confirmed)
+            })
+        {
+            if let Some((_, context_key)) = prior {
+                Self::deactivate_style_profiles_for_context(&transaction, owner_id, &context_key)?;
+            }
+        }
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
+    /// Deactivate every active style profile for one (owner, context): withdrawn evidence
+    /// invalidates what it trained. Profile rows are versioned and never deleted. Takes the
+    /// connection (or an open transaction, via `Deref`) so a withdrawal mutation and this
+    /// invalidation land in one atomic unit.
+    fn deactivate_style_profiles_for_context(
+        connection: &Connection,
+        owner_id: &str,
+        context_key: &str,
+    ) -> anyhow::Result<()> {
+        connection
+            .execute(
+                "UPDATE style_profiles SET active = 0
+                 WHERE owner_id = ?1 AND context_key = ?2 AND active = 1",
+                params![owner_id, context_key],
+            )
+            .context("failed to deactivate style profiles after evidence withdrawal")?;
+        Ok(())
+    }
+
     /// Delete a set; its items cascade and the next retrain reproduces the profile from the
-    /// remaining evidence.
+    /// remaining evidence. Deleting a confirmed set invalidates the affected context's active
+    /// profile the same way disabling does, in the same transaction as the delete.
     pub fn reference_set_delete(&mut self, owner_id: &str, set_id: &str) -> anyhow::Result<bool> {
-        let changed = self
+        // One transaction for the delete and the invalidation it triggers: a crash between
+        // separate autocommitted statements would leave withdrawn evidence still
+        // influencing an active profile.
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT status, context_key FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to read reference set before delete")?;
+        let changed = transaction
             .execute(
                 "DELETE FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
                 params![owner_id, set_id],
             )
             .context("failed to delete reference set")?;
+        if changed == 1
+            && prior.as_ref().is_some_and(|(status, _)| {
+                status == reference_status_to_str(ReferenceSetStatus::Confirmed)
+            })
+        {
+            if let Some((_, context_key)) = prior {
+                Self::deactivate_style_profiles_for_context(&transaction, owner_id, &context_key)?;
+            }
+        }
+        transaction.commit()?;
         Ok(changed == 1)
     }
 
@@ -1608,20 +1684,44 @@ impl Store {
     }
 
     pub fn reference_set_remove_item(
-        &self,
+        &mut self,
         owner_id: &str,
         set_id: &str,
         media_kind: MediaKind,
         media_id: &str,
     ) -> anyhow::Result<bool> {
-        let changed = self
+        // Removing an item from a confirmed set withdraws evidence: the removal and the
+        // profile invalidation it triggers must land in ONE transaction, like disable and
+        // delete.
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Read the set's status and context BEFORE the removal (consistent with delete).
+        let prior: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT status, context_key FROM reference_sets WHERE owner_id = ?1 AND id = ?2",
+                params![owner_id, set_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .context("failed to read reference set before item removal")?;
+        let changed = transaction
             .execute(
                 "DELETE FROM reference_set_items
                  WHERE owner_id = ?1 AND set_id = ?2 AND media_kind = ?3 AND media_id = ?4",
                 params![owner_id, set_id, media_kind_to_str(media_kind), media_id],
             )
             .context("failed to remove reference set item")?;
+        if changed == 1
+            && prior.as_ref().is_some_and(|(status, _)| {
+                status == reference_status_to_str(ReferenceSetStatus::Confirmed)
+            })
+        {
+            if let Some((_, context_key)) = prior {
+                Self::deactivate_style_profiles_for_context(&transaction, owner_id, &context_key)?;
+            }
+        }
+        transaction.commit()?;
         Ok(changed == 1)
     }
 

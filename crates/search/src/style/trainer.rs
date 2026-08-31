@@ -11,7 +11,7 @@
 //! invents certainty.
 //!
 //! Everything here is hand-written and deterministic: fixed iteration count, fixed learning
-//! rate, deterministically ordered pairs, and a deterministic every-third-pair held-out split.
+//! rate, deterministically ordered pairs, and a deterministic every-third-media held-out split.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -22,7 +22,7 @@ use serde_json::json;
 use crate::{
     media_vector,
     style::eval::{self, RankedPair},
-    AESTHETIC_FEATURES, EMBEDDING_DIM,
+    AESTHETIC_FEATURES, EMBEDDING_DIM, GENERAL_AESTHETIC_WEIGHT,
 };
 
 pub const TRAINER_VERSION: &str = "personal-residual-v1";
@@ -71,10 +71,11 @@ pub fn retrain_style_profile_for_context(
     if pairs.is_empty() {
         return Ok(None);
     }
-    let (train, held_out) = eval::split_pairs(&pairs);
-    let lambda = BASE_LAMBDA / (1.0 + train.len() as f64);
-    let weights = train_weights(&train, lambda);
-    let outcome = eval::evaluate(&held_out, &weights);
+    let split = eval::split_pairs(&pairs);
+    let lambda = BASE_LAMBDA / (1.0 + split.train.len() as f64);
+    let weights = train_weights(&split.train, lambda);
+    let mut outcome = eval::evaluate(&split.held_out, &weights);
+    outcome.straddling_pairs = split.straddling_pairs;
 
     let clip_weights = weights[..EMBEDDING_DIM]
         .iter()
@@ -297,17 +298,59 @@ fn prefer_pair(
 }
 
 fn build_pairs(evidence: &Evidence) -> Vec<RankedPair> {
-    let mut pairs = Vec::new();
+    // Merge every evidence source into one map keyed by the ordered media pair, netting
+    // conflicting directions explicitly: a reverse pair subtracts from the forward one, and a
+    // fully cancelled pair is dropped rather than allowed to invent certainty. Repeated
+    // evidence accumulates weight; it never duplicates rows in the training set.
+    let mut merged: BTreeMap<(String, String), (f64, RankedPair)> = BTreeMap::new();
+    let mut insert = |pair: RankedPair| {
+        let forward = pair.plus_media <= pair.minus_media;
+        let (key, signed) = if forward {
+            (
+                (pair.plus_media.clone(), pair.minus_media.clone()),
+                pair.weight,
+            )
+        } else {
+            (
+                (pair.minus_media.clone(), pair.plus_media.clone()),
+                -pair.weight,
+            )
+        };
+        let base = if forward { pair } else { flip_pair(&pair) };
+        let entry = merged.entry(key).or_insert_with(|| (0.0, base));
+        entry.0 += signed;
+    };
     for (plus, minus) in &evidence.prefer_pairs {
-        pairs.push(ranked_pair(plus, minus, 1.0));
+        insert(ranked_pair(plus, minus, 1.0));
     }
     for plus in cap_pool(&evidence.positives) {
         for minus in cap_pool(&evidence.negatives) {
             let weight = f64::from(plus.label.abs().min(minus.label.abs()));
-            pairs.push(ranked_pair(plus, minus, weight));
+            insert(ranked_pair(plus, minus, weight));
         }
     }
-    pairs
+    merged
+        .into_values()
+        .filter(|(net, _)| net.abs() > f64::EPSILON)
+        .map(|(net, mut pair)| {
+            if net < 0.0 {
+                pair = flip_pair(&pair);
+            }
+            pair.weight = net.abs();
+            pair
+        })
+        .collect()
+}
+
+/// The same pair with its sides exchanged; margins and media keys negate together.
+fn flip_pair(pair: &RankedPair) -> RankedPair {
+    RankedPair {
+        margin_features: pair.margin_features.iter().map(|value| -value).collect(),
+        weight: pair.weight,
+        plus_media: pair.minus_media.clone(),
+        minus_media: pair.plus_media.clone(),
+        general_margin: -pair.general_margin,
+    }
 }
 
 fn ranked_pair(plus: &Sample, minus: &Sample, weight: f64) -> RankedPair {
@@ -324,10 +367,21 @@ fn ranked_pair(plus: &Sample, minus: &Sample, weight: f64) -> RankedPair {
     for (index, value) in minus.aesthetic.iter().enumerate() {
         margin_features[EMBEDDING_DIM + index] -= f64::from(*value);
     }
+    // The production general-aesthetic margin for the pair: the difference of the general
+    // adjustment `GENERAL_AESTHETIC_WEIGHT * (overall - 0.5)` that the composed ranker adds
+    // beside the personal term. A missing side is neutral (adjustment 0, i.e. `overall` 0.5),
+    // matching production's missing-assessment behavior. Its sign is also the
+    // non-personalized baseline vote, so evaluation has one source of truth.
+    let general_adjustment = |overall: Option<f64>| {
+        overall.map_or(0.0, |value| GENERAL_AESTHETIC_WEIGHT * (value - 0.5))
+    };
+    let general_margin = general_adjustment(plus.overall) - general_adjustment(minus.overall);
     RankedPair {
         margin_features,
         weight,
-        baseline_vote: eval::baseline_vote(plus.overall, minus.overall),
+        plus_media: plus.pool_key(),
+        minus_media: minus.pool_key(),
+        general_margin,
     }
 }
 
@@ -394,5 +448,51 @@ fn cap_norm(weights: &mut [f64], max_norm: f64) {
         for value in weights.iter_mut() {
             *value *= scale;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prefer_sample(media_id: &str, label: f32) -> Sample {
+        Sample {
+            media_kind: MediaKind::Shot,
+            media_id: media_id.to_owned(),
+            label,
+            vector: vec![0.0; EMBEDDING_DIM],
+            aesthetic: [0.0; AESTHETIC_FEATURES.len()],
+            overall: None,
+        }
+    }
+
+    #[test]
+    fn reversed_prefer_pairs_net_to_zero_and_are_dropped() {
+        // (A over B) and (B over A) at equal strength cancel exactly: the netted pair is
+        // dropped rather than trained on as a contradiction or allowed to invent certainty.
+        let a = prefer_sample("a", 1.0);
+        let b = prefer_sample("b", -1.0);
+        let evidence = Evidence {
+            prefer_pairs: vec![(a.clone(), b.clone()), (b, a)],
+            ..Evidence::default()
+        };
+        assert!(build_pairs(&evidence).is_empty());
+    }
+
+    #[test]
+    fn repeated_prefer_pairs_accumulate_weight_not_rows() {
+        // Two identical prefer votes merge into ONE pair carrying weight 2.0: repeated
+        // evidence strengthens the pair, it never duplicates rows in the training set.
+        let a = prefer_sample("a", 1.0);
+        let b = prefer_sample("b", -1.0);
+        let evidence = Evidence {
+            prefer_pairs: vec![(a.clone(), b.clone()), (a, b)],
+            ..Evidence::default()
+        };
+        let pairs = build_pairs(&evidence);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].plus_media, "shot:a");
+        assert_eq!(pairs[0].minus_media, "shot:b");
+        assert_eq!(pairs[0].weight, 2.0);
     }
 }

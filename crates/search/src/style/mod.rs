@@ -8,8 +8,8 @@ pub mod eval;
 pub mod trainer;
 
 pub use eval::{
-    baseline_vote, evaluate, metrics_json, EvalOutcome, RankedPair, MIN_HELD_OUT_PAIRS,
-    MIN_PERSONAL_ACCURACY, SPLIT_LABEL,
+    evaluate, metrics_json, split_pairs, EvalOutcome, RankedPair, Split, MIN_HELD_OUT_PAIRS,
+    MIN_PERSONAL_ACCURACY, PERSONAL_AFFINITY_SCALE, SPLIT_LABEL,
 };
 pub use trainer::{
     retrain_style_profile, retrain_style_profile_for_context, DEFAULT_CONTEXT_KEY,

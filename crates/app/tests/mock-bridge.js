@@ -400,7 +400,7 @@
         personal_accuracy: 0.78,
         baseline_accuracy: 0.61,
         learned: true,
-        split: "loo-every-3rd",
+        split: "media-disjoint-every-3rd",
         trainer: "personal-residual-v1",
       },
     };
