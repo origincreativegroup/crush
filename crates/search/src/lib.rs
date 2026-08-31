@@ -1649,7 +1649,7 @@ mod tests {
             weight: 1.0,
             plus_media: "shot:a".to_owned(),
             minus_media: "shot:b".to_owned(),
-            general_margin: 2.0 * GENERAL_AESTHETIC_WEIGHT,
+            general_margin: GENERAL_AESTHETIC_WEIGHT,
         };
         let four = vec![
             &production_max,
