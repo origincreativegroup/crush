@@ -20,11 +20,18 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
+EXECUTABLE_NAME="$(defaults read "$APP/Contents/Info" CFBundleExecutable 2>/dev/null || true)"
+EXECUTABLE="$APP/Contents/MacOS/$EXECUTABLE_NAME"
+if [ -z "$EXECUTABLE_NAME" ] || [ ! -x "$EXECUTABLE" ]; then
+  echo "error: bundle executable is missing or not executable: $EXECUTABLE" >&2
+  exit 1
+fi
+
 {
   echo "Crush release verification $(date -u +%Y-%m-%dT%H:%MZ)"
   echo "app: $APP"
   echo "bundle version: $(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo unknown)"
-  echo "build commit: $("$APP/Contents/MacOS/crush" --version 2>/dev/null | head -1 || echo unknown)"
+  echo "bundle executable: $EXECUTABLE_NAME"
 
   # 1. Artifact checksum over the whole bundle (signatures excluded is optional; a raw
   #    hashing of the .app is the honest artifact digest for a signed build).
@@ -37,10 +44,18 @@ fi
     echo "$CODESIGN_INFO" | sed 's/^/  /'
   else
     echo "codesign verify: FAIL"
+    exit 1
   fi
 
-  # 3. Sidecars are present and have a recognized origin.
-  echo "sidecars: $(find "$APP/Contents/MacOS" -maxdepth 1 \( -name ffmpeg -o -name ffprobe \) | wc -l | tr -d ' ') files"
+  # 3. Both required sidecars are present and executable. A count alone can pass with two
+  #    copies of the same name or with non-executable placeholders.
+  for sidecar in ffmpeg ffprobe; do
+    if [ ! -x "$APP/Contents/MacOS/$sidecar" ]; then
+      echo "sidecars: FAIL ($sidecar is missing or not executable)"
+      exit 1
+    fi
+  done
+  echo "sidecars: PASS (ffmpeg, ffprobe)"
 
   # 4. Deep runtime + library integrity.
   if [ -n "$DATA_DIR" ]; then
