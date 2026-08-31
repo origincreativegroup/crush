@@ -489,6 +489,25 @@ impl Pipeline {
             duration_delta_s <= duration_tolerance_s,
             "rendered reel duration differs from requested duration beyond frame tolerance"
         );
+        // TASK-036: the container duration can be padded by audio; the video stream is the
+        // content contract. The renderer already fails closed on these facts — re-assert
+        // them here so a durable job can never publish without frame-exact evidence.
+        let requested_frames: i64 = rendered
+            .item_verifications
+            .iter()
+            .map(|item| item.requested_frame_count)
+            .sum();
+        ensure!(
+            rendered.video_frame_count == requested_frames,
+            "rendered reel has {} video frames, expected exactly {requested_frames}",
+            rendered.video_frame_count
+        );
+        ensure!(
+            (rendered.video_duration_s - rendered.requested_duration_s).abs() <= 0.002,
+            "rendered reel video stream duration {:.6}s differs from requested {:.6}s",
+            rendered.video_duration_s,
+            rendered.requested_duration_s
+        );
         let verification = json!({
             "sources_unchanged": true,
             "source_count": sources.snapshots.len(),
@@ -497,12 +516,34 @@ impl Pipeline {
             "measured_duration_s": rendered.output_probe.duration_s,
             "duration_delta_s": duration_delta_s,
             "duration_tolerance_s": duration_tolerance_s,
+            "video_frame_count": rendered.video_frame_count,
+            "video_duration_s": rendered.video_duration_s,
+            "video_stream_duration_delta_s":
+                (rendered.video_duration_s - rendered.requested_duration_s).abs(),
+            "frame_rule": "each item delivers round((out_s - in_s) * fps) frames starting at \
+                           the first source frame at or after in_s; cuts land exactly at the \
+                           previous item's video duration; audio is trimmed to the item video \
+                           duration so it never outlasts video",
+            "items": rendered.item_verifications.iter().map(|item| json!({
+                "index": item.index,
+                "source_path": item.source_path,
+                "in_s": item.in_s,
+                "out_s": item.out_s,
+                "fps": item.fps,
+                "first_source_frame": item.first_source_frame,
+                "last_source_frame": item.last_source_frame,
+                "requested_frame_count": item.requested_frame_count,
+                "rendered_frame_count": item.rendered_frame_count,
+                "video_duration_s": item.video_duration_s,
+                "audio_duration_s": item.audio_duration_s,
+            })).collect::<Vec<_>>(),
             "dimensions": {
                 "width": rendered.output_probe.width,
                 "height": rendered.output_probe.height,
             },
             "fps": rendered.output_probe.fps,
             "has_audio": rendered.output_probe.has_audio,
+            "audio_duration_s": rendered.output_probe.audio_duration_s,
             "video_codec": rendered.output_probe.video_codec,
             "pixel_format": rendered.output_probe.pixel_format,
             "color_space": rendered.output_probe.color_space,
@@ -516,6 +557,7 @@ impl Pipeline {
         }
         .to_owned();
         let mut commands = rendered.item_commands.clone();
+        commands.extend(rendered.video_remux_commands.iter().cloned());
         commands.push(rendered.command.clone());
         commands.push(rendered.probe_command.clone());
         let manifest_destination = manifest_path(destination);

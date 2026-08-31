@@ -69,6 +69,118 @@ fn mean_pixel(ffmpeg: &Path, input: &Path, time_s: f64) -> f64 {
     output.stdout.iter().map(|value| *value as u64).sum::<u64>() as f64 / output.stdout.len() as f64
 }
 
+/// Decode one frame by index to raw YUV420P planes so boundary frames can be identified by
+/// content. Raw planes avoid any color-matrix assumption: the untagged MPEG-4 fixture and
+/// the BT.709-tagged H.264 reel would otherwise round-trip through different RGB matrices.
+fn frame_yuv420p(ffmpeg: &Path, input: &Path, frame_index: i64) -> Vec<u8> {
+    let output = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(input)
+        .args([
+            "-vf",
+            &format!("select=eq(n\\,{frame_index})"),
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.stdout.is_empty());
+    output.stdout
+}
+
+fn mean_abs_diff(left: &[u8], right: &[u8]) -> f64 {
+    assert_eq!(left.len(), right.len(), "frames must share dimensions");
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| (*a as i64 - *b as i64).abs() as f64)
+        .sum::<f64>()
+        / left.len() as f64
+}
+
+/// Presentation timestamps of every video packet, in order.
+fn video_packet_pts(ffprobe: &Path, input: &Path) -> Vec<f64> {
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_packets",
+            "-select_streams",
+            "v",
+        ])
+        .arg(input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    document["packets"]
+        .as_array()
+        .expect("video packets")
+        .iter()
+        .filter_map(|packet| packet["pts_time"].as_str())
+        .filter_map(|value| value.parse::<f64>().ok())
+        .collect()
+}
+
+/// The burned-in frame counter in the synthetic-speech fixture gives ground truth: the
+/// reel frame must be nearest (by mean absolute pixel difference) to the expected source
+/// frame and clearly separated from its neighbours.
+fn assert_frame_identity(
+    ffmpeg: &Path,
+    source: &Path,
+    reel: &Path,
+    reel_frame: i64,
+    expected_source_frame: i64,
+) {
+    let rendered = frame_yuv420p(ffmpeg, reel, reel_frame);
+    let mut scores = Vec::new();
+    for candidate in [
+        expected_source_frame - 1,
+        expected_source_frame,
+        expected_source_frame + 1,
+    ] {
+        if candidate < 0 {
+            continue;
+        }
+        let reference = frame_yuv420p(ffmpeg, source, candidate);
+        scores.push((candidate, mean_abs_diff(&rendered, &reference)));
+    }
+    let best = scores
+        .iter()
+        .copied()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).expect("finite frame distances"));
+    let (best_frame, best_score) = best.expect("at least the expected frame is compared");
+    assert_eq!(
+        best_frame, expected_source_frame,
+        "reel frame {reel_frame} must be source frame {expected_source_frame}; scores: {scores:?}"
+    );
+    let neighbour = scores
+        .iter()
+        .find(|(frame, _)| *frame != expected_source_frame)
+        .map(|(_, score)| *score)
+        .unwrap_or_default();
+    assert!(
+        best_score * 4.0 < neighbour,
+        "reel frame {reel_frame} match to source frame {expected_source_frame} must be unambiguous; \
+         best {best_score:.3} vs neighbour {neighbour:.3}"
+    );
+}
+
 #[test]
 fn ordered_reel_encodes_items_then_concats_with_measured_manifest_facts() {
     let temporary = tempfile::tempdir().unwrap();
@@ -101,10 +213,21 @@ fn ordered_reel_encodes_items_then_concats_with_measured_manifest_facts() {
         .item_commands
         .iter()
         .all(|command| command.contains("h264_videotoolbox") && !command.contains("-c copy")));
-    assert!(result.item_commands[0].contains("-ss 1 -t 1"));
-    assert!(result.item_commands[1].contains("-ss 3 -t 1"));
+    // Input-side seeking lands on the requested first frame; the exact frame count is
+    // pinned by -frames:v, and the item timeline starts at zero.
+    assert!(result.item_commands[0].contains("-ss 0.999998 -t 1.1 -i"));
+    assert!(result.item_commands[0].contains("setpts=PTS-STARTPTS"));
+    assert!(result.item_commands[0].contains("-frames:v 30"));
+    assert!(result.item_commands[1].contains("-ss 2.999998 -t 1.1 -i"));
+    assert!(result.item_commands[1].contains("-frames:v 30"));
+    assert_eq!(result.video_remux_commands.len(), 2);
+    assert!(result
+        .video_remux_commands
+        .iter()
+        .all(|command| command.contains("-map 0:v:0 -c copy -an")));
     assert!(result.command.contains("-f concat"));
-    assert!(result.command.contains("-c copy"));
+    assert!(result.command.contains("-c:v copy"));
+    assert!(result.command.contains("concat=n=2:v=0:a=1"));
     assert!(result.probe_command.contains("ffprobe"));
     assert_eq!(result.output_probe.video_codec.as_deref(), Some("h264"));
     assert_eq!(result.output_probe.pixel_format.as_deref(), Some("yuv420p"));
@@ -114,7 +237,42 @@ fn ordered_reel_encodes_items_then_concats_with_measured_manifest_facts() {
         (640, 360)
     );
     assert!(result.output_probe.has_audio);
+
+    // TASK-036 frame-exactness: the video stream carries every requested frame and its
+    // duration is the frame-count duration, not an audio-padded container duration.
+    assert_eq!(result.video_frame_count, 60);
+    assert!((result.video_duration_s - 2.0).abs() <= 0.002);
+    assert_eq!(result.output_probe.video_frame_count, Some(60));
     assert!((result.output_probe.duration_s - 2.0).abs() <= 0.12);
+    let item_a = &result.item_verifications[0];
+    let item_b = &result.item_verifications[1];
+    assert_eq!(item_a.requested_frame_count, 30);
+    assert_eq!(item_a.rendered_frame_count, 30);
+    assert_eq!(item_a.first_source_frame, 30);
+    assert_eq!(item_a.last_source_frame, 59);
+    assert!((item_a.video_duration_s - 1.0).abs() <= 0.002);
+    assert!(item_a.audio_duration_s.unwrap() <= item_a.video_duration_s + 0.002);
+    assert_eq!(item_b.requested_frame_count, 30);
+    assert_eq!(item_b.rendered_frame_count, 30);
+    assert_eq!(item_b.first_source_frame, 90);
+    assert_eq!(item_b.last_source_frame, 119);
+
+    // The cut lands exactly at the previous item's video duration: no PTS gap, no hold.
+    let ffmpeg = runner.resolved().path.clone();
+    let ffprobe = runner.resolved().ffprobe_path.clone();
+    let pts = video_packet_pts(&ffprobe, &output);
+    assert_eq!(pts.len(), 60);
+    assert!((pts[0] - 0.0).abs() <= 0.002, "no lead dead zone");
+    assert!((pts[29] - 29.0 / 30.0).abs() <= 0.002);
+    assert!((pts[30] - 1.0).abs() <= 0.002, "cut lands at exactly 1.0s");
+    assert!((pts[59] - 59.0 / 30.0).abs() <= 0.002);
+
+    // The burned-in frame counter is the ground truth: first and last source frame of
+    // each segment must be exactly the requested ones.
+    assert_frame_identity(&ffmpeg, &source, &output, 0, 30);
+    assert_frame_identity(&ffmpeg, &source, &output, 29, 59);
+    assert_frame_identity(&ffmpeg, &source, &output, 30, 90);
+    assert_frame_identity(&ffmpeg, &source, &output, 59, 119);
 
     let progress = values.lock().unwrap();
     assert!(!progress.is_empty());
@@ -127,6 +285,35 @@ fn ordered_reel_encodes_items_then_concats_with_measured_manifest_facts() {
     let second_source_mean = mean_pixel(&runner.resolved().path, &source, 3.2);
     let second_reel_mean = mean_pixel(&runner.resolved().path, &output, 1.2);
     assert!((second_source_mean - second_reel_mean).abs() / second_source_mean < 0.03);
+}
+
+#[test]
+fn single_item_source_audio_reel_renders_without_the_concat_filter() {
+    let temporary = tempfile::tempdir().unwrap();
+    let runner = runner(&temporary.path().join("debug"));
+    let source = fixture("synthetic-speech.mp4");
+    let output = temporary.path().join("single-reel.mp4");
+    let request = ResolvedReelRequest {
+        items: vec![item(&source, 0.5, 1.5)],
+        format: ReelFormat::Source,
+        music: None,
+        master_volume: 1.0,
+        watermark: None,
+        cover: None,
+        output: ClipOutputPreset::Mp4H264SdrV1,
+    };
+
+    let result = runner.render_reel(&request, &output).unwrap();
+    assert_eq!(result.video_frame_count, 30);
+    assert!((result.video_duration_s - 1.0).abs() <= 0.002);
+    assert!(result.command.contains("atrim=start=0[a0];[a0]anull[aout]"));
+    assert!(!result.command.contains("concat=n="));
+    assert_eq!(result.item_verifications.len(), 1);
+    assert_eq!(result.item_verifications[0].first_source_frame, 15);
+    assert_eq!(result.item_verifications[0].last_source_frame, 44);
+    assert!(result.output_probe.has_audio);
+    let audio_duration = result.output_probe.audio_duration_s.unwrap();
+    assert!(audio_duration <= result.video_duration_s + 0.002);
 }
 
 #[test]

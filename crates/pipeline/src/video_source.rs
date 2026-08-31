@@ -153,6 +153,10 @@ mod tests {
             color_transfer: Some("bt709".to_owned()),
             color_range: Some("tv".to_owned()),
             rotation: None,
+            video_frame_count: Some(120),
+            video_duration_s: Some(5.0),
+            audio_duration_s: Some(5.0),
+            audio_sample_rate: Some(48_000),
         }
     }
 
