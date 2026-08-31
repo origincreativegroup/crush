@@ -4,10 +4,11 @@
 # Usage:
 #   CRUSH_APP=/Applications/Crush.app scripts/verify-release.sh
 #
-# Prints a report with the .app SHA-256 (computed over the full bundle), code-signature
-# state, sidecar/model presence, database integrity, and the plain-language surface the
-# smoke checklist then reads. Passing this script is NOT release approval — the Task 021
-# render-golden review and the Task 023 clean-machine human record are separate gates.
+# Prints a report with the .app SHA-256 (computed over the full bundle), build commit,
+# code-signature state, sidecar/model presence, database integrity, and the plain-language
+# surface the smoke checklist then reads. Passing this script is NOT release approval — the
+# Task 021 render-golden review and the Task 023 clean-machine human record are separate
+# gates.
 set -euo pipefail
 
 APP="${CRUSH_APP:-/Applications/Crush.app}"
@@ -32,6 +33,22 @@ fi
   echo "app: $APP"
   echo "bundle version: $(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo unknown)"
   echo "bundle executable: $EXECUTABLE_NAME"
+
+  # 0. Build provenance: the bundle binary must self-report the commit stamped
+  #    at build time (CRUSH_BUILD_COMMIT; see scripts/package-macos.sh and
+  #    docs/release.md). An artifact that cannot self-report — or that honestly
+  #    reports an unstamped local build — fails visibly, never a silent
+  #    "unknown".
+  BUILD_COMMIT="$("$EXECUTABLE" --build-info 2>/dev/null | sed -n 's/^build commit: //p' || true)"
+  if [ -z "$BUILD_COMMIT" ]; then
+    echo "build commit: FAIL ($EXECUTABLE_NAME does not self-report provenance; expected a 'build commit:' line from --build-info — rebuild with scripts/package-macos.sh)"
+    exit 1
+  fi
+  if [ "$BUILD_COMMIT" = "unknown-local" ]; then
+    echo "build commit: FAIL (bundle reports 'unknown-local' — unstamped build; export CRUSH_BUILD_COMMIT when building a release artifact)"
+    exit 1
+  fi
+  echo "build commit: $BUILD_COMMIT"
 
   # 1. Artifact checksum over the whole bundle (signatures excluded is optional; a raw
   #    hashing of the .app is the honest artifact digest for a signed build).

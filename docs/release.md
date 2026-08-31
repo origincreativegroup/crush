@@ -15,6 +15,16 @@ back up, relink, and uninstall. It is not a substitute for the clean-machine acc
 - First launch downloads the pinned models (~700 MB) into your Application Support directory, then
   shows the empty Library. No account, no sign-in, no cloud.
 
+### Telling an ad-hoc build from a notarized one before installing
+
+Ad-hoc builds (produced when no Developer ID signing secrets are present, e.g. on a dev
+machine) are labeled unmistakably: the packaging step writes a `BUILD-ADHOC.txt` marker file
+next to the DMG containing the ad-hoc codesign evidence, the build date, the build commit,
+and the DMG checksum. A notarized release has **no** `BUILD-ADHOC.txt` and its release record
+carries the notarization ticket. If a download ships with a `BUILD-ADHOC.txt` next to it,
+treat it as a local development build — install it via `right-click → Open`, and never
+publish it as a release.
+
 ## Privacy
 
 - Crush is local-first: photos, videos, thumbnails, search vectors, transcripts, feedback, and
@@ -103,3 +113,19 @@ crushctl doctor --deep             # runtime + library integrity
 `crushctl` is the CLI companion shipped for diagnostics; the installed app is tested through the
 README/`docs/smoke.md` workflow, and the SHA-256 of the installed `.app` is recorded by
 `scripts/verify-release.sh` so a build can be identified from its bundle alone.
+
+## Packaging (maintainers)
+
+One command produces the provenance-stamped `.app` + DMG, its `.sha256`, and the ad-hoc label
+when applicable:
+
+```sh
+scripts/package-macos.sh
+```
+
+It stamps `CRUSH_BUILD_COMMIT` (`git rev-parse --short HEAD`, plus `-dirty` when the tree is
+not clean; `unknown-local` when unset — never a fake commit) into both `crush-app` and
+`crushctl`, so `crush-app --build-info`, `crushctl --version`, and `scripts/verify-release.sh`
+all report the same build commit. A tagged CI release workflow must export `CRUSH_BUILD_COMMIT`
+the same way before `cargo tauri build`; `scripts/verify-release.sh` fails visibly on any
+artifact that cannot self-report a stamped commit.

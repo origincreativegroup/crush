@@ -16,10 +16,22 @@ use crush_store::{AssetFilter, EmbeddingMeta, JobFilter, LibraryCounts, Store};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Full version line with build provenance, e.g. `0.0.1 (build 823c867)`.
+/// clap's derive needs a `&'static str`, so the formatted line lives in a
+/// `LazyLock` instead of a `const` (the commit comes from crush-core's
+/// compile-time stamp; see docs/release.md).
+static VERSION_LINE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{} (build {})",
+        env!("CARGO_PKG_VERSION"),
+        crush_core::BUILD_COMMIT
+    )
+});
+
 #[derive(Parser)]
 #[command(
     name = "crushctl",
-    version,
+    version = VERSION_LINE.as_str(),
     about = "Search your footage in plain English. Runs entirely on your machine."
 )]
 struct Cli {
