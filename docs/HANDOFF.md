@@ -13,7 +13,13 @@ data is first-class (analyzed, searchable, adjustable — see TASK-037/TASK-034)
 treatment vocabulary (captions, music, motion, keyframed crops, extended grades) is the native
 roadmap, not a foreign format. Do not design new one-way-bridge machinery; do not treat Reel
 Studio provenance as third-party. Until the frozen contracts exist, unsupported treatments stay
-honest capability errors.
+honest capability errors. **Key features John named:** *file renaming* and *shot identity*.
+Shot identity is already content-addressed by design (`stable_shot_id` from video sha256 + index
++ start; media keyed by owner+sha256, so renames/moves preserve identity and re-adding a moved
+file updates the path on the same row). First-class renaming (Crush performing renames) and an
+explicit moved-file relink flow do not exist yet; any rename feature must respect the safety
+posture — originals are never modified by Crush today, so renaming is opt-in, previewed, and
+reversible.
 
 **Source of truth:** `docs/project-blueprint.md` remains the engineering architecture and build
 protocol, with `docs/blueprint-review.md` as its review discipline. The additive product expansion
