@@ -757,7 +757,7 @@
               media_kind: plan.items[later].mediaKind,
               media_id: plan.items[later].mediaId,
               neighbor_position: transition.position,
-              note: `Items ${transition.position + 1} and ${later + 1} look near-identical. Move this one to the end so similar shots are not back-to-back.`,
+              note: `Items ${transition.position + 1} and ${later + 1} look near-identical. Move item ${later + 1} to the end so similar shots are not back-to-back.`,
               suggested_order: order,
             }];
           });

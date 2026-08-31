@@ -189,6 +189,12 @@
     root.hidden = !report && suggestions.length === 0;
     if (!report && suggestions.length === 0) return;
     const rows = [];
+    // An empty plan has nothing to judge; "0 items from 0 distinct sources" is noise.
+    if (report?.summary?.item_count === 0) {
+      root.hidden = true;
+      root.replaceChildren();
+      return;
+    }
     if (report?.summary) {
       const lines = [report.summary.coverage_note];
       if (report.summary.pacing_note) lines.push(report.summary.pacing_note);
@@ -211,7 +217,7 @@
           id: state.plan.id,
           items: suggestion.suggested_order.map((entry) => ({ assetType: entry.media_kind, mediaId: entry.media_id })),
         });
-        await openPlan(state.plan.id);
+        await openPlan(state.plan.id, false);
         message("Reordered. The previous order is saved under Versions.");
       }));
       rows.push(row);

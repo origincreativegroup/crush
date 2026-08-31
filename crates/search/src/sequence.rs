@@ -182,9 +182,9 @@ pub fn sequence_report(store: &Store, items: &[PlanItem]) -> anyhow::Result<Sequ
 }
 
 /// Deterministic one-click suggestions for the near-duplicate adjacencies found in the plan.
-/// At most one suggestion per affected item; the move always takes the later twin out of the
-/// adjacency by sending it to the end of the sequence — blunt, visible, and undoable, never
-/// a silent reorder.
+/// At most one suggestion per affected item; the move sends the later twin to the end of the
+/// sequence, and a suggestion is only offered when that visibly reduces the near-duplicate
+/// adjacencies — blunt, visible, and undoable, never a silent reorder.
 pub fn sequence_suggestions(
     store: &Store,
     items: &[PlanItem],
@@ -226,14 +226,33 @@ pub fn sequence_suggestions(
         {
             continue;
         }
+        // The move must also actually reduce near-duplicate adjacencies, not merely change
+        // the order: in a mutual near-duplicate clique, sending one twin to the end
+        // separates the flagged pair but seats it next to another twin. Simulate the
+        // suggested order and only offer the chip when the recount strictly drops.
+        let mut simulated: Vec<PlanItem> = ordered
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != later)
+            .map(|(_, item)| (**item).clone())
+            .collect();
+        simulated.push((**item).clone());
+        for (index, item) in simulated.iter_mut().enumerate() {
+            item.position = index as i64;
+        }
+        let after = sequence_report(store, &simulated)?;
+        if after.summary.near_duplicate_adjacencies >= report.summary.near_duplicate_adjacencies {
+            continue;
+        }
         suggestions.push(SequenceSuggestion {
             position: later,
             media_kind: media_kind_name(item.media_kind).to_owned(),
             media_id: item.media_id.clone(),
             neighbor_position: transition.position,
             note: format!(
-                "Items {} and {} look near-identical. Move this one to the end so similar shots are not back-to-back.",
+                "Items {} and {} look near-identical. Move item {} to the end so similar shots are not back-to-back.",
                 transition.position + 1,
+                later + 1,
                 later + 1
             ),
             suggested_order: order,
@@ -283,6 +302,17 @@ pub(crate) fn cosine(left: &[f32], right: &[f32]) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Strip the internal source-key prefix (`video:`, `span-import:`, `span-source:`) so notes
+/// show the source's own id, never the key format.
+fn display_source(source: &str) -> &str {
+    for prefix in ["video:", "span-import:", "span-source:"] {
+        if let Some(rest) = source.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    source
 }
 
 /// Source key per position: photos are their own exhibits; shots group by their source
@@ -357,7 +387,10 @@ fn transition_note(
             }
             _ => String::new(),
         };
-        return format!("Two items in a row come from the same source ({source}).{similar}");
+        return format!(
+            "Two items in a row come from the same source ({}).{similar}",
+            display_source(source)
+        );
     }
     String::new()
 }
@@ -395,6 +428,12 @@ fn summarize(
         .filter(|duration| *duration > 0.0)
         .collect();
     durations.sort_by(|a, b| a.total_cmp(b));
+    let median = if durations.len().is_multiple_of(2) {
+        // Even counts: the average of the two middle values, not the upper-middle one.
+        (durations[durations.len() / 2 - 1] + durations[durations.len() / 2]) / 2.0
+    } else {
+        durations[durations.len() / 2]
+    };
     let pacing_note = if durations.is_empty() {
         String::new()
     } else {
@@ -402,7 +441,7 @@ fn summarize(
             "Video item durations run {:.1}s to {:.1}s (median {:.1}s).",
             durations[0],
             durations[durations.len() - 1],
-            durations[durations.len() / 2]
+            median
         )
     };
 

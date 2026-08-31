@@ -2517,7 +2517,7 @@ mod tests {
         let suggestion = &suggestions[0];
         assert_eq!(suggestion.position, 1, "the later twin moves");
         assert_eq!(suggestion.neighbor_position, 0);
-        assert!(suggestion.note.contains("Move this one to the end"));
+        assert!(suggestion.note.contains("Move item 2 to the end"));
 
         let ordered = crate::sequence::reorder_pairs(suggestion);
         store
@@ -2712,6 +2712,54 @@ mod tests {
         );
         assert_eq!(capped.general.len() + capped.skipped_duplicates, 5);
         assert_eq!(capped.skipped_duplicates, 5 - capped.general.len());
+    }
+
+    #[test]
+    fn sequence_suggestions_refuse_a_move_that_creates_new_adjacencies() {
+        let (_directory, mut store, plan_id) = sequence_fixture();
+        // A mutual near-duplicate clique: shot-e repeats shot-a's vector, so shot-a,
+        // shot-b and shot-e are pairwise near-identical. Moving the flagged twin to the
+        // end separates that pair but seats it next to the third twin, so the chip's
+        // promise would be false after applying it.
+        store
+            .insert_shots(
+                DEFAULT_OWNER_ID,
+                &[Shot {
+                    id: "shot-e".to_owned(),
+                    video_id: "video-2".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    idx: 2,
+                    start_s: 2.0,
+                    end_s: 2.5,
+                    rep_frame_s: 2.1,
+                    thumb_rel: None,
+                    scene_score: None,
+                }],
+            )
+            .unwrap();
+        let mut twin = [0.0_f32; EMBEDDING_DIM];
+        twin[0] = 1.0;
+        store.put_vector(DEFAULT_OWNER_ID, "shot-e", &twin).unwrap();
+        store
+            .plan_remove_item(DEFAULT_OWNER_ID, &plan_id, MediaKind::Shot, "shot-c")
+            .unwrap();
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Shot, "shot-e", Some(2.0), Some(2.5)),
+            )
+            .unwrap();
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let report = crate::sequence::sequence_report(&store, &items).unwrap();
+        assert_eq!(
+            report.summary.near_duplicate_adjacencies, 2,
+            "the clique flags both adjacencies"
+        );
+        let suggestions = crate::sequence::sequence_suggestions(&store, &items).unwrap();
+        assert!(
+            suggestions.is_empty(),
+            "a move that trades the flagged pair for new adjacencies must not be suggested"
+        );
     }
 
     #[test]

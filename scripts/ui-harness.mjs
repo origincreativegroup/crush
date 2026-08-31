@@ -344,7 +344,7 @@ const tests = {
     // A third item gives the move somewhere to go: the chip appears, and applying it writes
     // normal plan state (reorder) with a saved version for undo.
     await frame.locator("#plan-general .plans-candidate").nth(2).locator("button").click();
-    await poll(async () => await visibleText(notes).then((text) => text.includes("Move this one to the end")));
+    await poll(async () => await visibleText(notes).then((text) => text.includes("Move item 2 to the end")));
     await notes.locator("button", { hasText: "Apply reorder" }).click();
     await frame.locator('#plan-confirm button[value="confirm"]').click();
     await poll(async () => (await visibleText(frame.locator("#plans-message"))).includes("Reordered"));

@@ -930,7 +930,18 @@ fn selects(
             selection.context_key.as_deref().unwrap_or("none")
         );
     }
-    println!("\ngeneral strong shots ({}):", selection.general.len());
+    // Echo the cap and the skipped count in table mode too, so the human-readable output
+    // is as honest about diversification as the JSON mode.
+    match selection.duplicate_cap {
+        Some(cap) => println!(
+            "\ngeneral strong shots ({} of {}, similar-shot cap {}, {} skipped):",
+            selection.general.len(),
+            selection.general.len() + selection.skipped_duplicates,
+            cap,
+            selection.skipped_duplicates
+        ),
+        None => println!("\ngeneral strong shots ({}):", selection.general.len()),
+    }
     for (rank, result) in selection.general.iter().enumerate() {
         println!(
             "{:<4} {:<6} {:>8}  {}",
