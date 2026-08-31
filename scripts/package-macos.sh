@@ -35,6 +35,10 @@ echo "==> build commit: $CRUSH_BUILD_COMMIT"
 #    the DMG target is passed explicitly because tauri.conf.json lists only "app".
 CI=true cargo tauri build --bundles app,dmg
 
+# The CLI is not a dependency of the app; build it too (same provenance stamp)
+# so the verify step below can point CRUSHCTL at target/release/crushctl.
+cargo build --release -q -p crush-cli
+
 # Absolute paths: `defaults read` treats relative paths as domain names.
 APP="$ROOT/target/release/bundle/macos/Crush.app"
 DMG_DIR="$ROOT/target/release/bundle/dmg"
