@@ -9,9 +9,10 @@ Local packet: `target/render-golden-review/task-021-pr37-initial/`
 ## Review order
 
 1. Open `photo-source.png`, then compare `photo-derivative.jpg`, `.png`, and `.tiff`.
-   The frozen recipe crops the left half and rotates it 90 degrees, so every derivative must be
-   4x12, upright relative to the recipe, visually equivalent across formats, and free of private
-   metadata. Each adjacent manifest must report the same source hash and `source_unchanged=true`.
+   The frozen recipe rotates the source 90 degrees and then crops the left half, so every
+   derivative must be 4x12, upright relative to the recipe, visually equivalent across formats,
+   and free of private metadata. Each adjacent manifest must report the same source hash and
+   `source_unchanged=true`.
 2. Play `clip-earth.mp4`. It is the exact 0.25–1.25 second source interval with a normalized
    10% inset crop, no grade, and mute. Check the opening/closing frames, orientation, absence of
    audio, and clean playback. The source fixture is `fixtures/clips/earth-timelapse-silent.mp4`.

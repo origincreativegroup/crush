@@ -138,6 +138,37 @@ const tests = {
     assert.equal(await visibleText(item.locator(".plans-pill")), "Historical · your earlier Reel Studio choice");
   },
 
+  async "plans-span-export"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-plans").click();
+    await frame.locator("#plans-list .plans-list-button", { hasText: "Reel Studio · Healthy Earth" }).click();
+    await frame.locator("#plan-editor").waitFor({ state: "visible" });
+    // The imported span previews like any clip, but single-clip export must stay honestly
+    // disabled: the backend only resolves shot items, so an enabled button would fail with
+    // the false "clip … is not selected in this project" error.
+    await frame.locator("#project-preview").waitFor({ state: "visible" });
+    await frame.locator("#project-photo-export").waitFor({ state: "visible" });
+    assert.equal(await visibleText(frame.locator("#project-photo-export-step")), "Export selected clip");
+    assert.equal(await frame.locator("#project-photo-preset").isDisabled(), true);
+    assert.equal(await frame.locator("#project-photo-choose").isDisabled(), true);
+    assert.equal(await frame.locator("#project-photo-render").isDisabled(), true);
+    assert.match(
+      await visibleText(frame.locator("#project-photo-status")),
+      /Clip export for imported clips lands with the next update/,
+    );
+    // Whole-reel export is gated too, with span-specific copy — not the photo message.
+    assert.equal(await frame.locator("#project-reel-choose").isDisabled(), true);
+    assert.equal(await frame.locator("#project-reel-render").isDisabled(), true);
+    assert.match(
+      await visibleText(frame.locator("#project-reel-status")),
+      /This sequence is built from imported clips\. Whole-reel export for imported clips lands with the next update\./,
+    );
+    // The honest disabled state means no render command ever fires for the span item.
+    const calls = await mockCalls(page);
+    assert.equal(calls.some((call) => call.command === "render_project_clip"), false);
+    assert.equal(calls.some((call) => call.command === "render_project_reel"), false);
+  },
+
   async "plans-editor"(page) {
     const frame = await createPlan(page);
     await frame.locator("#plan-brief").fill("Quiet launch portraits");

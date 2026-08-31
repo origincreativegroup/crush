@@ -72,3 +72,6 @@ jobs:
       - run: cargo test -p crush-stage-asr --test transcription_goldens -- --nocapture
       - run: cargo test -p crush-pipeline --test ingest_fixtures -- --nocapture
       - run: cargo test -p crush-pipeline --test source_fidelity -- --nocapture
+      - run: cargo test -p crush-pipeline --test render_jobs -- --nocapture
+      - run: cargo test -p crush-pipeline --test reel_studio_import -- --nocapture
+      - run: cargo test -p crush-stage-split --test reel_fixtures -- --nocapture

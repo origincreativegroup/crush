@@ -35,7 +35,7 @@ checkout present: Y/N. Artifact label: signed-notarized / ad-hoc. DMG SHA-256 ve
       color grading; no unapproved profile is labeled learned.
 - [ ] Create a Project without needing internal terms; add photo/video selects, reorder them,
       adjust clip boundaries, scrub, play/pause, loop, and navigate the sequence.
-- [ ] Render one photo derivative, one clip, and one mixed reel. Verify visible progress,
+- [ ] Render one photo derivative, one clip, and one multi-clip reel. Verify visible progress,
       cancellation/retry, output checksum, manifest, dimensions/duration/audio/color/orientation,
       and playback in a system app.
 - [ ] Repeat a render to the occupied destination and confirm Crush refuses to overwrite it.

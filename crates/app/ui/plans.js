@@ -272,6 +272,15 @@
     photoExport.render.textContent = `Render ${isPhoto ? "photo" : "clip"}`;
     photoExport.outputLabel.textContent = `Finished ${isPhoto ? "photo" : "clip"}`;
     clearPhotoExport(item);
+    if (item.mediaKind === "span") {
+      // Imported spans render through the reel executor, but single-clip export for them is not
+      // wired through the app yet. Keep the panel visible and honest instead of letting the
+      // render fail with a false "not selected in this project" error.
+      photoExport.preset.disabled = true;
+      photoExport.choose.disabled = true;
+      photoExport.render.disabled = true;
+      photoExport.status.textContent = "Clip export for imported clips lands with the next update — the sequence can still be rendered as a reel once span export is enabled.";
+    }
   }
   function showPhotoRenderResult(result) {
     state.photoExportResult = result;
@@ -291,9 +300,10 @@
   }
   function setPhotoExportBusy(value) {
     state.photoExportBusy = value;
-    photoExport.preset.disabled = value;
-    photoExport.choose.disabled = value;
-    photoExport.render.disabled = value || !photoExport.destination.value;
+    const spanLocked = previewItem()?.mediaKind === "span";
+    photoExport.preset.disabled = value || spanLocked;
+    photoExport.choose.disabled = value || spanLocked;
+    photoExport.render.disabled = value || spanLocked || !photoExport.destination.value;
     photoExport.progress.hidden = !value;
   }
   function setReelExportBusy(value) {
@@ -317,14 +327,18 @@
       reelExport.result.hidden = true;
     }
     if (!key) return;
-    const hasUnsupportedItems = state.items.some((item) => item.mediaKind !== "shot");
+    const hasPhotos = state.items.some((item) => item.mediaKind === "photo");
+    const hasSpans = state.items.some((item) => item.mediaKind === "span");
+    const hasUnsupportedItems = hasPhotos || hasSpans;
     reelExport.choose.disabled = state.reelExportBusy || !state.items.length || hasUnsupportedItems;
     reelExport.render.disabled = state.reelExportBusy || !reelExport.destination.value || state.dirty.size > 0 || !state.items.length || hasUnsupportedItems;
     reelExport.status.classList.remove("error");
     if (!state.items.length) {
       reelExport.status.textContent = "Add at least one clip before exporting a reel.";
-    } else if (hasUnsupportedItems) {
+    } else if (hasPhotos) {
       reelExport.status.textContent = "This sequence includes photos. Export those individually above; whole-reel photo timing is not enabled yet.";
+    } else if (hasSpans) {
+      reelExport.status.textContent = "This sequence is built from imported clips. Whole-reel export for imported clips lands with the next update.";
     } else if (state.dirty.size) {
       reelExport.status.textContent = "Save every clip edit before rendering so the reel matches this sequence.";
     } else if (!reelExport.destination.value) {

@@ -794,10 +794,16 @@ impl Store {
         std::fs::create_dir_all(data_dir.join("thumbs"))?;
         std::fs::create_dir_all(data_dir.join("proxies"))?;
         let db_path = data_dir.join("library.db");
+        let had_database = std::fs::metadata(&db_path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false);
         let mut connection = Connection::open(&db_path)
             .with_context(|| format!("failed to open SQLite database {}", db_path.display()))?;
 
         configure_connection(&connection)?;
+        if had_database {
+            write_pre_migration_snapshot(&connection, &data_dir, &db_path)?;
+        }
         apply_migrations(&mut connection)?;
 
         Ok(Self {
@@ -5292,6 +5298,79 @@ fn configure_connection(connection: &Connection) -> anyhow::Result<()> {
     ensure!(
         foreign_keys == 1,
         "SQLite foreign_keys pragma is not enabled"
+    );
+    Ok(())
+}
+
+/// Copy `library.db` to `backups/library-pre-v<N>-<timestamp>.db` before pending migrations run.
+///
+/// `<N>` is the schema version the database is at before the upgrade. The snapshot is a plain
+/// file copy taken after `PRAGMA wal_checkpoint(TRUNCATE)`, so committed frames in the `-wal`
+/// sidecar are folded into the main file first and the copy is a complete, self-contained
+/// database. Callers skip this entirely on a first run, where there is nothing to back up.
+fn write_pre_migration_snapshot(
+    connection: &Connection,
+    data_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<()> {
+    let has_version_table = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .context("failed to inspect the schema before the pre-migration snapshot")?
+        == 1;
+    let current = if has_version_table {
+        connection
+            .query_row(
+                "SELECT version FROM schema_version WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read the schema version before the pre-migration snapshot")?
+    } else {
+        None
+    }
+    .unwrap_or(0);
+    if current >= CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    let (busy, _log, _checkpointed): (i64, i64, i64) = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .context("failed to checkpoint the WAL before the pre-migration snapshot")?;
+    if busy != 0 {
+        tracing::warn!(
+            busy,
+            "the WAL checkpoint was busy; the pre-migration snapshot may miss the most recent commits"
+        );
+    }
+
+    let backups_dir = data_dir.join("backups");
+    std::fs::create_dir_all(&backups_dir).with_context(|| {
+        format!(
+            "failed to create backups directory {}",
+            backups_dir.display()
+        )
+    })?;
+    let snapshot_path = backups_dir.join(format!(
+        "library-pre-v{current}-{}.db",
+        Utc::now().format("%Y%m%dT%H%M%SZ")
+    ));
+    std::fs::copy(db_path, &snapshot_path).with_context(|| {
+        format!(
+            "failed to write the pre-migration snapshot {}",
+            snapshot_path.display()
+        )
+    })?;
+    tracing::info!(
+        schema_version = current,
+        snapshot = %snapshot_path.display(),
+        "wrote pre-migration database snapshot"
     );
     Ok(())
 }

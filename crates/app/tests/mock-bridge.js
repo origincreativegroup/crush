@@ -595,7 +595,7 @@
     return { ...view, itemCount: items.length };
   };
   const planKind = (assetType) => assetType === "photo" ? "photo" : assetType === "span" ? "span" : "shot";
-  if (scenario === "plans-historical") {
+  if (["plans-historical", "plans-span-export"].includes(scenario)) {
     plans.set("plan-hist", {
       id: "plan-hist", name: "Reel Studio · Healthy Earth", contextKey: "default",
       description: "Imported from Reel Studio recipe healthy-earth.json (historical; recipe reel-studio-healthy-earth v1)", brief: "",

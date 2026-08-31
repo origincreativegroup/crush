@@ -12,7 +12,7 @@ back up, relink, and uninstall. It is not a substitute for the clean-machine acc
   installing.
 - **Ad-hoc local build** (development): open the `.app` once via `right-click → Open` (or `open`
   from a terminal) to satisfy Gatekeeper; it is explicit that this build is not notarized.
-- First launch downloads the pinned models (~700 MB) into your Application Support directory, then
+- First launch downloads the pinned models (~1.2 GB) into your Application Support directory, then
   shows the empty Library. No account, no sign-in, no cloud.
 
 ### Telling an ad-hoc build from a notarized one before installing

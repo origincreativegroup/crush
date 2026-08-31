@@ -54,8 +54,9 @@ this file remains the deeper implementation history and standing engineering rul
 
 Task 022 (Reel Studio importer) is merged onto the Task 021 render branch as a single squash merge:
 schema v11 manual spans + import ledger, dry-run/idempotent importer, `crushctl import`, the Library
-import dialog, and span rendering through the reel executor with honest Historical/Imported
-provenance pills. The 2026-08-30 editor-review pass is implemented and browser-harness covered:
+import dialog, and span rendering at the executor level with honest Historical/Imported provenance
+pills; app-level span reel/clip export lands with TASK-037. The 2026-08-30 editor-review pass is
+implemented and browser-harness covered:
 detail-player reopen fix, Standout control, Pick/Reject/Min-rating Review filters, photo export from
 the detail drawer, photo re-index + remove-from-library, an inline "stored intent, not yet
 renderable" treatment warning, a searching state, editor-language status labels, audit-only export

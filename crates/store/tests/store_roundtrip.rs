@@ -222,6 +222,113 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
 }
 
 #[test]
+fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
+    // A first run has no database to back up: no snapshot and no backups directory.
+    let fresh = TestDir::new("migration-snapshot-fresh");
+    let fresh_store = Store::open(fresh.path()).unwrap();
+    assert_eq!(fresh_store.schema_version().unwrap(), 11);
+    assert!(
+        !fresh.path().join("backups").exists(),
+        "a first run must not write a pre-migration snapshot"
+    );
+    drop(fresh_store);
+
+    // Build a v3 database in WAL mode, then leak the connection so its committed frames stay
+    // in the `-wal` sidecar — the crashed-writer case a plain file copy must handle by
+    // checkpointing before copying.
+    let directory = TestDir::new("migration-snapshot");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = Connection::open(&db).unwrap();
+    connection
+        .execute_batch("PRAGMA journal_mode = WAL;")
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('legacy-video', 'local', '/legacy.mov', 'legacy-sha', 1.0, 24.0,
+                       1920, 1080, 1, 'done')",
+            [],
+        )
+        .unwrap();
+    std::mem::forget(connection);
+
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 11);
+    let videos = store.videos(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(videos.len(), 1, "the upgraded database keeps its data");
+    assert_eq!(videos[0].id, "legacy-video");
+    assert_eq!(videos[0].path, "/legacy.mov");
+
+    let backups_dir = directory.path().join("backups");
+    let snapshots: Vec<_> = std::fs::read_dir(&backups_dir)
+        .expect("the upgrade should create the backups directory")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(snapshots.len(), 1, "exactly one pre-migration snapshot");
+    let snapshot_path = snapshots[0].path();
+    let snapshot_name = snapshot_path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        snapshot_name.starts_with("library-pre-v3-") && snapshot_name.ends_with(".db"),
+        "snapshot {snapshot_name} should record the pre-upgrade schema version"
+    );
+
+    // The snapshot is a complete v3 database: the WAL frames were checkpointed before the
+    // copy, so the committed video row is inside the copied file.
+    let snapshot = Connection::open(&snapshot_path).unwrap();
+    let version: i64 = snapshot
+        .query_row(
+            "SELECT version FROM schema_version WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 3);
+    let path: String = snapshot
+        .query_row(
+            "SELECT path FROM videos WHERE id = 'legacy-video'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(path, "/legacy.mov");
+    drop(snapshot);
+
+    // Reopening with no pending migrations must not add another snapshot.
+    drop(store);
+    let reopened = Store::open(directory.path()).unwrap();
+    assert_eq!(reopened.schema_version().unwrap(), 11);
+    let snapshots_after = std::fs::read_dir(&backups_dir).unwrap().count();
+    assert_eq!(
+        snapshots_after, 1,
+        "no new snapshot without pending migrations"
+    );
+}
+
+#[test]
 fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     let directory = TestDir::new("migration-v4-v5");
     let db = directory.path().join("library.db");
