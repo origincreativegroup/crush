@@ -22,7 +22,11 @@ Imported spans are treated as frozen containers instead of clips:
 ## Acceptance
 
 - [ ] Span plan-item boundaries clamp to the **source video's** range (0..duration), not the span's
-      own boundaries. The imported span boundaries remain the item's default on import.
+      own boundaries. The imported span boundaries remain the item's default on import. NOTE
+      (found while planning): the clamp is enforced in FOUR places, not two — the store API, the
+      reel executor, the Projects form, AND two SQL triggers in migration 0011
+      (`plan_item_boundaries_insert/_update`); a schema v12 migration rebuilding the span trigger
+      arms is required. See `.tasks/backlog/TASK-037-impl-plan.md`.
 - [ ] The Projects edit form's In/Out min/max come from the source video range; the
       boundary-basis/tolerance note stays visible for `catalogue_tc` spans.
 - [ ] Adjustments are recorded honestly: provenance gains an `adjusted: true`-style marker (or
