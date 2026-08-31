@@ -428,15 +428,17 @@ fn summarize(
         .filter(|duration| *duration > 0.0)
         .collect();
     durations.sort_by(|a, b| a.total_cmp(b));
-    let median = if durations.len().is_multiple_of(2) {
-        // Even counts: the average of the two middle values, not the upper-middle one.
-        (durations[durations.len() / 2 - 1] + durations[durations.len() / 2]) / 2.0
-    } else {
-        durations[durations.len() / 2]
-    };
     let pacing_note = if durations.is_empty() {
         String::new()
     } else {
+        // Even counts: the average of the two middle values, not the upper-middle one.
+        // Computed only inside the non-empty branch: an empty or photo-only plan has no
+        // video durations, and indexing here would underflow before the guard below.
+        let median = if durations.len().is_multiple_of(2) {
+            (durations[durations.len() / 2 - 1] + durations[durations.len() / 2]) / 2.0
+        } else {
+            durations[durations.len() / 2]
+        };
         format!(
             "Video item durations run {:.1}s to {:.1}s (median {:.1}s).",
             durations[0],

@@ -2781,6 +2781,65 @@ mod tests {
         assert!(report.transitions[0].note.contains("near-identical"));
     }
 
+    #[test]
+    fn sequence_report_handles_empty_and_photo_only_plans() {
+        // Empty and photo-only plans have no video durations, so the pacing median has an
+        // empty slice. The UI calls this report on every plan open, so it must return a
+        // report, never panic (the even-count median once indexed before the empty guard).
+        let (_directory, mut store, plan_id) = sequence_fixture();
+        let empty = crate::sequence::sequence_report(&store, &[]).unwrap();
+        assert_eq!(empty.summary.item_count, 0);
+        assert!(empty.summary.pacing_note.is_empty());
+
+        // Empty the fixture plan of its shot items so the plan below is photo-only.
+        for id in ["shot-a", "shot-b", "shot-c"] {
+            store
+                .plan_remove_item(DEFAULT_OWNER_ID, &plan_id, MediaKind::Shot, id)
+                .unwrap();
+        }
+        for (id, sha) in [("photo-0", "photo-0-sha"), ("photo-1", "photo-1-sha")] {
+            store
+                .upsert_photo(
+                    DEFAULT_OWNER_ID,
+                    &Photo {
+                        id: id.to_owned(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        path: format!("/photos/{id}.jpg"),
+                        sha256: sha.to_owned(),
+                        width: 6000,
+                        height: 4000,
+                        format: "jpeg".to_owned(),
+                        orientation: None,
+                        captured_at: None,
+                        camera_make: None,
+                        camera_model: None,
+                        lens: None,
+                        thumb_rel: None,
+                        status: PhotoStatus::Done,
+                        indexed_at: None,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Photo, "photo-0", None, None),
+            )
+            .unwrap();
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Photo, "photo-1", None, None),
+            )
+            .unwrap();
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let report = sequence_report_helper(&store, &items);
+        assert_eq!(report.summary.item_count, 2);
+        assert_eq!(report.summary.distinct_sources, 2);
+        assert!(report.summary.pacing_note.is_empty());
+    }
+
     fn sequence_report_helper(
         store: &Store,
         items: &[crush_store::PlanItem],
