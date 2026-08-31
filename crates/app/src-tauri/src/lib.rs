@@ -2907,6 +2907,35 @@ mod macos {
         })())
     }
 
+    /// Plain-language sequence observations over the ordered plan (Task 033): per-item and
+    /// per-transition repetition/similarity notes, pacing, and source coverage. Read-only.
+    #[tauri::command]
+    fn plan_sequence_signals(
+        id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<crush_search::sequence::SequenceReport> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let items = store.plan_items(DEFAULT_OWNER_ID, &id)?;
+            crush_search::sequence::sequence_report(&store, &items)
+        })())
+    }
+
+    /// One-click reorder suggestions for near-duplicate adjacencies. Read-only: applying one
+    /// is the UI calling the existing `plan_reorder_items` with `suggested_order`, and undo
+    /// is the existing revision restore.
+    #[tauri::command]
+    fn plan_sequence_suggestions(
+        id: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<crush_search::sequence::SequenceSuggestion>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let items = store.plan_items(DEFAULT_OWNER_ID, &id)?;
+            crush_search::sequence::sequence_suggestions(&store, &items)
+        })())
+    }
+
     #[tauri::command]
     fn plan_revisions(
         id: String,
@@ -2964,6 +2993,7 @@ mod macos {
         brief: Option<String>,
         context: Option<String>,
         top: usize,
+        duplicate_cap: Option<usize>,
         state: State<'_, RuntimeState>,
     ) -> CommandResult<SelectsCandidates> {
         let config = state.config.clone();
@@ -3013,6 +3043,7 @@ mod macos {
                     brief.as_deref(),
                     top,
                     context.as_deref(),
+                    duplicate_cap,
                 )
             })())
         })
@@ -3751,6 +3782,8 @@ mod macos {
                 plan_remove_item,
                 plan_reorder_items,
                 plan_save_revision,
+                plan_sequence_signals,
+                plan_sequence_suggestions,
                 plan_revisions,
                 plan_restore_revision,
                 plan_duplicate,

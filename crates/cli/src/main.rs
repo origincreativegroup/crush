@@ -144,6 +144,10 @@ enum Cmd {
         context: Option<String>,
         #[arg(long, default_value_t = 12)]
         top: usize,
+        /// Diversify the general list: at most this many candidates per source
+        /// (near-duplicate photos count as one source). Omit for no cap.
+        #[arg(long)]
+        duplicate_cap: Option<usize>,
         /// Print JSON rows instead of a table.
         #[arg(long)]
         json: bool,
@@ -311,8 +315,9 @@ fn main() -> anyhow::Result<()> {
             brief,
             context,
             top,
+            duplicate_cap,
             json,
-        } => selects(&cfg, &paths, brief, context, top, json),
+        } => selects(&cfg, &paths, brief, context, top, duplicate_cap, json),
         Cmd::Plans { items, json } => plans(&paths, items, json),
         Cmd::Import {
             command:
@@ -891,6 +896,7 @@ fn selects(
     brief: Option<String>,
     context: Option<String>,
     top: usize,
+    duplicate_cap: Option<usize>,
     json: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(top > 0, "--top must be greater than zero");
@@ -911,6 +917,7 @@ fn selects(
         brief.as_deref(),
         top,
         context.as_deref(),
+        duplicate_cap,
     )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&selection)?);
@@ -1404,6 +1411,7 @@ mod tests {
                 brief: Some(brief),
                 context: Some(context),
                 top: 5,
+                duplicate_cap: None,
                 json: true,
             } if brief == "a quiet travel film" && context == "homepage-hero"
         ));
@@ -1414,6 +1422,7 @@ mod tests {
                 brief: None,
                 context: None,
                 top: 3,
+                duplicate_cap: None,
                 json: false,
             }
         ));
