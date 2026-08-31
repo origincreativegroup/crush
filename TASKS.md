@@ -58,7 +58,7 @@ boundary/audio/manifest artifacts), **018 held-out style proof**, and **023 clea
 acceptance** (`docs/smoke.md`). No agent test or CI is release approval. 028–031 remain the additive
 Windows track. See `docs/platform-architecture.md`. PyTorch is reserved for training/evaluation and
 validated ONNX export; the shipped app always retains a CPU path.
-| TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | backlog — next stretch; blocks any "learned" claim |
+| TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | in progress — PR #39 (`task/32-style-eval`): media-disjoint split, composed-ranker gate, withdrawal invalidation; gates any "learned" claim |
 | TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | backlog — next stretch |
 | TASK-034 | Imported-evidence search + explicit confirmation bridge (022 follow-up) | OpenCode | backlog — next stretch, after 021/022 merge |
 | TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | backlog — next stretch, after 021 merge; no golden changes |
