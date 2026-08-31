@@ -134,6 +134,123 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Decode one frame by index to raw YUV420P planes. Raw planes avoid color-matrix
+/// assumptions: the untagged MPEG-4 fixture and the BT.709-tagged H.264 reel would
+/// otherwise round-trip through different RGB matrices and hide the frame identity.
+#[cfg(target_os = "macos")]
+fn frame_yuv420p(ffmpeg: &Path, input: &Path, frame_index: i64) -> Vec<u8> {
+    let output = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(input)
+        .args([
+            "-vf",
+            &format!("select=eq(n\\,{frame_index})"),
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.stdout.is_empty());
+    output.stdout
+}
+
+#[cfg(target_os = "macos")]
+fn mean_abs_diff(left: &[u8], right: &[u8]) -> f64 {
+    assert_eq!(left.len(), right.len(), "frames must share dimensions");
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| (*a as i64 - *b as i64).abs() as f64)
+        .sum::<f64>()
+        / left.len() as f64
+}
+
+/// The synthetic-speech fixture carries a burned-in source frame counter, so the reel's
+/// boundary frames can be identified by content: the rendered frame must be nearest (by
+/// mean absolute plane difference) to the expected source frame and clearly separated
+/// from its neighbours. This is the automated form of the 021 review's ground truth.
+#[cfg(target_os = "macos")]
+fn assert_frame_identity(
+    ffmpeg: &Path,
+    source: &Path,
+    reel: &Path,
+    reel_frame: i64,
+    expected_source_frame: i64,
+) {
+    let rendered = frame_yuv420p(ffmpeg, reel, reel_frame);
+    let mut scores = Vec::new();
+    for candidate in [
+        expected_source_frame - 1,
+        expected_source_frame,
+        expected_source_frame + 1,
+    ] {
+        if candidate < 0 {
+            continue;
+        }
+        let reference = frame_yuv420p(ffmpeg, source, candidate);
+        scores.push((candidate, mean_abs_diff(&rendered, &reference)));
+    }
+    let (best_frame, best_score) = scores
+        .iter()
+        .copied()
+        .min_by(|a, b| a.1.partial_cmp(&b.1).expect("finite frame distances"))
+        .expect("at least the expected frame is compared");
+    assert_eq!(
+        best_frame, expected_source_frame,
+        "reel frame {reel_frame} must be source frame {expected_source_frame}; scores: {scores:?}"
+    );
+    let neighbour = scores
+        .iter()
+        .find(|(frame, _)| *frame != expected_source_frame)
+        .map(|(_, score)| *score)
+        .unwrap_or_default();
+    assert!(
+        best_score * 4.0 < neighbour,
+        "reel frame {reel_frame} match to source frame {expected_source_frame} must be \
+         unambiguous; best {best_score:.3} vs neighbour {neighbour:.3}"
+    );
+}
+
+/// Presentation timestamps of every video packet, in order.
+#[cfg(target_os = "macos")]
+fn video_packet_pts(ffprobe: &Path, input: &Path) -> Vec<f64> {
+    let output = std::process::Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_packets",
+            "-select_streams",
+            "v",
+        ])
+        .arg(input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    document["packets"]
+        .as_array()
+        .expect("video packets")
+        .iter()
+        .filter_map(|packet| packet["pts_time"].as_str())
+        .filter_map(|value| value.parse::<f64>().ok())
+        .collect()
+}
+
 fn preserve_review_artifact(source: &Path, name: &str) {
     let Ok(directory) = std::env::var("CRUSH_RENDER_REVIEW_DIR") else {
         return;
@@ -669,6 +786,18 @@ fn frozen_video_clip_job_encodes_and_publishes_measured_manifest() {
     assert_eq!(manifest["render"]["preset"], "mp4-h264-sdr-v1");
     assert_eq!(manifest["tool_versions"]["backend"], "videotoolbox");
     assert_eq!(manifest["verification"]["source_unchanged"], true);
+    // The approved clip properties are test-enforced, not just documented (review LOW-2):
+    // exactly 15 frames, 1.000 s, 512x288 (the declared 10% inset of 640x360), no audio.
+    let resolved = crush_stage_split::ffmpeg::resolve().unwrap();
+    let probe = crush_stage_split::ffmpeg::Runner::new(resolved, 2, "clip-earth-golden")
+        .probe(&destination)
+        .unwrap()
+        .value;
+    assert_eq!(probe.video_frame_count, Some(15));
+    assert_eq!((probe.width, probe.height), (512, 288));
+    assert!(!probe.has_audio);
+    assert!((probe.duration_s - 1.0).abs() <= 0.05);
+    assert!((probe.video_duration_s.unwrap() - 1.0).abs() <= 0.002);
     preserve_review_output(&output, "clip-earth.mp4");
 }
 
@@ -858,6 +987,42 @@ fn frozen_ordered_reel_job_renders_project_order_and_publishes_one_manifest() {
     assert_eq!(manifest["sources"].as_array().unwrap().len(), 2);
     assert_eq!(manifest["verification"]["sources_unchanged"], true);
     assert_eq!(manifest["verification"]["item_count"], 2);
+
+    // TASK-036 golden — the 021 review's ground truth from the burned-in frame counter.
+    // Requested 0.25-1.25s + 3.25-4.25s at 30 fps must deliver source frames 8-37 then
+    // 98-127: exactly 60 video frames, no lead dead zone, the cut exactly at 1.0s, and
+    // audio that never outlasts the video.
+    assert_eq!(manifest["verification"]["video_frame_count"], 60);
+    assert_eq!(manifest["verification"]["video_duration_s"], 2.0);
+    let items = manifest["verification"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["first_source_frame"], 8);
+    assert_eq!(items[0]["last_source_frame"], 37);
+    assert_eq!(items[0]["requested_frame_count"], 30);
+    assert_eq!(items[0]["rendered_frame_count"], 30);
+    assert_eq!(items[1]["first_source_frame"], 98);
+    assert_eq!(items[1]["last_source_frame"], 127);
+    assert_eq!(items[1]["rendered_frame_count"], 30);
+    let audio_duration = manifest["verification"]["audio_duration_s"]
+        .as_f64()
+        .unwrap();
+    assert!(audio_duration <= 2.0 + 0.002);
+
+    let resolved = crush_stage_split::ffmpeg::resolve().unwrap();
+    let pts = video_packet_pts(&resolved.ffprobe_path, &destination);
+    assert_eq!(pts.len(), 60);
+    assert!(pts[0] <= 0.002, "no lead dead zone before the first frame");
+    assert!((pts[29] - 29.0 / 30.0).abs() <= 0.002);
+    assert!(
+        (pts[30] - 1.0).abs() <= 0.002,
+        "the cut must land exactly at the previous item's video duration"
+    );
+    assert!((pts[59] - 59.0 / 30.0).abs() <= 0.002);
+    assert_frame_identity(&resolved.path, &source, &destination, 0, 8);
+    assert_frame_identity(&resolved.path, &source, &destination, 29, 37);
+    assert_frame_identity(&resolved.path, &source, &destination, 30, 98);
+    assert_frame_identity(&resolved.path, &source, &destination, 59, 127);
+
     preserve_review_output(&output, "reel-speech-two-cuts.mp4");
 }
 

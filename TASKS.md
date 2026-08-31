@@ -62,7 +62,7 @@ validated ONNX export; the shipped app always retains a CPU path.
 | TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | in progress — PR #40 (`task/33-sequence`, stacked on #37): sequence signals + one-click suggestions + selects duplicate cap |
 | TASK-034 | Imported-evidence search + explicit confirmation bridge (022 follow-up) | OpenCode | backlog — next stretch, after 021/022 merge |
 | TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | backlog — next stretch, after 021 merge; no golden changes |
-| TASK-036 | Ordered-reel boundary-frame drops (021 review rejection) | Lane A (Codex; OpenCode if idle) | **open — gates 021**; reel artifact re-render + human re-review required |
+| TASK-036 | Ordered-reel boundary-frame drops (021 review rejection) | OpenCode (Lane A idle) | in review — PR #41 (`task/36-reel-frames`): frame-exact items + boundary-true concat, fixture goldens assert source frames 8–37/98–127; reel re-render packet at `target/render-golden-review/task-036-reel-fix/`; **human reel re-review still open — gates 021** |
 
 ## OpenCode next stretch (2026-08-30)
 

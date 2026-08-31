@@ -113,6 +113,14 @@ pub struct Probe {
     pub color_transfer: Option<String>,
     pub color_range: Option<String>,
     pub rotation: Option<i32>,
+    /// Frames reported by the video stream sample table. MP4/MOV outputs carry an exact
+    /// count; a `None` on exotic containers means "count it another way", never "zero".
+    pub video_frame_count: Option<i64>,
+    /// Video stream duration, which container duration can hide when audio padding is longer.
+    pub video_duration_s: Option<f64>,
+    /// Audio stream duration, used to prove audio never outlasts video inside an item.
+    pub audio_duration_s: Option<f64>,
+    pub audio_sample_rate: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -299,6 +307,55 @@ pub struct ClipRenderResult {
     pub encoder: &'static str,
     pub preset: &'static str,
     pub requested_duration_s: f64,
+    pub source_color_handling: String,
+    pub output_probe: Probe,
+    pub probe_command: String,
+}
+
+/// Frame-exact render plan for one ordered-reel item (TASK-036). The frame math is owned by
+/// the reel renderer; this carries the numbers the FFmpeg command needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ReelItemRenderSpec {
+    /// Requested source in point.
+    pub in_s: f64,
+    /// Requested source out point.
+    pub out_s: f64,
+    /// Input-side seek target: `in_s` minus a microsecond-scale boundary epsilon.
+    pub seek_s: f64,
+    /// Input-side read window: the item's video duration plus decode slack, so the exact
+    /// frame count is available without reading the source to EOF.
+    pub read_s: f64,
+    /// Exact output frame count: `round((out_s - in_s) * fps)`.
+    pub frame_count: i64,
+    /// The item's exact video duration: `frame_count / fps`. Also the audio trim end.
+    pub video_duration_s: f64,
+    pub crop: Option<NormalizedVideoCrop>,
+    pub grade: VideoGrade,
+    pub audio: ClipAudio,
+    pub output: ClipOutputPreset,
+}
+
+impl ReelItemRenderSpec {
+    /// The clip request is only used to share the crop/grade filter-chain builder; the
+    /// boundary handling is the reel item's own frame-exact contract above.
+    fn as_clip_request(&self) -> ClipRenderRequest {
+        ClipRenderRequest {
+            in_s: self.in_s,
+            out_s: self.out_s,
+            crop: self.crop,
+            grade: self.grade,
+            transition: ClipTransition::Cut,
+            audio: self.audio,
+            output: self.output,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReelItemRenderResult {
+    pub command: String,
+    pub expected_width: u32,
+    pub expected_height: u32,
     pub source_color_handling: String,
     pub output_probe: Probe,
     pub probe_command: String,
@@ -875,6 +932,226 @@ impl Runner {
         })
     }
 
+    /// Render one ordered-reel item with frame-exact boundaries (TASK-036).
+    ///
+    /// This is deliberately NOT the clip path: the approved single-clip renderer keeps its
+    /// own command shape, while reel items must pin an exact output frame count and a
+    /// zero-based video timeline so the concat assembly lands cuts on frame boundaries.
+    ///
+    /// Frame contract, computed by the caller from the source probe:
+    /// - input-side `-ss` lands on the first source frame at or after `in_s` (the caller
+    ///   subtracts a microsecond-scale epsilon so an `in_s` exactly on a frame boundary is
+    ///   never rounded past that frame by FFmpeg's microsecond seek parsing);
+    /// - `-frames:v` delivers exactly `frame_count` frames from that first frame, which is
+    ///   `round((out_s - in_s) * fps)` frames — the requested content, no more, no fewer;
+    /// - `setpts=PTS-STARTPTS` starts the item's video at zero with no lead dead zone;
+    /// - audio is trimmed to `video_duration_s` (the item's exact video length) and then
+    ///   silence-padded to exactly that duration (`atrim` + `apad`), so item audio is never
+    ///   longer AND never shorter than its video: a source whose audio track ends early
+    ///   inside the item interval is ordinary real-world media, and the silence fill is the
+    ///   editorially expected behavior — but leaving the shortfall would shift every later
+    ///   item's audio early at the concat join (progressive A/V desync). The native AAC
+    ///   encoder's priming packet stays
+    ///   at a negative raw timestamp and is presented from zero through the MP4 edit list;
+    ///   `-avoid_negative_ts make_zero` is intentionally NOT used because shifting the whole
+    ///   item by the audio priming is what created the reel's head dead zone and cut drift.
+    pub(crate) fn render_reel_item_with_control<F>(
+        &self,
+        input: &Path,
+        spec: &ReelItemRenderSpec,
+        staging_output: &Path,
+        cancellation: &CancellationToken,
+        mut progress: F,
+    ) -> Result<ReelItemRenderResult>
+    where
+        F: FnMut(Progress),
+    {
+        reject_existing_destination(staging_output, "reel item staging destination")?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled {
+                command: "reel item render before capability checks".to_owned(),
+            });
+        }
+        self.require_ffmpeg_component("-encoders", "h264_videotoolbox", "video encoder")?;
+
+        let source_operation = self.probe(input)?;
+        let source_probe = source_operation.value;
+        if source_probe.width == 0 || source_probe.height == 0 {
+            return Err(Error::InvalidProbe(
+                "reel item source has no video stream".to_owned(),
+            ));
+        }
+        if source_probe.fps <= 0.0 {
+            return Err(Error::InvalidProbe(
+                "reel item source reports no frame rate; boundary frame math is impossible"
+                    .to_owned(),
+            ));
+        }
+        let frame_tolerance = 1.0 / source_probe.fps;
+        if spec.out_s > source_probe.duration_s + frame_tolerance {
+            return Err(Error::InvalidArgument(format!(
+                "reel item out_s {:.6} exceeds source duration {:.6}",
+                spec.out_s, source_probe.duration_s
+            )));
+        }
+        let source_color_handling = validate_h264_sdr_source(&source_probe)?;
+        if spec.audio == ClipAudio::Source && source_probe.has_audio {
+            self.require_ffmpeg_component("-encoders", "aac", "audio encoder")?;
+        }
+        for filter in required_clip_filters(&spec.as_clip_request()) {
+            self.require_ffmpeg_component("-filters", filter, "video filter")?;
+        }
+        let (filter_chain, expected_width, expected_height) =
+            clip_filter_chain(&source_probe, &spec.as_clip_request())?;
+
+        let parent = staging_output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let private_render = tempfile::Builder::new()
+            .prefix(".crush-reel-item-")
+            .tempdir_in(parent)?;
+        let rendered = private_render
+            .path()
+            .join(format!("rendered.{}", spec.output.muxer()));
+
+        let mut spec_command = CommandSpec::new(&self.resolved.path)
+            .args(["-n", "-threads"])
+            .arg(self.threads.to_string())
+            .args([
+                "-ss",
+                &format_number(spec.seek_s),
+                "-t",
+                &format_number(spec.read_s),
+            ])
+            .arg("-i")
+            .arg(input)
+            .args(["-map", "0:v:0"]);
+        if spec.audio == ClipAudio::Source {
+            spec_command = spec_command.args(["-map", "0:a?"]);
+        }
+        spec_command = spec_command.args([
+            "-vf",
+            &format!("{filter_chain},setpts=PTS-STARTPTS"),
+            "-frames:v",
+            &spec.frame_count.to_string(),
+        ]);
+        if spec.audio == ClipAudio::Source {
+            // Trim to the exact video duration, then silence-pad to that same duration:
+            // `apad` is a no-op for full-length audio but fills a source track that ends
+            // early inside the item interval, so the item's audio equals its video exactly.
+            spec_command = spec_command.args([
+                "-af",
+                &format!(
+                    "asetpts=PTS-STARTPTS,atrim=end={},apad=whole_dur={}",
+                    format_number(spec.video_duration_s),
+                    format_number(spec.video_duration_s)
+                ),
+            ]);
+        }
+        spec_command = spec_command.args(["-c:v", "h264_videotoolbox"]).args([
+            "-allow_sw",
+            "1",
+            "-b:v",
+            "8M",
+            "-pix_fmt",
+            "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-tag:v",
+            "avc1",
+        ]);
+        spec_command = match spec.audio {
+            ClipAudio::Source => spec_command.args(["-c:a", "aac", "-b:a", "192k"]),
+            ClipAudio::Mute => spec_command.arg("-an"),
+        };
+        spec_command = spec_command
+            .args([
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                "-movflags",
+                "+faststart",
+                "-f",
+                spec.output.muxer(),
+                "-progress",
+                "pipe:1",
+                "-nostats",
+            ])
+            .arg(&rendered);
+
+        let command = self
+            .run_progress(
+                &spec_command,
+                spec.video_duration_s,
+                cancellation,
+                &mut progress,
+            )
+            .map_err(|error| classify_clip_render_error(error, spec.audio))?;
+        if cancellation.is_cancelled() {
+            return Err(Error::Cancelled { command });
+        }
+        let measured = self.probe(&rendered)?;
+        fs::File::open(&rendered)?.sync_all()?;
+        // The caller path is published exclusively, exactly like the clip renderer: a racing
+        // writer wins without being replaced, and the private render disappears with its
+        // temporary directory.
+        fs::hard_link(&rendered, staging_output)?;
+        Ok(ReelItemRenderResult {
+            command,
+            expected_width,
+            expected_height,
+            source_color_handling,
+            output_probe: measured.value,
+            probe_command: measured.command,
+        })
+    }
+
+    /// Stream-copy the video track of a rendered reel item into a video-only intermediate.
+    ///
+    /// The concat demuxer offsets each file by its container duration and normalizes packet
+    /// timestamps by the file's most negative start; an item that still carries its AAC
+    /// priming packet at a negative raw timestamp would push the whole reel's video late by
+    /// that priming. A video-only copy has a zero-based timeline and a container duration
+    /// exactly equal to its video stream, so concat offsets land on frame boundaries.
+    pub(crate) fn remux_video_only_with_control<F>(
+        &self,
+        input: &Path,
+        output: &Path,
+        cancellation: &CancellationToken,
+        mut progress: F,
+    ) -> Result<String>
+    where
+        F: FnMut(Progress),
+    {
+        reject_existing_destination(output, "reel video-only staging destination")?;
+        let probed = self.probe(input)?;
+        let duration = probed
+            .value
+            .video_duration_s
+            .unwrap_or(probed.value.duration_s);
+        let mut spec = CommandSpec::new(&self.resolved.path)
+            .args(["-n", "-threads"])
+            .arg(self.threads.to_string())
+            .arg("-i")
+            .arg(input)
+            .args(["-map", "0:v:0", "-c", "copy", "-an"]);
+        spec = spec
+            .args(["-map_metadata", "-1", "-map_chapters", "-1"])
+            .args(["-movflags", "+faststart", "-f", "mp4"])
+            .args(["-progress", "pipe:1", "-nostats"])
+            .arg(output);
+        self.run_progress(&spec, duration, cancellation, &mut progress)
+    }
+
     fn require_ffmpeg_component(
         &self,
         listing_flag: &str,
@@ -1382,7 +1659,7 @@ fn component_listing_contains(listing: &str, component: &str) -> bool {
     })
 }
 
-fn required_clip_filters(request: &ClipRenderRequest) -> Vec<&'static str> {
+pub(crate) fn required_clip_filters(request: &ClipRenderRequest) -> Vec<&'static str> {
     let mut filters = vec!["format", "setparams"];
     if request.crop.is_some() {
         filters.push("crop");
@@ -1404,7 +1681,10 @@ fn required_clip_filters(request: &ClipRenderRequest) -> Vec<&'static str> {
     filters
 }
 
-fn clip_filter_chain(probe: &Probe, request: &ClipRenderRequest) -> Result<(String, u32, u32)> {
+pub(crate) fn clip_filter_chain(
+    probe: &Probe,
+    request: &ClipRenderRequest,
+) -> Result<(String, u32, u32)> {
     let (display_width, display_height) = displayed_dimensions(probe);
     let (width, height, crop_filter) = match request.crop {
         Some(crop) => {
@@ -1534,7 +1814,7 @@ fn quantized_video_crop(
     Ok((left, top, right - left, bottom - top))
 }
 
-fn validate_h264_sdr_source(probe: &Probe) -> Result<String> {
+pub(crate) fn validate_h264_sdr_source(probe: &Probe) -> Result<String> {
     let bit_depth = probe
         .bit_depth
         .ok_or_else(|| Error::CapabilityUnavailable {
@@ -1732,7 +2012,7 @@ fn parse_rate(rate: &str) -> f64 {
     }
 }
 
-fn format_number(value: f64) -> String {
+pub(crate) fn format_number(value: f64) -> String {
     let formatted = format!("{value:.6}");
     let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
     if trimmed.is_empty() {
@@ -1865,6 +2145,17 @@ impl ProbeDocument {
             };
             (rate, stream.width.unwrap_or(0), stream.height.unwrap_or(0))
         });
+        let audio = self
+            .streams
+            .iter()
+            .find(|stream| stream.codec_type.as_deref() == Some("audio"));
+        let parse_stream_duration = |stream: Option<&ProbeStream>| {
+            stream?
+                .duration
+                .as_deref()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value >= 0.0)
+        };
         Ok(Probe {
             duration_s,
             fps,
@@ -1882,6 +2173,16 @@ impl ProbeDocument {
             color_transfer: video.and_then(|stream| stream.color_transfer.clone()),
             color_range: video.and_then(|stream| stream.color_range.clone()),
             rotation: video.and_then(stream_rotation),
+            video_frame_count: video
+                .and_then(|stream| stream.nb_frames.as_deref())
+                .and_then(|value| value.parse::<i64>().ok())
+                .filter(|value| *value >= 0),
+            video_duration_s: parse_stream_duration(video),
+            audio_duration_s: parse_stream_duration(audio),
+            audio_sample_rate: audio
+                .and_then(|stream| stream.sample_rate.as_deref())
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|value| *value > 0),
         })
     }
 }
@@ -1909,6 +2210,8 @@ struct ProbeStream {
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
     duration: Option<String>,
+    nb_frames: Option<String>,
+    sample_rate: Option<String>,
     #[serde(default)]
     tags: ProbeTags,
     #[serde(default)]
@@ -2069,6 +2372,10 @@ mod tests {
             color_transfer: transfer.map(str::to_owned),
             color_range: range.map(str::to_owned),
             rotation: None,
+            video_frame_count: None,
+            video_duration_s: None,
+            audio_duration_s: None,
+            audio_sample_rate: None,
         }
     }
 
