@@ -96,6 +96,32 @@ What changed against the rejected artifact, per the burned-in frame counter:
 this packet (cut, two-second rhythm, audio continuity at the cut, orientation, playback). The
 photo and clip items remain as approved in the initial packet and are not re-requested.
 
+### Machine verification of the re-render packet (2026-08-31, OpenCode orchestrator)
+
+Independent verification of `target/render-golden-review/task-036-reel-fix/` (from fix commit
+`6871fd0`), run by the orchestrator directly against the artifacts — supporting evidence for the
+human re-review, not a substitute for it:
+
+- `SHA256SUMS` verifies for all packet files.
+- VIDEO stream: exactly **60 frames**, 2.000 s, 640×360, 30 fps (rejected artifact: 56 frames,
+  fps 28.77).
+- Packet PTS: first video packet at **0.000000** (no head dead zone); packet 30 at **1.000000**
+  (the cut lands exactly at item A's video duration); packet 59 at 1.966667; max gap between
+  consecutive packets **0.033334 s** = one frame period (no holds or freezes); strictly
+  monotonic (no gaps).
+- Audio stream: 2.000 s — equal to video duration; audio no longer outlasts video.
+- Frame identity by PSNR nearest-match on decoded frames (the same method as the automated
+  golden): reel frame 0 = source frame **8** (49.3 dB vs ~24 dB for neighbors 7/9); reel frame
+  29 = source frame **37** (54.9 dB vs ~23.8) — the frame the rejection found missing; reel
+  frame 30 = source frame **98** (49.6 dB vs ~21.8); reel frame 59 = source frame **127**
+  (53.9 dB vs ~21.7) — the tail frame the rejection found missing.
+- Photo derivatives in the fix worktree re-render byte-identical to the approved initial
+  packet (all four SHA-256 match); the clip renderer command is untouched and its properties
+  (15 frames, 1.000 s, 512×288, no audio) are now test-enforced.
+
+Every defect named in the 2026-08-30 rejection is objectively resolved in this packet. The human
+re-review verdict remains John's (or his delegate's) to record below.
+
 ## Deliberate limits of this packet
 
 This packet does not approve advanced mixed-media reels, photo holds, fixed social canvases, music,
