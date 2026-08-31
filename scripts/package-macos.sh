@@ -17,12 +17,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# 1. Stamp honest build provenance: short commit, plus -dirty when the tree is
-#    not clean. No git (or no commits) -> unknown-local; never a fake commit.
+# 1. Stamp honest build provenance: short commit, plus -dirty when tracked
+#    files are modified (same semantics as `git describe --dirty`; untracked
+#    files do not affect the build). No git (or no commits) -> unknown-local;
+#    never a fake commit.
 COMMIT=""
 if git rev-parse --verify HEAD >/dev/null 2>&1; then
   COMMIT="$(git rev-parse --short HEAD)"
-  if [ -n "$(git status --porcelain)" ]; then
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     COMMIT="${COMMIT}-dirty"
   fi
 fi
