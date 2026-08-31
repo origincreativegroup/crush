@@ -69,6 +69,9 @@
         lastError: "FFmpeg could not decode frame 218 near 00:00:07.08",
       },
     ],
+    // Keep a stale projected error deliberately: the newest successful job is the
+    // authoritative state even if a list refresh arrives out of order.
+    "recovered-row": () => [{ ...video, lastError: "Older failure" }],
     "photo-row": () => [{ ...video }, { ...photo }],
     "search-error": () => [{ ...video }],
     "dam-home": () => [{ ...video }, { ...photo }],
@@ -93,6 +96,36 @@
       error: "FFmpeg could not decode frame 218 near 00:00:07.08",
       debug_dir: "/tmp/crush-debug/job-failed",
     });
+  }
+  if (scenario === "recovered-row") {
+    // The real store returns newest first. A successful retry must suppress the older
+    // failure rather than leaving a stale expandable error under a Done row.
+    pipeline.push(
+      {
+        id: "job-recovered",
+        owner_id: "local",
+        video_id: "video-one",
+        stage: "transcribe",
+        status: "done",
+        started_at: "2026-08-28T12:05:00Z",
+        finished_at: "2026-08-28T12:05:10Z",
+        duration_ms: 10000,
+        error: null,
+        debug_dir: null,
+      },
+      {
+        id: "job-older-failure",
+        owner_id: "local",
+        video_id: "video-one",
+        stage: "split",
+        status: "failed",
+        started_at: "2026-08-28T11:55:00Z",
+        finished_at: "2026-08-28T11:55:10Z",
+        duration_ms: 10000,
+        error: "FFmpeg could not decode frame 218 near 00:00:07.08",
+        debug_dir: "/tmp/crush-debug/job-older-failure",
+      },
+    );
   }
   if (scenario === "ingest-cancel") {
     pipeline.push({

@@ -206,10 +206,10 @@ function videoPresentation(video) {
 }
 
 function errorDetails(video, presentation) {
-  const failedJob = state.jobs.pipeline.find(
-    (job) => job.video_id === video.id && job.status === "failed",
-  );
-  if (!video.lastError && !failedJob) return null;
+  // `latestJob` follows the backend's newest-first ordering. Do not surface an older
+  // failure after a later retry has queued, completed, or been cancelled.
+  const failedJob = presentation.job?.status === "failed" ? presentation.job : null;
+  if (!failedJob) return null;
   return {
     error: video.lastError || failedJob?.error || "Unknown indexing error",
     jobId: failedJob?.id || "unknown",

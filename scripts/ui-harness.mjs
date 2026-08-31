@@ -406,6 +406,16 @@ const tests = {
     assert.equal(await visibleText(frame.locator(".error-panel button")), "Copy details");
   },
 
+  async "recovered-row"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const row = frame.locator("#video-rows tr.video-row");
+    await row.waitFor({ state: "visible" });
+    assert.equal(await visibleText(row.locator(".status-pill")), "Done");
+    assert.equal(await row.locator('button[aria-label="Show error details"]').count(), 0);
+    assert.equal(await frame.locator(".error-panel").count(), 0);
+  },
+
   async "photo-row"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-library").click();

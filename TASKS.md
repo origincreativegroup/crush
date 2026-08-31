@@ -70,4 +70,3 @@ Order: 032 → 033 → 034 → 035 (034/035 wait for the 021/022 merge; 032/033 
 `origin/main` conventions now, in their own worktrees). Every task: one branch, one PR, full gates
 (fmt, warnings-denied clippy, workspace tests, `npm run test:ui`), truthful record in the task file.
 Human gates are unchanged and none of these tasks may claim or bypass them.
-
