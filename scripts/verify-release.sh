@@ -35,7 +35,13 @@ fi
 
   # 1. Artifact checksum over the whole bundle (signatures excluded is optional; a raw
   #    hashing of the .app is the honest artifact digest for a signed build).
-  echo "app sha256: $(find "$APP" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1)"
+  # Hash relative paths plus file contents so the digest identifies the bundle itself,
+  # independent of whether it lives in the build tree, /Applications, or a mounted DMG.
+  APP_SHA256="$(
+    cd "$APP"
+    find . -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1
+  )"
+  echo "app sha256: $APP_SHA256"
 
   # 2. Signature state: explicit ad-hoc vs signed, and strict deep verification.
   if codesign --verify --deep --strict "$APP" 2>/dev/null; then
