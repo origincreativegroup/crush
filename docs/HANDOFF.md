@@ -7,6 +7,14 @@ shots with a general model, learns an owner's style from feedback and explicitly
 work, plans selects/clips, and renders derivatives. The DAM/catalog is supporting infrastructure.
 Rust, no server, no cloud. Open source (Apache-2.0).
 
+**Product direction (2026-08-31, John):** Crush and Reel Studio are **one product lineage** — John
+owns both. Reel Studio is not an external catalogue to bridge; the end state is unification: span
+data is first-class (analyzed, searchable, adjustable — see TASK-037/TASK-034), and the reel v2
+treatment vocabulary (captions, music, motion, keyframed crops, extended grades) is the native
+roadmap, not a foreign format. Do not design new one-way-bridge machinery; do not treat Reel
+Studio provenance as third-party. Until the frozen contracts exist, unsupported treatments stay
+honest capability errors.
+
 **Source of truth:** `docs/project-blueprint.md` remains the engineering architecture and build
 protocol, with `docs/blueprint-review.md` as its review discipline. The additive product expansion
 is `docs/dam-feedback-blueprint.md`. Current sequencing and acceptance live in `TASKS.md` and

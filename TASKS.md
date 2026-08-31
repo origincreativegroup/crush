@@ -60,8 +60,9 @@ Windows track. See `docs/platform-architecture.md`. PyTorch is reserved for trai
 validated ONNX export; the shipped app always retains a CPU path.
 | TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | done — merged as PR #39 (`2766843`): media-disjoint split, production-scale composed-ranker gate, transactional withdrawal, netting probes; review fixes applied and confirmed |
 | TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | in review — PR #40 (`task/33-sequence`, stacked on #37): sequence signals + one-click suggestions + selects duplicate cap; reviewed MERGE, follow-ups applied (clique guard, CLI cap echo, median panic fix), CI green; merges after #37 |
-| TASK-034 | Imported-evidence search + explicit confirmation bridge (022 follow-up) | OpenCode | backlog — next stretch, after 021/022 merge |
+| TASK-034 | Catalogue unification — span text in search, first-class spans (was: imported-evidence bridge) | OpenCode | backlog — reframed 2026-08-31 per John's direction (Crush and Reel Studio are one product lineage); after 021/022 merge; pairs with TASK-037 |
 | TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | backlog — next stretch, after 021 merge; no golden changes |
+| TASK-037 | First-class spans — adjustable boundaries, one catalogue (Reel Studio unification step 1) | OpenCode | backlog — created 2026-08-31 from John's direction; after 021 merge; byte-stable for approved render paths |
 | TASK-036 | Ordered-reel boundary-frame drops (021 review rejection) | OpenCode (Lane A idle) | engineering done — PR #41 squash-merged into the 021 branch (`4765ca0`): frame-exact items, exact-cut concat, silence-padded audio, fail-closed VIDEO-stream verification, fixture golden; packet re-rendered + machine-verified (see `docs/task-021-render-review.md`); **human reel re-review pending — gates 021** |
 
 ## OpenCode next stretch (2026-08-30)

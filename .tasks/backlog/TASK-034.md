@@ -1,8 +1,12 @@
-# TASK-034: Imported evidence — search, confirmation, and preference bridge (022 follow-up)
+# TASK-034: Catalogue unification — span text in search and first-class spans (022 follow-up)
 Agent: OpenCode. Branch: task/34-span-evidence. Depends: 021/022 merged (inherits the 021 gate).
 
-The importer's two documented honest limits plus the explicit-confirmation path
-(`docs/reel-studio-import.md` § Limits, `.tasks/backlog/TASK-022-impl-plan.md`).
+Reframed 2026-08-31 per John's direction: Crush and Reel Studio are one product lineage ("Reel
+Studio should be Crush and vice versa; I own both projects"). This is no longer an
+"imported-evidence bridge" treating Reel Studio data as foreign; it is step 2 of unifying the
+catalogue (TASK-037, adjustable boundaries, is step 1). The importer's two documented honest
+limits plus the explicit-confirmation path (`docs/reel-studio-import.md` § Limits,
+`.tasks/backlog/TASK-022-impl-plan.md`).
 
 ## Acceptance
 - [ ] Catalogue text (description/subjects/action/tags) on manual spans joins the search index and
