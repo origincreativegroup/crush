@@ -65,14 +65,7 @@
   white-space: nowrap;
 }
 
-.top-select select {
-  height: 30px;
-  padding: 0 8px;
-  border: 1px solid var(--border-raised);
-  border-radius: 7px;
-  color: var(--text);
-  background: var(--control);
-}
+/* Skin for .top-select select comes from the shared raised-select rule in styles.css. */
 
 .search-content {
   height: calc(100vh - 86px);
@@ -97,7 +90,7 @@
   align-items: center;
   gap: 3px;
   padding: 3px;
-  border: 1px solid var(--control-hover);
+  border: 1px solid var(--border-card);
   border-radius: 8px;
   background: var(--fill);
 }
@@ -240,14 +233,10 @@
   opacity: 1;
 }
 
+/* Badge chrome (padding/radius/fill/type) is the shared overlay-badge rule in
+   styles.css; only the bottom anchor lives here. */
 .badge {
-  position: absolute;
   bottom: 6px;
-  padding: 2px 6px;
-  border-radius: 5px;
-  color: var(--text);
-  background: rgb(0 0 0 / 66%);
-  font-size: 10px;
 }
 
 .badge-duration {
@@ -441,10 +430,6 @@
 
 .photo-detail-export select {
   min-height: 32px;
-  border: 1px solid var(--border-raised);
-  border-radius: 6px;
-  color: var(--text);
-  background: var(--control);
 }
 
 .detail-export-status {
@@ -453,14 +438,11 @@
   font-size: 12px;
 }
 
+/* Skin comes from the shared drawer sub-panel rule in styles.css; layout only here. */
 .detail-feedback {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--border-card);
-  border-radius: 8px;
-  background: var(--chrome);
 }
 
 .detail-feedback .eyebrow {
@@ -469,10 +451,6 @@
 
 .rating-control select {
   min-height: 32px;
-  border: 1px solid var(--border-raised);
-  border-radius: 6px;
-  color: var(--text);
-  background: var(--control);
 }
 
 .standout-control {

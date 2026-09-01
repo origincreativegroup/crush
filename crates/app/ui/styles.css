@@ -194,7 +194,7 @@ body {
 .setup-card {
   width: 600px;
   padding: 34px;
-  border: 1px solid var(--control-hover);
+  border: 1px solid var(--border-card);
   border-radius: 16px;
   background: var(--panel);
   box-shadow: 0 28px 90px rgb(0 0 0 / 38%);
@@ -249,11 +249,30 @@ h2 {
   line-height: 1.55;
 }
 
-.model-list {
-  overflow: hidden;
-  border: 1px solid var(--control-hover);
+/* Shared card skin (Task 039 A2): one edge weight, one radius, one fill for the
+   boxed cards across Library, Preferences, Review and Compare. Two deliberately
+   quieter edges from the audited state are preserved via border-color overrides
+   below (Preferences set rows, Review tiles). */
+.model-list,
+.style-status-card,
+.style-set-row,
+.review-tile,
+.compare-side {
+  border: 1px solid var(--border-card);
   border-radius: 10px;
   background: var(--surface);
+}
+
+.style-set-row {
+  border-color: var(--border);
+}
+
+.review-tile {
+  border-color: var(--control);
+}
+
+.model-list {
+  overflow: hidden;
 }
 
 .model-row {
@@ -561,7 +580,7 @@ nav {
   top: 0;
   height: 34px;
   padding: 0 10px;
-  border-bottom: 1px solid var(--control-hover);
+  border-bottom: 1px solid var(--border-card);
   color: var(--muted);
   background: var(--chrome);
   font-size: 10px;
@@ -651,7 +670,12 @@ nav {
   gap: 7px;
 }
 
-.status-pill {
+/* Shared pill skin (Task 039 A2): status pills (Library rows, Preferences, Review
+   thumbs) and Review flag pills are one pattern with tone variants. Flag pills
+   previously used 2px vertical padding vs 3px — unified on 3px, so flag pills grow
+   2px taller in the tile flag row. */
+.status-pill,
+.review-flag-pill {
   width: max-content;
   padding: 3px 7px;
   border-radius: 999px;
@@ -667,13 +691,15 @@ nav {
 }
 
 .status-pill.active,
-.status-pill.pending {
+.status-pill.pending,
+.review-flag-pill.member {
   color: var(--accent-text);
   background: rgb(var(--accent-rgb) / 13%);
 }
 
 .status-pill.failed,
-.status-pill.cancelled {
+.status-pill.cancelled,
+.review-flag-pill.flagged {
   color: var(--danger-text);
   background: rgb(var(--danger-rgb) / 12%);
 }
@@ -752,8 +778,10 @@ nav {
   font-size: 34px;
 }
 
-.doctor-dialog {
-  width: 650px;
+/* Shared dialog chrome (Task 039 A2): the doctor/confirm/remove/import dialogs and
+   the compare dialog speak one surface; only sizing differs per dialog. */
+.doctor-dialog,
+.compare-dialog {
   padding: 24px;
   border: 1px solid var(--border-raised);
   border-radius: 13px;
@@ -762,7 +790,12 @@ nav {
   box-shadow: 0 30px 100px rgb(0 0 0 / 55%);
 }
 
-.doctor-dialog::backdrop {
+.doctor-dialog {
+  width: 650px;
+}
+
+.doctor-dialog::backdrop,
+.compare-dialog::backdrop {
   background: rgb(8 8 10 / 66%);
   backdrop-filter: blur(3px);
 }
@@ -783,7 +816,7 @@ nav {
   margin: 20px 0;
   padding: 14px;
   overflow: auto;
-  border: 1px solid var(--control-hover);
+  border: 1px solid var(--border-card);
   border-radius: 8px;
   color: var(--text-body);
   background: var(--bg);
@@ -801,9 +834,6 @@ nav {
   max-width: 780px;
   margin-bottom: 18px;
   padding: 14px 16px;
-  border: 1px solid var(--control-hover);
-  border-radius: 10px;
-  background: var(--surface);
 }
 
 .style-status-line {
@@ -883,9 +913,6 @@ nav {
   gap: 12px;
   margin-bottom: 8px;
   padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
 }
 
 .style-set-main {
@@ -920,27 +947,47 @@ nav {
   background: rgb(var(--danger-rgb) / 30%);
 }
 
-.detail-style {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* Shared drawer sub-panel skin (Task 039 A2): the boxed sections inside the detail
+   drawer (style pick, feedback, safety, metadata, stacks) speak one surface; only
+   layout differs per section. */
+.detail-style,
+.detail-safety,
+.detail-metadata,
+.detail-stacks,
+.detail-feedback {
   padding: 10px;
   border: 1px solid var(--border-card);
   border-radius: 8px;
   background: var(--chrome);
 }
 
+.detail-style {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .detail-style .eyebrow {
   margin: 0 auto 0 0;
+}
+
+/* Shared raised select skin (Task 039 A2): every feature select (drawer style set,
+   stack controls, compare sides, photo export preset, rating) speaks one surface;
+   only sizing stays in the individual rules. */
+#detail-style-set,
+.stack-controls select,
+.compare-side select,
+.photo-detail-export select,
+.rating-control select {
+  border: 1px solid var(--border-raised);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--control);
 }
 
 #detail-style-set {
   min-height: 32px;
   max-width: 190px;
-  border: 1px solid var(--border-raised);
-  border-radius: 6px;
-  color: var(--text);
-  background: var(--control);
 }
 
 /* ---- Review library (Task 019b) ---- */
@@ -1016,19 +1063,33 @@ nav {
   margin-bottom: 8px;
 }
 
+/* Shared control skins (Task 039 A2). Two families cover every text input and
+   select in the app:
+   - text inputs: --border-input edge, 7px radius, --bg well, --text label;
+   - raised selects: --border-raised edge, 6px radius, --control fill.
+   Heights/padding stay contextual (30px inline, 32–38px feature controls). The
+   Review filter inputs previously used the raised dialog border and the drawer
+   inputs 9px inset padding — both unified here. */
 .filter-control select,
-.review-filters input,
-.saved-search-form input {
+.top-select select {
   height: 30px;
   padding: 0 8px;
   border: 1px solid var(--border-raised);
-  border-radius: 7px;
+  border-radius: 6px;
   color: var(--text);
   background: var(--control);
 }
 
 .review-filters input,
-.saved-search-form input {
+.saved-search-form input,
+.batch-collection-new input,
+.detail-metadata input,
+.stack-create-controls input {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-input);
+  border-radius: 7px;
+  color: var(--text);
   background: var(--bg);
 }
 
@@ -1058,15 +1119,6 @@ nav {
   gap: 8px;
 }
 
-.batch-collection-new input {
-  height: 30px;
-  padding: 0 8px;
-  border: 1px solid var(--border-raised);
-  border-radius: 7px;
-  color: var(--text);
-  background: var(--bg);
-}
-
 .review-content {
   height: calc(100vh - 86px);
   overflow: auto;
@@ -1089,9 +1141,6 @@ nav {
 .review-tile {
   position: relative;
   padding: 6px;
-  border: 1px solid var(--control);
-  border-radius: 10px;
-  background: var(--surface);
   cursor: pointer;
 }
 
@@ -1138,15 +1187,22 @@ nav {
   filter: blur(14px);
 }
 
+/* Shared thumbnail overlay badge (Task 039 A2): duration/score/standout badges on
+   Search results and the PHOTO/SHOT kind badge on Review tiles are one pattern.
+   The kind badge previously rendered at 9px — unified on the badge's 10px. */
+.badge,
 .review-kind {
   position: absolute;
-  top: 6px;
-  right: 6px;
   padding: 2px 6px;
   border-radius: 5px;
   color: var(--text);
   background: rgb(0 0 0 / 66%);
-  font-size: 9px;
+  font-size: 10px;
+}
+
+.review-kind {
+  top: 6px;
+  right: 6px;
   font-weight: 750;
   letter-spacing: 0.06em;
 }
@@ -1174,28 +1230,9 @@ nav {
   margin-top: 6px;
 }
 
-.review-flag-pill {
-  padding: 2px 7px;
-  border-radius: 999px;
-  color: var(--text-dim);
-  background: var(--pill-bg);
-  font-size: 10px;
-  font-weight: 700;
-}
-
 .review-flag-pill.quality {
   color: var(--gold);
   background: rgb(var(--gold-rgb) / 12%);
-}
-
-.review-flag-pill.flagged {
-  color: var(--danger-text);
-  background: rgb(var(--danger-rgb) / 12%);
-}
-
-.review-flag-pill.member {
-  color: var(--accent-text);
-  background: rgb(var(--accent-rgb) / 13%);
 }
 
 /* ---- detail drawer: safety, metadata, stacks ---- */
@@ -1206,10 +1243,6 @@ nav {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--border-card);
-  border-radius: 8px;
-  background: var(--chrome);
 }
 
 .detail-safety .eyebrow,
@@ -1239,15 +1272,8 @@ nav {
   accent-color: var(--accent);
 }
 
-.detail-metadata input {
-  height: 30px;
-  padding: 0 9px;
-  border: 1px solid var(--border-input);
-  border-radius: 7px;
-  color: var(--text);
-  background: var(--bg);
-}
-
+/* Skin for .detail-metadata input comes from the shared compact-input rule above;
+   only the layout bits stay here. */
 .stack-controls,
 .stack-create-controls {
   display: flex;
@@ -1259,21 +1285,11 @@ nav {
   min-height: 30px;
   min-width: 0;
   flex: 1;
-  border: 1px solid var(--border-raised);
-  border-radius: 6px;
-  color: var(--text);
-  background: var(--control);
 }
 
 .stack-create-controls input {
   min-width: 0;
   flex: 1;
-  height: 30px;
-  padding: 0 9px;
-  border: 1px solid var(--border-input);
-  border-radius: 7px;
-  color: var(--text);
-  background: var(--bg);
 }
 
 .detail-stack-memberships {
@@ -1308,17 +1324,6 @@ nav {
 .compare-dialog {
   width: 980px;
   max-width: calc(100vw - 60px);
-  padding: 24px;
-  border: 1px solid var(--border-raised);
-  border-radius: 13px;
-  color: var(--text);
-  background: var(--panel);
-  box-shadow: 0 30px 100px rgb(0 0 0 / 55%);
-}
-
-.compare-dialog::backdrop {
-  background: rgb(8 8 10 / 66%);
-  backdrop-filter: blur(3px);
 }
 
 .compare-grid {
@@ -1333,9 +1338,6 @@ nav {
   flex-direction: column;
   gap: 8px;
   padding: 10px;
-  border: 1px solid var(--control-hover);
-  border-radius: 10px;
-  background: var(--surface);
 }
 
 .compare-side.focused {
@@ -1365,10 +1367,6 @@ nav {
 
 .compare-side select {
   min-height: 32px;
-  border: 1px solid var(--border-raised);
-  border-radius: 6px;
-  color: var(--text);
-  background: var(--control);
 }
 
 .compare-status {

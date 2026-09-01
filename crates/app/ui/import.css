@@ -17,7 +17,7 @@
 .import-issue { padding: 6px 8px; border-left: 2px solid var(--amber-border); background: var(--surface-2); color: var(--text-body); font-size: 12px; }
 .import-issue.missing_source, .import-issue.out_of_range, .import-issue.unknown_segment { border-left-color: var(--danger); }
 .import-table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 11px; }
-.import-table th { text-align: left; padding: 4px 6px; color: var(--muted); border-bottom: 1px solid var(--control-hover); }
+.import-table th { text-align: left; padding: 4px 6px; color: var(--muted); border-bottom: 1px solid var(--border-card); }
 .import-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); color: var(--text-body); vertical-align: top; }
 .import-outcome.new { color: var(--success); }
 .import-outcome.updated { color: var(--accent-text); }
