@@ -29,11 +29,13 @@ state; no change made).
       the verified relink. `docs/release.md` § Relink and `docs/smoke.md`'s exercise-relink
       item now describe the real flow.
 - [x] (b) Move/rename detection on ingest. Both ingest paths classify same-content-at-a-new-
-      path (same parent = renamed, new parent = moved) and report it in `IngestSummary`
-      (`moved`/`renamed` counts + per-file `relinked` list), in the `crushctl ingest` report,
-      and in the app's ingest progress (structured counts on the background task + an honest
-      Library message). `indexed`/`skipped` meanings unchanged; same-path-new-content stays
-      its own honestly-labeled outcome; no duplicate rows in any case.
+      path (old copy gone + same parent = renamed, old copy gone + new parent = moved, old
+      copy still on disk = duplicate copy) and report it in `IngestSummary`
+      (`moved`/`renamed`/`duplicated` counts + per-file `relinked` list), in the
+      `crushctl ingest` report, and in the app's ingest progress (structured counts on the
+      background task + an honest Library message, announced once per job).
+      `indexed`/`skipped` meanings unchanged; same-path-new-content stays its own
+      honestly-labeled outcome; no duplicate rows in any case.
 - [x] (d) Rename survival proof: pipeline test `renamed_and_moved_files_keep_identity_and_
       evidence` — rename in place → `renamed` reported; move across directories → `moved`;
       explicit relink without re-adding a folder → verified and re-pointed; tampered file →
@@ -70,5 +72,59 @@ state; no change made).
 - Batch relink of a whole remounted drive stays out of scope (folder re-add covers it);
   a drive-level UI can ride on the relink command later.
 - `crushctl doctor --deep` integrity checks remain vector/thumbnail/proxy-focused; missing
-  sources surface in the Library via `sourceMissing` and at stage-failure time, not yet as
-  an integrity problem kind (would require a host-FS scan inside the store's integrity pass).
+  sources surface on the Library row as a plain-language "Source missing" pill (failed
+  tone) that clears when a verified relink lands, via the row's "Locate moved file…"
+  action, and at stage-failure time — not yet as an integrity problem kind (would require
+  a host-FS scan inside the store's integrity pass). An earlier version of this record
+  said only "surface via `sourceMissing`", which over-claimed what the UI showed: before
+  the review fix the row rendered a bare green Done with no missing indicator, and
+  `sourceMissing` drove nothing but the toolbar button's enabled state.
+
+## Review fixes applied (2026-09-01)
+
+A review returned MERGE with three should-fixes and four nits; all applied on this branch.
+
+- **Stale vector on a changed survivor (correctness).** `stable_shot_id` covers index and
+  start but not `end_s`/`rep_frame_s`, so a re-cut that moves a cut boundary changed the
+  preceding shot's end while its id survived; `replace_shots` updated the row in place but
+  the pre-recut vector stayed and kept serving. `replace_shots` now deletes the
+  survivor's `shot_vectors` row **in the same transaction** when its `end_s` or
+  `rep_frame_s` changed (same discipline as the vanished-shot cascade), so the next embed
+  pass re-embeds it (`embed_missing_shots` skips shots that already have a vector).
+  Asserted in `resplit_preserves_shot_evidence_and_cleans_only_vanished_shots` step 3.
+  *Honest limit:* the aesthetic assessment describes the pre-recut rep frame too, but
+  `video_assessments_current` keys only on assessment presence + model version — NOT on
+  vectors — so the analyze-staleness machinery does **not** refresh it on its own;
+  a re-analyze (or model bump) remains the manual path. Only the vector is automatically
+  invalidated.
+- **Prefer feedback with a vanished compared side.** Deleted whole, not partially
+  rewritten: the schema's no-dangling-reference discipline removes a preference event when
+  either side's shot disappears (feedback as media and as compared media both fire the
+  cleanup triggers). Asserted by the same store test — `fb-ev-1` (prefer shot-ev-0 over
+  shot-ev-1) is removed when shot-ev-1 vanishes, leaving `fb-ev-0` and `fb-ev-2`'s fates
+  per their own sides.
+- **Stale "moved or renamed" message re-announcing forever (UI honesty).** Finished
+  background tasks are never pruned and `job_status` re-emits ingest-progress on every
+  call, so the Library re-fired the summary on every event. The message now announces
+  once per job id: announced ids are tracked in a bounded FIFO set in app state
+  (`state.announcedIngestJobs`, evicting the oldest at 200); later events for an
+  already-announced job are silent. Asserted in the `ingest-relinked` harness scenario,
+  which re-fires the same finished job after the 5 s message window and requires the
+  message to stay hidden.
+- **`sourceMissing` never rendered on the row (UI honesty).** It only gated the toolbar
+  button. Library rows now render a "Source missing" pill in the failed tone next to the
+  status pill whenever `sourceMissing` is true (same treatment as a Failed row, plain
+  language), and the pill clears when a verified relink lands. Asserted in the
+  `relocate-moved-file` harness scenario.
+- **Duplicate-copy honesty.** When ingest finds same content at a new path and the OLD
+  file still exists on disk, the outcome is now reported as `duplicate copy`
+  (`RelinkKind::DuplicateCopy`, counted additively in `IngestSummary.duplicated`) instead
+  of claiming a move; `moved`/`renamed` now count only files whose old copy is really
+  gone. Path update semantics unchanged. Asserted in
+  `renamed_and_moved_files_keep_identity_and_evidence` step 2b.
+- **Nits:** CLI relink line label corrected from `(relindex …)` to `(id …)`; the CLI and
+  app summary text gained `duplicated={}`; `complete_ingest_background` no longer mirrors
+  `complete_background` — it writes the structured counts onto the stored task, then
+  delegates the status/detail/error transitions to `complete_background`; the relink store
+  test now covers the empty-**stored**-hash branch (a verified caller hash still refuses a
+  row with no recorded sha256, fail closed).
