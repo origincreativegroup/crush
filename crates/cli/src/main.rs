@@ -97,6 +97,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Relink a moved or renamed file after verifying its bytes are identical (SHA-256).
+    /// The catalog row is re-pointed in place; a different file is refused and the
+    /// original file is never modified.
+    Relink {
+        /// Asset id (video-… or photo-…) or the stale stored path of the moved file.
+        target: String,
+        /// Where the file lives now. Crush verifies it is the same media before relinking.
+        new_path: PathBuf,
+    },
     /// Inspect raw intermediate values from one pipeline stage.
     Debug {
         #[command(subcommand)]
@@ -276,6 +285,16 @@ fn main() -> anyhow::Result<()> {
                 result.mode,
                 result.command
             );
+            Ok(())
+        }
+        Cmd::Relink { target, new_path } => {
+            let outcome = Pipeline::new(cfg, paths, cancellation).relink(&target, &new_path)?;
+            println!(
+                "Relinked {} {} (SHA-256 verified; the original file was not modified)",
+                outcome.media_kind, outcome.id
+            );
+            println!("  was {}", outcome.old_path);
+            println!("  now {}", outcome.new_path);
             Ok(())
         }
         Cmd::Debug {
@@ -1536,6 +1555,30 @@ mod tests {
             clip.cmd,
             Cmd::Clip { shot_id, out }
                 if shot_id == "shot-1" && out == Path::new("export.mp4")
+        ));
+    }
+
+    #[test]
+    fn relink_cli_shape_is_stable() {
+        let by_id = Cli::try_parse_from([
+            "crushctl",
+            "relink",
+            "video-abc123",
+            "/Volumes/Footage/renamed.mov",
+        ])
+        .unwrap();
+        assert!(matches!(
+            by_id.cmd,
+            Cmd::Relink { target, new_path }
+                if target == "video-abc123" && new_path == Path::new("/Volumes/Footage/renamed.mov")
+        ));
+        let by_stale_path =
+            Cli::try_parse_from(["crushctl", "relink", "/old/drive/clip.mov", "/new/clip.mov"])
+                .unwrap();
+        assert!(matches!(
+            by_stale_path.cmd,
+            Cmd::Relink { target, new_path }
+                if target == "/old/drive/clip.mov" && new_path == Path::new("/new/clip.mov")
         ));
     }
 }

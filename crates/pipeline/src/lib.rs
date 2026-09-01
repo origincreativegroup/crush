@@ -53,6 +53,16 @@ pub struct IngestSummary {
     pub errors: Vec<(PathBuf, String)>,
 }
 
+/// The result of the explicit relink flow (`crushctl relink`, the app's "Locate moved
+/// file…" action): the catalog row was re-pointed after SHA-256 verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelinkOutcome {
+    pub media_kind: &'static str,
+    pub id: String,
+    pub old_path: String,
+    pub new_path: String,
+}
+
 pub struct Pipeline {
     config: Config,
     paths: AppPaths,
@@ -321,6 +331,58 @@ impl Pipeline {
                 Err(error)
             }
         }
+    }
+
+    /// First-class relink for a moved or renamed file. Resolve the target by asset id or
+    /// stale stored path across both media kinds, hash the bytes at the new path, and let
+    /// the store update the existing identity row only when that hash matches the recorded
+    /// sha256. A mismatch refuses without writing anything; a missing new path refuses;
+    /// no duplicate row is ever created and the original file is never modified.
+    pub fn relink(&self, target: &str, new_path: &Path) -> anyhow::Result<RelinkOutcome> {
+        let mut store = Store::open(&self.paths.root)?;
+        ensure!(
+            new_path.is_file(),
+            "the new path does not exist or is not a file: {}",
+            new_path.display()
+        );
+        // Ingest stores canonicalized paths, so relink records the same form.
+        let canonical = new_path.canonicalize().unwrap_or_else(|_| new_path.to_path_buf());
+        let new_path_string = canonical.to_string_lossy().into_owned();
+        let resolved = if let Some(video) = store.video_by_id(DEFAULT_OWNER_ID, target)? {
+            Some(("video", video.id, video.path))
+        } else if let Some(photo) = store.photo_by_id(DEFAULT_OWNER_ID, target)? {
+            Some(("photo", photo.id, photo.path))
+        } else if let Some(video) = store.video_by_path(DEFAULT_OWNER_ID, target)? {
+            Some(("video", video.id, video.path))
+        } else if let Some(photo) = store.photo_by_path(DEFAULT_OWNER_ID, target)? {
+            Some(("photo", photo.id, photo.path))
+        } else {
+            None
+        }
+        .with_context(|| format!("no indexed photo or video matches {target:?}"))?;
+        let (media_kind, id, old_path) = resolved;
+        let verified_sha256 = sha256_file(&canonical)?;
+        match media_kind {
+            "video" => {
+                store.relink_video(DEFAULT_OWNER_ID, &id, &new_path_string, &verified_sha256)?;
+            }
+            _ => {
+                store.relink_photo(DEFAULT_OWNER_ID, &id, &new_path_string, &verified_sha256)?;
+            }
+        }
+        tracing::info!(
+            media_kind,
+            media_id = %id,
+            from = %old_path,
+            to = %new_path_string,
+            "relinked moved media after sha256 verification"
+        );
+        Ok(RelinkOutcome {
+            media_kind,
+            id,
+            old_path,
+            new_path: new_path_string,
+        })
     }
 
     /// Backfill aesthetic analysis for photos that are Done but have no current-model

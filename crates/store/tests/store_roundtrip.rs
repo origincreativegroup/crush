@@ -5371,3 +5371,89 @@ fn resplit_preserves_shot_evidence_and_cleans_only_vanished_shots() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn relink_updates_the_row_path_only_after_verifying_the_recorded_hash() {
+    let directory = TestDir::new("relink");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-rl", "sha-rl"))
+        .unwrap();
+    store
+        .insert_shots(DEFAULT_OWNER_ID, &[shot("shot-rl-0", "video-rl", 0)])
+        .unwrap();
+    store
+        .append_feedback(
+            DEFAULT_OWNER_ID,
+            &feedback("fb-rl", MediaKind::Shot, "shot-rl-0", FeedbackSignal::Pick),
+        )
+        .unwrap();
+
+    // A hash mismatch refuses honestly and changes nothing.
+    let mismatch = store
+        .relink_video(
+            DEFAULT_OWNER_ID,
+            "video-rl",
+            "/new/place/video-rl.mov",
+            "a-different-file",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{mismatch:#}").contains("SHA-256 mismatch"),
+        "mismatch must be refused with the honest reason: {mismatch:#}"
+    );
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, "video-rl")
+            .unwrap()
+            .unwrap()
+            .path,
+        "/footage/video-rl.mov"
+    );
+    // An unknown id, an empty verified hash (fail closed), and a foreign owner refuse too.
+    assert!(store
+        .relink_video(DEFAULT_OWNER_ID, "video-missing", "/x", "sha-rl")
+        .is_err());
+    assert!(store
+        .relink_video(DEFAULT_OWNER_ID, "video-rl", "/x", "")
+        .is_err());
+    assert!(store
+        .relink_video("someone-else", "video-rl", "/x", "sha-rl")
+        .is_err());
+
+    // A verified relink updates only the path on the existing identity row.
+    let relinked = store
+        .relink_video(
+            DEFAULT_OWNER_ID,
+            "video-rl",
+            "/new/place/video-rl.mov",
+            "sha-rl",
+        )
+        .unwrap();
+    assert_eq!(relinked.path, "/new/place/video-rl.mov");
+    assert_eq!(relinked.sha256, "sha-rl");
+    assert_eq!(
+        store
+            .shots_for_video(DEFAULT_OWNER_ID, "video-rl")
+            .unwrap()
+            .iter()
+            .map(|shot| shot.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-rl-0"]
+    );
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+
+    // The photo flow behaves identically.
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &photo("photo-rl", "sha-photo-rl"))
+        .unwrap();
+    assert!(store
+        .relink_photo(DEFAULT_OWNER_ID, "photo-rl", "/x", "not-the-hash")
+        .is_err());
+    let relinked_photo = store
+        .relink_photo(DEFAULT_OWNER_ID, "photo-rl", "/new/place/photo-rl.jpg", "sha-photo-rl")
+        .unwrap();
+    assert_eq!(relinked_photo.path, "/new/place/photo-rl.jpg");
+    assert_eq!(store.photos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+}

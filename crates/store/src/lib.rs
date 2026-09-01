@@ -4185,6 +4185,83 @@ impl Store {
         ensure_changed(changed, "video", video_id)
     }
 
+    /// Relink a video row at a new path — the first-class moved/renamed-file flow. The
+    /// caller hashes the file at the new path first; this method re-checks that hash
+    /// against the row's recorded sha256 inside the same transaction that writes the
+    /// path, so a stale verification can never land and a mismatch refuses without
+    /// touching anything. Only the catalog path changes: no duplicate row is created and
+    /// the original file is never modified.
+    pub fn relink_video(
+        &mut self,
+        owner_id: &str,
+        video_id: &str,
+        new_path: &str,
+        verified_sha256: &str,
+    ) -> anyhow::Result<Video> {
+        self.relink_row(owner_id, "videos", "video", video_id, new_path, verified_sha256)?;
+        self.video_by_id(owner_id, video_id)?
+            .context("relinked video could not be read back")
+    }
+
+    /// Photo counterpart of [`Store::relink_video`]; the same verification, transaction,
+    /// and no-duplicate-row guarantees apply.
+    pub fn relink_photo(
+        &mut self,
+        owner_id: &str,
+        photo_id: &str,
+        new_path: &str,
+        verified_sha256: &str,
+    ) -> anyhow::Result<Photo> {
+        self.relink_row(owner_id, "photos", "photo", photo_id, new_path, verified_sha256)?;
+        self.photo_by_id(owner_id, photo_id)?
+            .context("relinked photo could not be read back")
+    }
+
+    fn relink_row(
+        &mut self,
+        owner_id: &str,
+        table: &str,
+        kind: &str,
+        id: &str,
+        new_path: &str,
+        verified_sha256: &str,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            !verified_sha256.is_empty(),
+            "refusing to relink without a verified sha256 (fail closed)"
+        );
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored_sha256: Option<String> = transaction
+            .query_row(
+                &format!("SELECT sha256 FROM {table} WHERE owner_id = ?1 AND id = ?2"),
+                params![owner_id, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .with_context(|| format!("failed to read the recorded hash for {kind} {id}"))?;
+        let Some(stored_sha256) = stored_sha256 else {
+            bail!("{kind} {id} was not found for this owner; nothing was relinked")
+        };
+        ensure!(
+            !stored_sha256.is_empty(),
+            "{kind} {id} has no recorded sha256; refusing to relink (fail closed)"
+        );
+        ensure!(
+            stored_sha256 == verified_sha256,
+            "relink refused: the file at {new_path} is not the same media Crush indexed \
+             (SHA-256 mismatch for {kind} {id}). Nothing was changed."
+        );
+        let changed = transaction.execute(
+            &format!("UPDATE {table} SET path = ?3 WHERE owner_id = ?1 AND id = ?2"),
+            params![owner_id, id, new_path],
+        )?;
+        ensure_changed(changed, kind, id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn upsert_video_source_metadata(
         &self,
         owner_id: &str,
