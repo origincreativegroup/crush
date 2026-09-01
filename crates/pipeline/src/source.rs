@@ -135,12 +135,59 @@ pub enum PhotoOutputPreset {
 }
 
 impl PhotoOutputPreset {
+    /// Every preset this renderer supports, in display order. The UI preset catalog is built
+    /// from this list — preset facts have exactly one definition.
+    pub const ALL: [Self; 3] = [Self::JpegSrgbV1, Self::PngSrgbV1, Self::TiffSrgbV1];
+
+    /// Frozen contract value used in recipes and manifests; never renamed.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::JpegSrgbV1 => "jpeg-srgb-v1",
             Self::PngSrgbV1 => "png-srgb-v1",
             Self::TiffSrgbV1 => "tiff-srgb-v1",
         }
+    }
+
+    /// Canonical output extension (save dialogs, destination validation).
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::JpegSrgbV1 => "jpg",
+            Self::PngSrgbV1 => "png",
+            Self::TiffSrgbV1 => "tif",
+        }
+    }
+
+    /// Every destination extension the preset verifies (JPEG also renders `.jpeg`, TIFF
+    /// also renders `.tiff`).
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::JpegSrgbV1 => &["jpg", "jpeg"],
+            Self::PngSrgbV1 => &["png"],
+            Self::TiffSrgbV1 => &["tif", "tiff"],
+        }
+    }
+
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::JpegSrgbV1 => "image/jpeg",
+            Self::PngSrgbV1 => "image/png",
+            Self::TiffSrgbV1 => "image/tiff",
+        }
+    }
+
+    /// Human label shown in the UI; also the saved recipe name (frozen contract).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::JpegSrgbV1 => "JPEG — smaller, easy to share",
+            Self::PngSrgbV1 => "PNG — lossless",
+            Self::TiffSrgbV1 => "TIFF — lossless 8-bit copy",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|preset| preset.as_str() == value)
     }
 }
 

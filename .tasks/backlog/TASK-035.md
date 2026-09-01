@@ -1,6 +1,8 @@
 # TASK-035: Render engineering follow-ups from the 2026-08-30 review
 Agent: OpenCode. Branch: task/35-render-followups. Depends: 021 merged. No golden edits; renderer
 output must remain byte-stable or the render review packet is invalidated — coordinate with Lane A.
+Status: implemented 2026-09-01 on `task/35-render-followups`; see the impl plan for the verified
+touch points and the PR body for the byte-stability evidence.
 
 Remaining items from the PR #37 review (the executor refactor in 34069b9 already fixed the
 cancel-vs-published ordering, swallowed transitions, orphan recipes, and queue-time photo-source

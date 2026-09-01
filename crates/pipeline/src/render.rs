@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
 use chrono::Utc;
@@ -92,6 +93,75 @@ struct ManagedStaging {
     output: PathBuf,
     manifest: PathBuf,
     marker: PathBuf,
+}
+
+/// Throttled, monotonic job-progress writer fed by the ffmpeg `-progress pipe:1` callbacks
+/// (TASK-035 item 4; the TASK-040 B10 item). The renderer's overall `Progress.percent` —
+/// measured out_time against the requested duration, mapped by the reel renderer across items,
+/// remuxes, and assembly — lands in the job's 0.1..0.75 window; 1.0 stays reserved for
+/// verification and the executor's final 0.75 write is unchanged. Writes are throttled
+/// (one SQLite immediate transaction per update), monotonic, and honestly limited to what the
+/// executor can measure: if the store refuses an update, further attempts stop and the render
+/// continues — progress is advisory, the durable guards remain the contract.
+struct JobProgressWriter<'a> {
+    store: &'a mut Store,
+    owner_id: &'a str,
+    job_id: &'a str,
+    last_progress: f64,
+    last_write: Option<Instant>,
+    stopped: bool,
+}
+
+impl JobProgressWriter<'_> {
+    const BASE: f64 = 0.1;
+    const SPAN: f64 = 0.65;
+    const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(250);
+
+    fn new<'a>(store: &'a mut Store, owner_id: &'a str, job_id: &'a str) -> JobProgressWriter<'a> {
+        JobProgressWriter {
+            store,
+            owner_id,
+            job_id,
+            last_progress: Self::BASE,
+            last_write: None,
+            stopped: false,
+        }
+    }
+
+    fn record(&mut self, progress: &ffmpeg::Progress) {
+        if self.stopped {
+            return;
+        }
+        let mapped = Self::BASE + Self::SPAN * (progress.percent / 100.0).clamp(0.0, 1.0);
+        if mapped <= self.last_progress {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_write
+            .is_some_and(|last| now.duration_since(last) < Self::MIN_WRITE_INTERVAL)
+        {
+            return;
+        }
+        match self
+            .store
+            .render_job_set_progress(self.owner_id, self.job_id, mapped)
+        {
+            Ok(()) => {
+                self.last_progress = mapped;
+                self.last_write = Some(now);
+            }
+            Err(error) => {
+                self.stopped = true;
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    stage = "render",
+                    error = %error,
+                    "render progress updates stopped after a refused write"
+                );
+            }
+        }
+    }
 }
 
 impl ManagedStaging {
@@ -443,23 +513,39 @@ impl Pipeline {
             self.config.limits.threads,
             job.id.clone(),
         );
-        let rendered = runner.render_reel_with_control(
-            &sources.request,
-            &staging.output,
-            &self.cancellation,
-            |_| {},
-        )?;
+        let rendered = {
+            let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
+            runner.render_reel_with_control(
+                &sources.request,
+                &staging.output,
+                &self.cancellation,
+                |progress| progress_writer.record(&progress),
+            )?
+        };
         store.render_job_set_progress(owner_id, &job.id, 0.75)?;
         ensure!(!self.cancellation.is_cancelled(), "reel render cancelled");
 
         let mut source_evidence = Vec::with_capacity(sources.snapshots.len());
+        // After-pass source-hash memo: each distinct source path is re-read and hashed once
+        // per attempt (not once per item). This is deliberately a FRESH read — the point of
+        // hash_after is to measure that the bytes did not change while the render ran, so it
+        // never reuses the before-pass memoized values.
+        let mut hash_after_cache: BTreeMap<PathBuf, String> = BTreeMap::new();
         for snapshot in &sources.snapshots {
             let path = sources
                 .resolved_paths
                 .get(&snapshot.media_id)
                 .context("resolved reel source path is missing")?;
-            let hash_after = sha256_file(path)
-                .with_context(|| format!("failed to recheck reel source {}", path.display()))?;
+            let hash_after = match hash_after_cache.get(path) {
+                Some(hash) => hash.clone(),
+                None => {
+                    let hash = sha256_file(path).with_context(|| {
+                        format!("failed to recheck reel source {}", path.display())
+                    })?;
+                    hash_after_cache.insert(path.clone(), hash.clone());
+                    hash
+                }
+            };
             ensure!(
                 hash_after.eq_ignore_ascii_case(&snapshot.sha256),
                 "reel source changed while it was rendering"
@@ -478,8 +564,13 @@ impl Pipeline {
         let output_size = i64::try_from(fs::metadata(&staging.output)?.len())
             .context("render output size overflowed i64")?;
         let output_sha256 = sha256_file(&staging.output)?;
+        // Reel duration rule: N independent frame-boundary cuts, so the tolerance is the sum
+        // of per-item frame slacks plus the shared container slack
+        // (`DURATION_TOLERANCE_SLACK_S + items / fps`), per the documented rule in
+        // `crush_stage_split::ffmpeg::duration_tolerance_s`.
         let duration_tolerance_s = if rendered.output_probe.fps > 0.0 {
-            0.05 + sources.request.items.len() as f64 / rendered.output_probe.fps
+            ffmpeg::DURATION_TOLERANCE_SLACK_S
+                + sources.request.items.len() as f64 / rendered.output_probe.fps
         } else {
             0.1
         };
@@ -552,11 +643,7 @@ impl Pipeline {
             "color_transfer": rendered.output_probe.color_transfer,
         });
         let created_at = Utc::now();
-        let media_type = match sources.request.output {
-            ClipOutputPreset::Mp4H264SdrV1 => "video/mp4",
-            ClipOutputPreset::MovH264SdrV1 => "video/quicktime",
-        }
-        .to_owned();
+        let media_type = sources.request.output.media_type().to_owned();
         let mut commands = rendered.item_commands.clone();
         commands.extend(rendered.video_remux_commands.iter().cloned());
         commands.push(rendered.command.clone());
@@ -653,13 +740,16 @@ impl Pipeline {
             self.config.limits.threads,
             job.id.clone(),
         );
-        let rendered = runner.render_clip_with_control(
-            &source.path,
-            recipe,
-            &staging.output,
-            &self.cancellation,
-            |_| {},
-        )?;
+        let rendered = {
+            let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
+            runner.render_clip_with_control(
+                &source.path,
+                recipe,
+                &staging.output,
+                &self.cancellation,
+                |progress| progress_writer.record(&progress),
+            )?
+        };
         store.render_job_set_progress(owner_id, &job.id, 0.75)?;
         ensure!(!self.cancellation.is_cancelled(), "video render cancelled");
         let source_hash_after = sha256_file(&source.path)?;
@@ -670,11 +760,10 @@ impl Pipeline {
         let output_size = i64::try_from(fs::metadata(&staging.output)?.len())
             .context("render output size overflowed i64")?;
         let output_sha256 = sha256_file(&staging.output)?;
-        let duration_tolerance_s = if rendered.output_probe.fps > 0.0 {
-            (2.0 / rendered.output_probe.fps).max(0.05)
-        } else {
-            0.1
-        };
+        // Same documented rule as the encoder-side check (crush_stage_split::ffmpeg):
+        // duration_tolerance = frame_tolerance + slack, so a container the encoder accepted
+        // can never fail here — no pass-then-fail window (e.g. 60 fps AAC priming).
+        let duration_tolerance_s = ffmpeg::duration_tolerance_s(rendered.output_probe.fps);
         let duration_delta_s =
             (rendered.output_probe.duration_s - rendered.requested_duration_s).abs();
         ensure!(
@@ -713,11 +802,7 @@ impl Pipeline {
             "color_transfer": rendered.output_probe.color_transfer,
         });
         let created_at = Utc::now();
-        let media_type = match recipe.output {
-            ClipOutputPreset::Mp4H264SdrV1 => "video/mp4",
-            ClipOutputPreset::MovH264SdrV1 => "video/quicktime",
-        }
-        .to_owned();
+        let media_type = recipe.output.media_type().to_owned();
         let manifest_destination = manifest_path(destination);
         let manifest = json!({
             "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -830,7 +915,7 @@ impl Pipeline {
             output_sha256 == rendered.derivative.sha256,
             "photo renderer checksum did not match verification checksum"
         );
-        let media_type = preset_media_type(recipe.output).to_owned();
+        let media_type = recipe.output.media_type().to_owned();
         let verification = json!({
             "source_hash_before": source_hash_before(source_snapshot),
             "source_hash_after": source_hash_after,
@@ -1033,12 +1118,8 @@ fn parse_photo_recipe(frozen: &str) -> anyhow::Result<PhotoRenderRecipe> {
         .and_then(|output| output.get("preset"))
         .and_then(Value::as_str)
         .context("photo output preset is missing")?;
-    let output = match preset {
-        "jpeg-srgb-v1" => PhotoOutputPreset::JpegSrgbV1,
-        "png-srgb-v1" => PhotoOutputPreset::PngSrgbV1,
-        "tiff-srgb-v1" => PhotoOutputPreset::TiffSrgbV1,
-        other => bail!("unsupported photo output preset {other:?}"),
-    };
+    let output = PhotoOutputPreset::parse(preset)
+        .with_context(|| format!("unsupported photo output preset {preset:?}"))?;
     Ok(PhotoRenderRecipe {
         crop,
         rotation_degrees,
@@ -1112,15 +1193,14 @@ fn parse_video_clip_recipe(frozen: &str) -> anyhow::Result<ClipRenderRequest> {
         Some(other) => bail!("unsupported video clip audio mode {other:?}"),
         None => bail!("video clip audio mode is missing"),
     };
-    let output = match schema
+    let output_preset = schema
         .get("output")
         .and_then(Value::as_object)
         .and_then(|value| value.get("preset"))
-        .and_then(Value::as_str)
-    {
-        Some("mp4-h264-sdr-v1") => ClipOutputPreset::Mp4H264SdrV1,
-        Some("mov-h264-sdr-v1") => ClipOutputPreset::MovH264SdrV1,
-        Some(other) => bail!("unsupported video clip output preset {other:?}"),
+        .and_then(Value::as_str);
+    let output = match output_preset {
+        Some(preset) => ClipOutputPreset::parse(preset)
+            .with_context(|| format!("unsupported video clip output preset {preset:?}"))?,
         None => bail!("video clip output preset is missing"),
     };
     let recipe = ClipRenderRequest {
@@ -1170,15 +1250,14 @@ fn parse_reel_v1_recipe(frozen: &str) -> anyhow::Result<ReelV1Recipe> {
         Some(other) => bail!("unsupported ordered reel audio mode {other:?}"),
         None => bail!("ordered reel audio mode is missing"),
     };
-    let output = match schema
+    let output_preset = schema
         .get("output")
         .and_then(Value::as_object)
         .and_then(|value| value.get("preset"))
-        .and_then(Value::as_str)
-    {
-        Some("mp4-h264-sdr-v1") => ClipOutputPreset::Mp4H264SdrV1,
-        Some("mov-h264-sdr-v1") => ClipOutputPreset::MovH264SdrV1,
-        Some(other) => bail!("unsupported ordered reel output preset {other:?}"),
+        .and_then(Value::as_str);
+    let output = match output_preset {
+        Some(preset) => ClipOutputPreset::parse(preset)
+            .with_context(|| format!("unsupported ordered reel output preset {preset:?}"))?,
         None => bail!("ordered reel output preset is missing"),
     };
     Ok(ReelV1Recipe { audio, output })
@@ -1336,6 +1415,11 @@ fn resolve_reel_v1_sources(
     };
     let mut resolved_paths = BTreeMap::new();
     let mut items = Vec::with_capacity(plan_items.len());
+    // Before-pass source-hash memo: a reel that cuts several items from one source video
+    // hashes that file once per distinct path, not once per item. (The after-pass keeps its
+    // own memo in execute_reel_attempt — sharing this map with it would fabricate the
+    // "sources unchanged while rendering" evidence instead of measuring it.)
+    let mut hash_before_cache: BTreeMap<PathBuf, String> = BTreeMap::new();
     for (index, item) in plan_items.iter().enumerate() {
         let snapshot = by_media_id.remove(&item.media_id).with_context(|| {
             format!(
@@ -1400,8 +1484,15 @@ fn resolve_reel_v1_sources(
         }
         let path = PathBuf::from(video.path);
         ensure!(path.is_absolute(), "library video path is not absolute");
-        let hash_before = sha256_file(&path)
-            .with_context(|| format!("failed to hash reel source {}", path.display()))?;
+        let hash_before = match hash_before_cache.get(&path) {
+            Some(hash) => hash.clone(),
+            None => {
+                let hash = sha256_file(&path)
+                    .with_context(|| format!("failed to hash reel source {}", path.display()))?;
+                hash_before_cache.insert(path.clone(), hash.clone());
+                hash
+            }
+        };
         ensure!(
             hash_before.eq_ignore_ascii_case(&snapshot.sha256),
             "reel source bytes changed after this render was queued"
@@ -1575,17 +1666,11 @@ fn validate_photo_destination(path: &Path, preset: PhotoOutputPreset) -> anyhow:
         .extension()
         .and_then(|value| value.to_str())
         .context("photo render destination needs a file extension")?;
-    let valid = match preset {
-        PhotoOutputPreset::JpegSrgbV1 => {
-            extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
-        }
-        PhotoOutputPreset::PngSrgbV1 => extension.eq_ignore_ascii_case("png"),
-        PhotoOutputPreset::TiffSrgbV1 => {
-            extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
-        }
-    };
     ensure!(
-        valid,
+        preset
+            .extensions()
+            .iter()
+            .any(|allowed| extension.eq_ignore_ascii_case(allowed)),
         "destination extension does not match preset {}",
         preset.as_str()
     );
@@ -1597,24 +1682,15 @@ fn validate_video_destination(path: &Path, preset: ClipOutputPreset) -> anyhow::
         .extension()
         .and_then(|value| value.to_str())
         .context("video render destination needs a file extension")?;
-    let valid = match preset {
-        ClipOutputPreset::Mp4H264SdrV1 => extension.eq_ignore_ascii_case("mp4"),
-        ClipOutputPreset::MovH264SdrV1 => extension.eq_ignore_ascii_case("mov"),
-    };
     ensure!(
-        valid,
+        preset
+            .extensions()
+            .iter()
+            .any(|allowed| extension.eq_ignore_ascii_case(allowed)),
         "destination extension does not match preset {}",
         preset.as_str()
     );
     Ok(())
-}
-
-fn preset_media_type(preset: PhotoOutputPreset) -> &'static str {
-    match preset {
-        PhotoOutputPreset::JpegSrgbV1 => "image/jpeg",
-        PhotoOutputPreset::PngSrgbV1 => "image/png",
-        PhotoOutputPreset::TiffSrgbV1 => "image/tiff",
-    }
 }
 
 fn manifest_path(destination: &Path) -> PathBuf {
@@ -1749,14 +1825,29 @@ fn optional_f64(object: &Map<String, Value>, key: &str) -> anyhow::Result<Option
 fn verified_publication_matches(output: &RenderOutput) -> anyhow::Result<bool> {
     let output_path = Path::new(&output.output_path);
     let manifest_path = Path::new(&output.manifest_path);
-    if !output_path.is_file() || !manifest_path.is_file() {
+    // Cheap short-circuit before any SHA-256: recovery must never pay a full hash for a file
+    // whose size already disagrees with the checksummed evidence. Size equality is verified
+    // first and the hashes remain the contract; mtime is deliberately never consulted.
+    let expected_size = u64::try_from(output.size_bytes).unwrap_or(u64::MAX);
+    match fs::metadata(output_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == expected_size => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect published output {}",
+                    output_path.display()
+                )
+            })
+        }
+    }
+    if !manifest_path.is_file() {
         return Ok(false);
     }
     Ok(
         sha256_file(output_path)?.eq_ignore_ascii_case(&output.output_sha256)
-            && sha256_file(manifest_path)?.eq_ignore_ascii_case(&output.manifest_sha256)
-            && fs::metadata(output_path)?.len()
-                == u64::try_from(output.size_bytes).unwrap_or(u64::MAX),
+            && sha256_file(manifest_path)?.eq_ignore_ascii_case(&output.manifest_sha256),
     )
 }
 
@@ -1940,6 +2031,125 @@ mod tests {
             PhotoOutputPreset::JpegSrgbV1
         )
         .is_err());
+    }
+
+    /// TASK-035 item 4: ffmpeg's measured progress maps monotonically into the job's
+    /// 0.1..0.75 window through the real guarded store UPDATE — never reaching the
+    /// verification-reserved values — and writes are throttled.
+    #[test]
+    fn ffmpeg_progress_maps_monotonically_into_the_job_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        let _destination = running_photo_job(&mut store, directory.path(), "progress-job");
+        let mut writer = JobProgressWriter::new(&mut store, DEFAULT_OWNER_ID, "progress-job");
+        let job_progress = |root: &Path| {
+            Store::open(root)
+                .unwrap()
+                .render_job_by_id(DEFAULT_OWNER_ID, "progress-job")
+                .unwrap()
+                .unwrap()
+                .progress
+        };
+
+        // Half of the measured render maps to 0.1 + 0.65*0.5 — beyond the 0.1 staging mark.
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.0,
+            percent: 50.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.5);
+
+        // Equal or lower ffmpeg progress never writes.
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.0,
+            percent: 50.0,
+        });
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 0.2,
+            percent: 10.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.5);
+
+        // A higher value inside the throttle window is skipped, then written after the
+        // interval passes.
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.2,
+            percent: 60.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.5);
+        std::thread::sleep(JobProgressWriter::MIN_WRITE_INTERVAL);
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.2,
+            percent: 60.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.6);
+
+        // Even a completed encode stays at 0.75: 1.0 is reserved for verification, and the
+        // executor's explicit final 0.75 write remains the terminal pre-verify value.
+        std::thread::sleep(JobProgressWriter::MIN_WRITE_INTERVAL);
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 2.0,
+            percent: 100.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.75);
+    }
+
+    /// Startup recovery verifies a publication by size first: a truncated or missing output
+    /// fails without ever paying a full SHA-256, and only a size-matching file is hashed.
+    #[test]
+    fn verified_publication_checks_size_before_any_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_path = directory.path().join("published.png");
+        let manifest_path = directory.path().join("published.png.crush-manifest.json");
+        let content = b"published output bytes".to_vec();
+        fs::write(&output_path, &content).unwrap();
+        fs::write(&manifest_path, b"published manifest").unwrap();
+        let output = RenderOutput {
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            id: "out".to_owned(),
+            job_id: "job".to_owned(),
+            attempt: 1,
+            output_path: output_path.to_string_lossy().into_owned(),
+            output_sha256: sha256_file(&output_path).unwrap(),
+            size_bytes: content.len() as i64,
+            media_type: "image/png".to_owned(),
+            width: None,
+            height: None,
+            duration_s: None,
+            verification_json: "{}".to_owned(),
+            manifest_path: manifest_path.to_string_lossy().into_owned(),
+            manifest_json: "published manifest".to_owned(),
+            manifest_sha256: sha256_file(&manifest_path).unwrap(),
+            created_at: Utc::now(),
+        };
+        assert!(verified_publication_matches(&output).unwrap());
+
+        // Truncated output: the size mismatch short-circuits. The claimed hash is deliberately
+        // unreachable ("not the content hash"), so returning false here cannot have hashed the
+        // file — the cheap stat decided it.
+        let truncated = RenderOutput {
+            size_bytes: 999_999,
+            output_sha256: "f".repeat(64),
+            ..output.clone()
+        };
+        assert!(!verified_publication_matches(&truncated).unwrap());
+
+        let missing = RenderOutput {
+            output_path: directory
+                .path()
+                .join("gone.png")
+                .to_string_lossy()
+                .into_owned(),
+            ..output.clone()
+        };
+        assert!(!verified_publication_matches(&missing).unwrap());
+
+        // Intact size but tampered bytes still verifies false on the hash; and a missing
+        // manifest never finalizes.
+        fs::write(&output_path, b"tampered").unwrap();
+        assert!(!verified_publication_matches(&output).unwrap());
+        fs::write(&output_path, &content).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        assert!(!verified_publication_matches(&output).unwrap());
     }
 
     #[test]

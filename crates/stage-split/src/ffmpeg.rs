@@ -1,6 +1,8 @@
 //! Bundled FFmpeg/FFprobe resolution and the five supported video operations.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -129,6 +131,43 @@ pub struct Progress {
     pub percent: f64,
 }
 
+/// Container/muxer slack shared by every rendered-container duration check. The native AAC
+/// encoder's priming packet is presented through the MP4 edit list and can pad the container
+/// duration slightly past the video stream (the TASK-021/036 AAC-priming finding), so the
+/// duration rule below adds this slack on top of the frame-boundary term.
+pub const DURATION_TOLERANCE_SLACK_S: f64 = 0.05;
+
+/// One source-frame period of boundary slack, the frame term of the duration-tolerance rule.
+/// A container whose video starts on the first source frame at or after the requested start
+/// and ends on the last delivered frame can differ from the requested duration by up to one
+/// source-frame period. Probes that report no usable frame rate fall back to 30 fps.
+pub fn frame_tolerance_s(fps: f64) -> f64 {
+    if fps > 0.0 {
+        1.0 / fps
+    } else {
+        1.0 / 30.0
+    }
+}
+
+/// The documented duration-tolerance rule shared by every rendered-container duration check —
+/// stage-split verification (`verify_clip_render`, the export path) and the durable executor's
+/// re-checks in `crates/pipeline/src/render.rs`:
+///
+/// `duration_tolerance_s = frame_tolerance + 0.05`, where `frame_tolerance = 1.0 / fps`
+/// (fallback 1/30).
+///
+/// `frame_tolerance` covers frame-boundary rounding; the extra 0.05 s
+/// ([`DURATION_TOLERANCE_SLACK_S`]) covers container padding from the AAC priming packet.
+/// Without one shared rule, a 60 fps render could pass the encoder-side check
+/// (1/60 + 0.05 ≈ 0.067 s) and then fail a stricter executor re-check (0.05 s) — the
+/// pass-then-fail window this function removes. A reel of N items renders N independent
+/// frame-boundary cuts, so the reel executor sums per-item frame slacks plus the shared
+/// container slack: `DURATION_TOLERANCE_SLACK_S + N / fps`. Every duration check in the render
+/// path must derive from this rule; do not add a second tolerance formula.
+pub fn duration_tolerance_s(fps: f64) -> f64 {
+    frame_tolerance_s(fps) + DURATION_TOLERANCE_SLACK_S
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Operation<T> {
     pub value: T,
@@ -191,6 +230,11 @@ pub enum ClipOutputPreset {
 }
 
 impl ClipOutputPreset {
+    /// Every preset this renderer supports, in display order. The UI preset catalog is built
+    /// from this list — preset facts have exactly one definition.
+    pub const ALL: [Self; 2] = [Self::Mp4H264SdrV1, Self::MovH264SdrV1];
+
+    /// Frozen contract value used in recipes and manifests; never renamed.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mp4H264SdrV1 => "mp4-h264-sdr-v1",
@@ -198,11 +242,48 @@ impl ClipOutputPreset {
         }
     }
 
-    const fn muxer(self) -> &'static str {
+    pub const fn muxer(self) -> &'static str {
         match self {
             Self::Mp4H264SdrV1 => "mp4",
             Self::MovH264SdrV1 => "mov",
         }
+    }
+
+    /// Canonical output extension (save dialogs, destination validation).
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4H264SdrV1 => "mp4",
+            Self::MovH264SdrV1 => "mov",
+        }
+    }
+
+    /// Every destination extension the preset verifies.
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Mp4H264SdrV1 => &["mp4"],
+            Self::MovH264SdrV1 => &["mov"],
+        }
+    }
+
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::Mp4H264SdrV1 => "video/mp4",
+            Self::MovH264SdrV1 => "video/quicktime",
+        }
+    }
+
+    /// Human label shown in the UI; also the saved recipe name (frozen contract).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mp4H264SdrV1 => "MP4 — compatible H.264",
+            Self::MovH264SdrV1 => "MOV — editing-friendly H.264",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|preset| preset.as_str() == value)
     }
 }
 
@@ -515,6 +596,11 @@ pub struct Runner {
     threads: usize,
     job_id: String,
     debug_dir: Option<PathBuf>,
+    /// `-encoders`/`-filters` listings captured once per Runner lifetime. A Runner is created
+    /// per render job, so a clip render that checks several filters queries each listing at
+    /// most once instead of spawning one `ffmpeg -encoders`/`-filters` per check. The cache
+    /// is deliberately not process-wide: it must never outlive the ffmpeg binary it listed.
+    capability_listings: RefCell<HashMap<&'static str, String>>,
 }
 
 impl Runner {
@@ -524,6 +610,7 @@ impl Runner {
             threads: effective_threads(configured_threads),
             job_id: job_id.into(),
             debug_dir: None,
+            capability_listings: RefCell::new(HashMap::new()),
         }
     }
 
@@ -809,11 +896,7 @@ impl Runner {
                 "clip render source has no video stream".to_owned(),
             ));
         }
-        let frame_tolerance = if source_probe.fps > 0.0 {
-            1.0 / source_probe.fps
-        } else {
-            1.0 / 30.0
-        };
+        let frame_tolerance = frame_tolerance_s(source_probe.fps);
         if request.out_s > source_probe.duration_s + frame_tolerance {
             return Err(Error::InvalidArgument(format!(
                 "clip out_s {:.6} exceeds source duration {:.6}",
@@ -914,7 +997,7 @@ impl Runner {
             expected_width,
             expected_height,
             expected_duration,
-            frame_tolerance,
+            duration_tolerance_s(source_probe.fps),
         )?;
         fs::File::open(&rendered)?.sync_all()?;
         // The caller path is published exclusively. A racing writer wins without being replaced;
@@ -938,7 +1021,9 @@ impl Runner {
     /// own command shape, while reel items must pin an exact output frame count and a
     /// zero-based video timeline so the concat assembly lands cuts on frame boundaries.
     ///
-    /// Frame contract, computed by the caller from the source probe:
+    /// The caller supplies the source probe (`source_probe`), so a reel that cuts several
+    /// items from one source video performs one ffprobe per distinct source, not one per
+    /// item. The frame contract is computed from that probe:
     /// - input-side `-ss` lands on the first source frame at or after `in_s` (the caller
     ///   subtracts a microsecond-scale epsilon so an `in_s` exactly on a frame boundary is
     ///   never rounded past that frame by FFmpeg's microsecond seek parsing);
@@ -958,6 +1043,7 @@ impl Runner {
     pub(crate) fn render_reel_item_with_control<F>(
         &self,
         input: &Path,
+        source_probe: &Probe,
         spec: &ReelItemRenderSpec,
         staging_output: &Path,
         cancellation: &CancellationToken,
@@ -974,8 +1060,6 @@ impl Runner {
         }
         self.require_ffmpeg_component("-encoders", "h264_videotoolbox", "video encoder")?;
 
-        let source_operation = self.probe(input)?;
-        let source_probe = source_operation.value;
         if source_probe.width == 0 || source_probe.height == 0 {
             return Err(Error::InvalidProbe(
                 "reel item source has no video stream".to_owned(),
@@ -987,14 +1071,14 @@ impl Runner {
                     .to_owned(),
             ));
         }
-        let frame_tolerance = 1.0 / source_probe.fps;
+        let frame_tolerance = frame_tolerance_s(source_probe.fps);
         if spec.out_s > source_probe.duration_s + frame_tolerance {
             return Err(Error::InvalidArgument(format!(
                 "reel item out_s {:.6} exceeds source duration {:.6}",
                 spec.out_s, source_probe.duration_s
             )));
         }
-        let source_color_handling = validate_h264_sdr_source(&source_probe)?;
+        let source_color_handling = validate_h264_sdr_source(source_probe)?;
         if spec.audio == ClipAudio::Source && source_probe.has_audio {
             self.require_ffmpeg_component("-encoders", "aac", "audio encoder")?;
         }
@@ -1002,7 +1086,7 @@ impl Runner {
             self.require_ffmpeg_component("-filters", filter, "video filter")?;
         }
         let (filter_chain, expected_width, expected_height) =
-            clip_filter_chain(&source_probe, &spec.as_clip_request())?;
+            clip_filter_chain(source_probe, &spec.as_clip_request())?;
 
         let parent = staging_output
             .parent()
@@ -1154,18 +1238,29 @@ impl Runner {
 
     fn require_ffmpeg_component(
         &self,
-        listing_flag: &str,
+        listing_flag: &'static str,
         component: &str,
         capability_kind: &str,
     ) -> Result<()> {
-        let spec = CommandSpec::new(&self.resolved.path).args(["-hide_banner", listing_flag]);
-        let output =
-            self.run_capture(&spec, false)
-                .map_err(|error| Error::CapabilityUnavailable {
-                    capability: format!("{capability_kind} {component}"),
-                    reason: format!("could not query bundled FFmpeg: {error}"),
+        let cached = self.capability_listings.borrow().get(listing_flag).cloned();
+        let listing = match cached {
+            Some(listing) => listing,
+            None => {
+                let spec =
+                    CommandSpec::new(&self.resolved.path).args(["-hide_banner", listing_flag]);
+                let output = self.run_capture(&spec, false).map_err(|error| {
+                    Error::CapabilityUnavailable {
+                        capability: format!("{capability_kind} {component}"),
+                        reason: format!("could not query bundled FFmpeg: {error}"),
+                    }
                 })?;
-        if component_listing_contains(&output.stdout, component) {
+                self.capability_listings
+                    .borrow_mut()
+                    .insert(listing_flag, output.stdout.clone());
+                output.stdout
+            }
+        };
+        if component_listing_contains(&listing, component) {
             Ok(())
         } else {
             Err(Error::CapabilityUnavailable {
@@ -1300,12 +1395,14 @@ impl Runner {
                 }
             };
 
-        let frame_tolerance = if source_probe.fps > 0.0 {
-            1.0 / source_probe.fps
-        } else {
-            1.0 / 30.0
-        };
-        if self.copy_is_accurate(input, start_s, output, expected_duration, frame_tolerance) {
+        let duration_tolerance = duration_tolerance_s(source_probe.fps);
+        if self.copy_is_accurate(
+            input,
+            start_s,
+            output,
+            expected_duration,
+            duration_tolerance,
+        ) {
             return Ok(ExportResult {
                 command: copy_command.clone(),
                 attempted_commands: vec![copy_command],
@@ -1360,7 +1457,7 @@ impl Runner {
                 Err(error) => return Err(error),
             };
         let output_probe = self.probe(output)?.value;
-        if (output_probe.duration_s - expected_duration).abs() > frame_tolerance + 0.05 {
+        if (output_probe.duration_s - expected_duration).abs() > duration_tolerance {
             return Err(Error::InvalidProbe(format!(
                 "export duration {:.6}s differs from requested {:.6}s",
                 output_probe.duration_s, expected_duration
@@ -1379,12 +1476,12 @@ impl Runner {
         start_s: f64,
         output: &Path,
         expected_duration: f64,
-        tolerance: f64,
+        duration_tolerance: f64,
     ) -> bool {
         let Ok(probe) = self.probe(output) else {
             return false;
         };
-        if (probe.value.duration_s - expected_duration).abs() > tolerance + 0.05 {
+        if (probe.value.duration_s - expected_duration).abs() > duration_tolerance {
             return false;
         }
         match (self.frame_md5(input, start_s), self.frame_md5(output, 0.0)) {
@@ -1873,7 +1970,7 @@ fn verify_clip_render(
     expected_width: u32,
     expected_height: u32,
     expected_duration: f64,
-    frame_tolerance: f64,
+    duration_tolerance: f64,
 ) -> Result<()> {
     if output.video_codec.as_deref() != Some("h264") {
         return Err(Error::InvalidProbe(format!(
@@ -1893,7 +1990,7 @@ fn verify_clip_render(
             output.pixel_format, output.bit_depth
         )));
     }
-    if (output.duration_s - expected_duration).abs() > frame_tolerance + 0.05 {
+    if (output.duration_s - expected_duration).abs() > duration_tolerance {
         return Err(Error::InvalidProbe(format!(
             "clip output duration {:.6}s differs from requested {:.6}s",
             output.duration_s, expected_duration
@@ -2281,6 +2378,25 @@ mod tests {
         }
     }
 
+    /// Pins the one documented duration-tolerance rule shared by stage-split and the durable
+    /// executor: frame_tolerance = 1/fps (fallback 1/30), plus the shared container slack.
+    /// The 60 fps value is the AAC-priming case: the encoder check and the executor re-check
+    /// must agree exactly (before the shared rule the executor rejected beyond 0.05 s what
+    /// the encoder accepted up to ≈0.067 s).
+    #[test]
+    fn duration_tolerance_rule_is_the_single_shared_formula() {
+        assert!(
+            (duration_tolerance_s(60.0) - (1.0 / 60.0 + 0.05)).abs() < 1e-12,
+            "60 fps must allow the AAC-priming container slack"
+        );
+        assert!((duration_tolerance_s(30.0) - (1.0 / 30.0 + 0.05)).abs() < 1e-12);
+        assert!((duration_tolerance_s(15.0) - (1.0 / 15.0 + 0.05)).abs() < 1e-12);
+        assert!((duration_tolerance_s(0.0) - (1.0 / 30.0 + 0.05)).abs() < 1e-12);
+        assert!((duration_tolerance_s(-12.0) - duration_tolerance_s(0.0)).abs() < 1e-12);
+        assert!((frame_tolerance_s(24.0) - 1.0 / 24.0).abs() < 1e-12);
+        assert!((DURATION_TOLERANCE_SLACK_S - 0.05).abs() < 1e-12);
+    }
+
     #[test]
     fn resolver_prefers_bundle_then_dev_then_path() {
         let temporary = tempfile::tempdir().unwrap();
@@ -2550,6 +2666,81 @@ mod tests {
         assert!(component_listing_contains(listing, "aac"));
         assert!(component_listing_contains(listing, "exposure"));
         assert!(!component_listing_contains(listing, "libx264"));
+    }
+
+    /// TASK-035: `-encoders`/`-filters` listings are captured once per Runner lifetime. A
+    /// counting fake ffmpeg proves repeated capability checks reuse the cached listing, that a
+    /// missing component still fails closed (fresh and cached), and that a NEW Runner
+    /// re-queries — the cache must never outlive the binary it listed.
+    #[test]
+    fn capability_listings_are_cached_per_runner_and_fail_closed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let log = temporary.path().join("invocations.log");
+        let script = temporary.path().join("ffmpeg");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {}\nif [ \"$2\" = -encoders ]; then\n  printf ' V....D h264_videotoolbox VideoToolbox H.264\\n A....D aac AAC\\n'\nelif [ \"$2\" = -filters ]; then\n  printf ' TSC exposure V->V\\n'\nfi\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = script.metadata().unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).unwrap();
+        }
+        let resolved = Resolved {
+            path: script.clone(),
+            ffprobe_path: script.clone(),
+            source: Source::Path,
+        };
+        let runner = Runner::new(resolved.clone(), 1, "capability-cache");
+
+        for _ in 0..3 {
+            runner
+                .require_ffmpeg_component("-encoders", "h264_videotoolbox", "video encoder")
+                .unwrap();
+        }
+        for _ in 0..2 {
+            runner
+                .require_ffmpeg_component("-filters", "exposure", "video filter")
+                .unwrap();
+        }
+        let invocations = fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            invocations.matches("-encoders").count(),
+            1,
+            "one -encoders listing per Runner"
+        );
+        assert_eq!(
+            invocations.matches("-filters").count(),
+            1,
+            "one -filters listing per Runner"
+        );
+
+        // A missing component fails closed on the fresh listing and again from the cache.
+        for _ in 0..2 {
+            let error = runner
+                .require_ffmpeg_component("-filters", "libx264", "video filter")
+                .unwrap_err();
+            assert!(matches!(error, Error::CapabilityUnavailable { .. }));
+        }
+
+        // A new Runner re-queries: per-Runner cache, not process-wide.
+        let fresh = Runner::new(resolved, 1, "capability-fresh");
+        fresh
+            .require_ffmpeg_component("-encoders", "aac", "audio encoder")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .matches("-encoders")
+                .count(),
+            2,
+            "a fresh Runner must query the listing again"
+        );
     }
 
     #[test]

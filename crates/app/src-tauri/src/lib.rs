@@ -14,13 +14,15 @@ mod macos {
     use crush_core::models::{self, ModelStatus};
     use crush_core::paths::AppPaths;
     use crush_core::{Config, DEFAULT_OWNER_ID};
-    use crush_pipeline::{render::RenderRecoverySummary, IngestSummary, Pipeline};
+    use crush_pipeline::{
+        render::RenderRecoverySummary, source::PhotoOutputPreset, IngestSummary, Pipeline,
+    };
     use crush_search::{
         personal_style_score, retrain_style_profile, selects_candidates as rank_selects_candidates,
         AssetSearchResult, SearchEngine, SelectsCandidates,
     };
     use crush_stage_embed::embedder::{Embedder, ProviderPreference};
-    use crush_stage_split::ffmpeg;
+    use crush_stage_split::ffmpeg::{self, ClipOutputPreset};
     use crush_store::{
         reference_scope_from_str, reference_scope_to_str, reference_status_to_str, AssetFilter,
         Collection, CollectionItem, EditorialAnnotation, EmbeddingMeta, FeedbackEvent,
@@ -368,6 +370,60 @@ mod macos {
     #[tauri::command]
     fn doctor(state: State<'_, RuntimeState>) -> CommandResult<String> {
         command_result(doctor_report(&state.config, &state.paths))
+    }
+
+    /// One render-preset fact per preset, served from the preset enums so the UI never keeps
+    /// its own drifting copies. Frozen contract values (`id`, muxer, media type) are exposed
+    /// alongside the UI labels and save-dialog extensions.
+    #[derive(Debug, Clone, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RenderPresetView {
+        id: &'static str,
+        label: &'static str,
+        extension: &'static str,
+        extensions: &'static [&'static str],
+        media_type: &'static str,
+        /// FFmpeg muxer for video presets; photos are rendered by the image backend.
+        muxer: Option<&'static str>,
+    }
+
+    #[derive(Debug, Clone, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RenderPresetCatalog {
+        photo: Vec<RenderPresetView>,
+        clip: Vec<RenderPresetView>,
+    }
+
+    fn render_preset_catalog() -> RenderPresetCatalog {
+        let view = |preset: PhotoOutputPreset| RenderPresetView {
+            id: preset.as_str(),
+            label: preset.label(),
+            extension: preset.extension(),
+            extensions: preset.extensions(),
+            media_type: preset.media_type(),
+            muxer: None,
+        };
+        let clip_view = |preset: ClipOutputPreset| RenderPresetView {
+            id: preset.as_str(),
+            label: preset.label(),
+            extension: preset.extension(),
+            extensions: preset.extensions(),
+            media_type: preset.media_type(),
+            muxer: Some(preset.muxer()),
+        };
+        RenderPresetCatalog {
+            photo: PhotoOutputPreset::ALL.iter().copied().map(view).collect(),
+            clip: ClipOutputPreset::ALL
+                .iter()
+                .copied()
+                .map(clip_view)
+                .collect(),
+        }
+    }
+
+    #[tauri::command]
+    fn list_render_presets() -> RenderPresetCatalog {
+        render_preset_catalog()
     }
 
     fn doctor_report(config: &Config, paths: &AppPaths) -> anyhow::Result<String> {
@@ -2055,20 +2111,24 @@ mod macos {
         extensions: &'static [&'static str],
     }
 
-    fn clip_preset_spec(value: &str) -> anyhow::Result<ClipPresetSpec> {
-        match value {
-            "mp4-h264-sdr-v1" => Ok(ClipPresetSpec {
-                name: "MP4 — compatible H.264",
-                preset: "mp4-h264-sdr-v1",
-                extensions: &["mp4"],
-            }),
-            "mov-h264-sdr-v1" => Ok(ClipPresetSpec {
-                name: "MOV — editing-friendly H.264",
-                preset: "mov-h264-sdr-v1",
-                extensions: &["mov"],
-            }),
-            other => anyhow::bail!("unsupported video export preset {other:?}"),
+    /// The saved photo recipe identity is an app-level fact; every other preset fact
+    /// (name/label, extensions, preset id) comes from the enum.
+    fn photo_recipe_id(preset: PhotoOutputPreset) -> &'static str {
+        match preset {
+            PhotoOutputPreset::JpegSrgbV1 => "crush-photo-jpeg-srgb",
+            PhotoOutputPreset::PngSrgbV1 => "crush-photo-png-srgb",
+            PhotoOutputPreset::TiffSrgbV1 => "crush-photo-tiff-srgb",
         }
+    }
+
+    fn clip_preset_spec(value: &str) -> anyhow::Result<ClipPresetSpec> {
+        let preset = ClipOutputPreset::parse(value)
+            .with_context(|| format!("unsupported video export preset {value:?}"))?;
+        Ok(ClipPresetSpec {
+            name: preset.label(),
+            preset: preset.as_str(),
+            extensions: preset.extensions(),
+        })
     }
 
     fn clip_grade_from_plan(value: Option<&str>) -> anyhow::Result<serde_json::Value> {
@@ -2130,27 +2190,14 @@ mod macos {
     }
 
     fn photo_preset_spec(value: &str) -> anyhow::Result<PhotoPresetSpec> {
-        match value {
-            "jpeg-srgb-v1" => Ok(PhotoPresetSpec {
-                id: "crush-photo-jpeg-srgb",
-                name: "JPEG — smaller, easy to share",
-                preset: "jpeg-srgb-v1",
-                extensions: &["jpg", "jpeg"],
-            }),
-            "png-srgb-v1" => Ok(PhotoPresetSpec {
-                id: "crush-photo-png-srgb",
-                name: "PNG — lossless",
-                preset: "png-srgb-v1",
-                extensions: &["png"],
-            }),
-            "tiff-srgb-v1" => Ok(PhotoPresetSpec {
-                id: "crush-photo-tiff-srgb",
-                name: "TIFF — lossless 8-bit copy",
-                preset: "tiff-srgb-v1",
-                extensions: &["tif", "tiff"],
-            }),
-            other => anyhow::bail!("unsupported photo export preset {other:?}"),
-        }
+        let preset = PhotoOutputPreset::parse(value)
+            .with_context(|| format!("unsupported photo export preset {value:?}"))?;
+        Ok(PhotoPresetSpec {
+            id: photo_recipe_id(preset),
+            name: preset.label(),
+            preset: preset.as_str(),
+            extensions: preset.extensions(),
+        })
     }
 
     fn ensure_photo_render_recipe(store: &Store, spec: PhotoPresetSpec) -> anyhow::Result<()> {
@@ -3778,17 +3825,23 @@ mod macos {
                 let paths = AppPaths::resolve(config.data_dir.as_ref())?;
                 // Recovery touches user-chosen export volumes; a read-only or unmounted volume
                 // must not brick every subsequent launch, so failures are logged, not fatal.
-                match recover_interrupted_renders(&config, &paths) {
-                    Ok(render_recovery) => eprintln!(
-                        "startup render recovery: finalized={} failed={} staging_removed={}",
-                        render_recovery.finalized,
-                        render_recovery.failed,
-                        render_recovery.staging_removed
-                    ),
-                    Err(error) => eprintln!(
-                        "startup render recovery could not complete; interrupted renders stay recoverable: {error:#}"
-                    ),
-                }
+                // It also full-hashes published outputs, so it leaves this setup thread: launch
+                // proceeds while the blocking work runs, and the result is logged when done.
+                let recovery_config = config.clone();
+                let recovery_paths = paths.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    match recover_interrupted_renders(&recovery_config, &recovery_paths) {
+                        Ok(render_recovery) => eprintln!(
+                            "startup render recovery: finalized={} failed={} staging_removed={}",
+                            render_recovery.finalized,
+                            render_recovery.failed,
+                            render_recovery.staging_removed
+                        ),
+                        Err(error) => eprintln!(
+                            "startup render recovery could not complete; interrupted renders stay recoverable: {error:#}"
+                        ),
+                    }
+                });
                 let store = Store::open(&paths.root)?;
                 store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
                 let scope = app.asset_protocol_scope();
@@ -3887,6 +3940,7 @@ mod macos {
                 plan_restore_revision,
                 plan_duplicate,
                 selects_candidates,
+                list_render_presets,
                 render_project_photo,
                 render_photo,
                 render_project_clip,
@@ -3978,6 +4032,97 @@ mod macos {
             assert_eq!(recipes.len(), 3);
             assert!(recipes.iter().all(|recipe| recipe.version == 1));
             assert!(photo_preset_spec("webp").is_err());
+        }
+
+        /// TASK-035 item 5: the command serves every preset fact from the enums, so the UI
+        /// has no second table to drift. This pins the canonical values the reviewer approved
+        /// (labels, extensions, media types, ids) in one place.
+        #[test]
+        fn list_render_presets_matches_the_preset_enums() {
+            let catalog = render_preset_catalog();
+
+            assert_eq!(
+                catalog
+                    .photo
+                    .iter()
+                    .map(|preset| (
+                        preset.id,
+                        preset.label,
+                        preset.extension,
+                        preset.extensions,
+                        preset.media_type,
+                        preset.muxer,
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        "jpeg-srgb-v1",
+                        "JPEG — smaller, easy to share",
+                        "jpg",
+                        &["jpg", "jpeg"][..],
+                        "image/jpeg",
+                        None,
+                    ),
+                    (
+                        "png-srgb-v1",
+                        "PNG — lossless",
+                        "png",
+                        &["png"][..],
+                        "image/png",
+                        None,
+                    ),
+                    (
+                        "tiff-srgb-v1",
+                        "TIFF — lossless 8-bit copy",
+                        "tif",
+                        &["tif", "tiff"][..],
+                        "image/tiff",
+                        None,
+                    ),
+                ]
+            );
+            assert_eq!(
+                catalog
+                    .clip
+                    .iter()
+                    .map(|preset| (
+                        preset.id,
+                        preset.label,
+                        preset.extension,
+                        preset.extensions,
+                        preset.media_type,
+                        preset.muxer,
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        "mp4-h264-sdr-v1",
+                        "MP4 — compatible H.264",
+                        "mp4",
+                        &["mp4"][..],
+                        "video/mp4",
+                        Some("mp4"),
+                    ),
+                    (
+                        "mov-h264-sdr-v1",
+                        "MOV — editing-friendly H.264",
+                        "mov",
+                        &["mov"][..],
+                        "video/quicktime",
+                        Some("mov"),
+                    ),
+                ]
+            );
+
+            // Recipe identities stay app-level facts keyed by the enum presets.
+            for (preset_id, recipe_id) in [
+                ("jpeg-srgb-v1", "crush-photo-jpeg-srgb"),
+                ("png-srgb-v1", "crush-photo-png-srgb"),
+                ("tiff-srgb-v1", "crush-photo-tiff-srgb"),
+            ] {
+                assert_eq!(photo_preset_spec(preset_id).unwrap().id, recipe_id);
+            }
+            assert!(clip_preset_spec("libx264").is_err());
         }
 
         #[test]

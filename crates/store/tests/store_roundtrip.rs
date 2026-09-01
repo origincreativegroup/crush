@@ -5615,3 +5615,149 @@ fn relink_updates_the_row_path_only_after_verifying_the_recorded_hash() {
     assert_eq!(relinked_photo.path, "/new/place/photo-rl.jpg");
     assert_eq!(store.photos(DEFAULT_OWNER_ID).unwrap().len(), 1);
 }
+
+/// TASK-035 item 4: `render_job_set_progress` is one guarded UPDATE per table inside a single
+/// immediate transaction — status and monotonicity guards live in the WHERE clause, so the hot
+/// path performs no row read. The precise error messages are preserved on the rejection paths.
+#[test]
+fn render_progress_update_is_a_single_guarded_write() {
+    let directory = TestDir::new("render-progress-guard");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 9, 1, 9, 0, 0).unwrap();
+    let source_hash = "a".repeat(64);
+    let mut source_photo = reference_photo("photo-progress", &source_hash);
+    source_photo.path = directory
+        .path()
+        .join("original.jpg")
+        .to_string_lossy()
+        .into_owned();
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+    store
+        .render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: "photo-progress".to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::Photo,
+                name: "Progress JPEG".to_owned(),
+                schema_json: serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "photo",
+                    "crop": null,
+                    "rotation_degrees": 0,
+                    "grade": {"mode": "none"},
+                    "output": {"preset": "jpeg-srgb-v1"}
+                })
+                .to_string(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-progress-1".to_owned(),
+                recipe_id: "photo-progress".to_owned(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "progress-test",
+                    "selection_provenance": {"origin": "general"},
+                    "sources": [{
+                        "media_kind": "photo",
+                        "media_id": "photo-progress",
+                        "source_id": "photo-progress",
+                        "sha256": source_hash,
+                        "path": source_photo.path,
+                    }]
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used"
+                    }
+                })
+                .to_string(),
+                destination_path: directory
+                    .path()
+                    .join("exports/hero.jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+
+    // Queued: status guard refuses with the standing message.
+    let error = store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-progress-1", 0.5)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("render progress can only update a running or verifying job"));
+
+    store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-progress-1",
+            &directory
+                .path()
+                .join("exports/.crush-render/job-1.partial")
+                .to_string_lossy(),
+            now,
+        )
+        .unwrap();
+
+    // Monotonicity: 0.2 then 0.5 accepted, then 0.5 again allowed (equal), 0.3 refused.
+    store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-progress-1", 0.2)
+        .unwrap();
+    store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-progress-1", 0.5)
+        .unwrap();
+    store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-progress-1", 0.5)
+        .unwrap();
+    let error = store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-progress-1", 0.3)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("render progress cannot move backwards"));
+
+    // API guard unchanged: 1.0 stays reserved for verification.
+    let error = store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-progress-1", 1.0)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("render progress reaches 1.0 only after verification"));
+
+    // Missing job refused with the standing message.
+    let error = store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-nope", 0.5)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("render job render-nope was not found"));
+
+    // Both the job row and the current attempt row carry the last accepted value.
+    let job = store
+        .render_job_by_id(DEFAULT_OWNER_ID, "render-progress-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, RenderJobStatus::Running);
+    assert_eq!(job.progress, 0.5);
+    let attempt = store
+        .render_attempt(DEFAULT_OWNER_ID, "render-progress-1", job.current_attempt)
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt.progress, 0.5);
+}

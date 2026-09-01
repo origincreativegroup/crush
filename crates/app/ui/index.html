@@ -232,11 +232,8 @@
                     </div>
                     <div class="photo-export-fields">
                       <label>File type
-                        <select id="project-photo-preset">
-                          <option value="jpeg-srgb-v1">JPEG — smaller, easy to share</option>
-                          <option value="png-srgb-v1">PNG — lossless</option>
-                          <option value="tiff-srgb-v1">TIFF — lossless 8-bit copy</option>
-                        </select>
+                        <!-- Options are served by list_render_presets (single source of truth). -->
+                        <select id="project-photo-preset"></select>
                       </label>
                       <label>Save to
                         <span class="photo-export-destination">
@@ -289,10 +286,8 @@
                 <p class="plans-muted">Render the saved clip order into one verified video. Originals stay untouched. Photo selects can still be exported individually while photo-hold timing is finalized.</p>
                 <div class="photo-export-fields">
                   <label>File type
-                    <select id="project-reel-preset">
-                      <option value="mp4-h264-sdr-v1">MP4 — compatible H.264</option>
-                      <option value="mov-h264-sdr-v1">MOV — editing-friendly H.264</option>
-                    </select>
+                    <!-- Options are served by list_render_presets (single source of truth). -->
+                    <select id="project-reel-preset"></select>
                   </label>
                   <label>Save to
                     <span class="photo-export-destination">
@@ -610,11 +605,8 @@
           <button id="copy-timecodes" class="button secondary" type="button">Copy path + timecodes</button>
           <button id="export-clip" class="button secondary" type="button">Export clip…</button>
           <div id="photo-export" class="photo-detail-export" hidden>
-            <select id="photo-export-preset" aria-label="Photo file type">
-              <option value="jpeg-srgb-v1">JPEG — smaller, easy to share</option>
-              <option value="png-srgb-v1">PNG — lossless</option>
-              <option value="tiff-srgb-v1">TIFF — lossless 8-bit copy</option>
-            </select>
+            <!-- Options are served by list_render_presets (single source of truth). -->
+            <select id="photo-export-preset" aria-label="Photo file type"></select>
             <button id="export-photo" class="button secondary" type="button">Export photo…</button>
           </div>
           <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>

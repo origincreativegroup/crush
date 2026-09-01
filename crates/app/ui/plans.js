@@ -11,6 +11,7 @@
     photoExportKey: null, photoExportKind: null, photoExportBusy: false, photoExportResult: null,
     reelExportKey: null, reelExportBusy: false, reelExportResult: null,
     sequence: null, sequenceSuggestions: [],
+    presetCatalog: null,
   };
   const kind = (value) => value === "photo" ? "photo" : value === "span" ? "span" : "video";
   const itemKey = (item) => `${kind(item.mediaKind)}:${item.mediaId}`;
@@ -73,13 +74,9 @@
     manifestPath: $("project-reel-manifest-path"), showOutput: $("project-reel-show-output"),
     showManifest: $("project-reel-show-manifest"), verification: $("project-reel-verification"),
   };
-  const photoPresets = {
-    "jpeg-srgb-v1": { extension: "jpg", filter: { name: "JPEG image", extensions: ["jpg", "jpeg"] } },
-    "png-srgb-v1": { extension: "png", filter: { name: "PNG image", extensions: ["png"] } },
-    "tiff-srgb-v1": { extension: "tif", filter: { name: "TIFF image", extensions: ["tif", "tiff"] } },
-    "mp4-h264-sdr-v1": { extension: "mp4", filter: { name: "MP4 video", extensions: ["mp4"] } },
-    "mov-h264-sdr-v1": { extension: "mov", filter: { name: "MOV video", extensions: ["mov"] } },
-  };
+  // Preset facts (extension, save-dialog filter) are served by `list_render_presets` from
+  // the preset enums — the UI keeps no second table that can drift.
+  const presetFacts = {};
   async function run(action) {
     if (state.busy) return;
     state.busy = true;
@@ -323,11 +320,13 @@
     const exportKind = item.mediaKind === "photo" ? "photo" : "clip";
     if (state.photoExportKind !== exportKind) {
       state.photoExportKind = exportKind;
-      const options = exportKind === "photo"
-        ? [["jpeg-srgb-v1", "JPEG — smaller, easy to share"], ["png-srgb-v1", "PNG — lossless"], ["tiff-srgb-v1", "TIFF — high-quality archive"]]
-        : [["mp4-h264-sdr-v1", "MP4 — compatible H.264"], ["mov-h264-sdr-v1", "MOV — editing-friendly H.264"]];
-      photoExport.preset.replaceChildren(...options.map(([value, label]) => {
-        const option = node("option", label); option.value = value; return option;
+      const options = state.presetCatalog
+        ? (exportKind === "photo" ? state.presetCatalog.photo : state.presetCatalog.clip)
+        : [];
+      photoExport.preset.replaceChildren(...options.map((preset) => {
+        const option = node("option", preset.label);
+        option.value = preset.id;
+        return option;
       }));
       photoExport.audio.value = "source";
     }
@@ -755,9 +754,10 @@
     const item = previewItem();
     if (!item || !["photo", "shot", "span"].includes(item.mediaKind)) return;
     const isPhoto = item.mediaKind === "photo";
-    const preset = photoPresets[photoExport.preset.value];
+    const preset = presetFacts[photoExport.preset.value];
     const candidate = parse(item.signalsJson).candidate || {};
     const sourceName = filename(candidate.path || item.mediaId).replace(/\.[^.]+$/, "") || "photo";
+    if (!preset) return;
     try {
       const destination = await bridge.dialog.save({
         title: `Export selected ${isPhoto ? "photo" : "clip"}`,
@@ -826,7 +826,8 @@
   });
   reelExport.choose.addEventListener("click", async () => {
     if (state.reelExportBusy || !state.plan || !state.items.length || state.items.some((item) => item.mediaKind !== "shot")) return;
-    const preset = photoPresets[reelExport.preset.value];
+    const preset = presetFacts[reelExport.preset.value];
+    if (!preset) return;
     const projectName = String(state.plan.name || "project").trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-|-$/g, "") || "project";
     try {
       const destination = await bridge.dialog.save({
@@ -900,6 +901,32 @@
       }
     });
   }
+  // One fetch at panel load: preset options and save-dialog facts come from the backend
+  // enums. Selects start empty and populate when the catalog arrives; a failure leaves
+  // export disabled rather than falling back to stale local copies.
+  invoke("list_render_presets").then((catalog) => {
+    state.presetCatalog = catalog;
+    const family = (mediaType) => (mediaType.startsWith("image/") ? "image" : "video");
+    for (const preset of [...catalog.photo, ...catalog.clip]) {
+      presetFacts[preset.id] = {
+        extension: preset.extension,
+        filter: {
+          name: `${preset.label.split(" — ")[0]} ${family(preset.mediaType)}`,
+          extensions: preset.extensions,
+        },
+      };
+    }
+    reelExport.preset.replaceChildren(...catalog.clip.map((preset) => {
+      const option = node("option", preset.label);
+      option.value = preset.id;
+      return option;
+    }));
+    // Rebuild the export panel's options now that the catalog is available.
+    state.photoExportKind = null;
+    if (state.plan) renderPhotoExport(previewItem());
+  }).catch((error) => {
+    message(`Render presets could not be loaded: ${String(error)}`, true);
+  });
   document.addEventListener("crush:plans-shown", () => run(async () => {
     // Navigation must not wipe local drafts. A full refresh is explicit through plan reopen.
     await refreshList();

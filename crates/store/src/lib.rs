@@ -3271,32 +3271,49 @@ impl Store {
             progress < 1.0,
             "render progress reaches 1.0 only after verification"
         );
-        let job = self
-            .render_job_by_id(owner_id, job_id)?
-            .with_context(|| format!("render job {job_id} was not found"))?;
-        ensure!(
-            matches!(
-                job.status,
-                RenderJobStatus::Running | RenderJobStatus::Verifying
-            ),
-            "render progress can only update a running or verifying job"
-        );
-        ensure!(
-            progress >= job.progress,
-            "render progress cannot move backwards"
-        );
+        // One guarded UPDATE per table inside a single immediate transaction: the status and
+        // monotonicity guards live in the WHERE clause, so the hot path performs no row read.
+        // A rejected update re-derives the precise error from a minimal status/progress read.
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "UPDATE render_attempts SET progress = ?4
-             WHERE owner_id = ?1 AND job_id = ?2 AND attempt = ?3",
-            params![owner_id, job_id, job.current_attempt, progress],
-        )?;
-        transaction.execute(
-            "UPDATE render_jobs SET progress = ?3 WHERE owner_id = ?1 AND id = ?2",
+        let changed = transaction.execute(
+            "UPDATE render_jobs SET progress = ?3
+             WHERE owner_id = ?1 AND id = ?2
+               AND status IN ('running', 'verifying')
+               AND progress <= ?3",
             params![owner_id, job_id, progress],
         )?;
+        if changed == 0 {
+            let existing = transaction
+                .query_row(
+                    "SELECT status, progress FROM render_jobs WHERE owner_id = ?1 AND id = ?2",
+                    params![owner_id, job_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
+                )
+                .optional()
+                .context("failed to read render job")?;
+            let Some((status, current)) = existing else {
+                bail!("render job {job_id} was not found");
+            };
+            ensure!(
+                matches!(status.as_str(), "running" | "verifying"),
+                "render progress can only update a running or verifying job"
+            );
+            ensure!(progress >= current, "render progress cannot move backwards");
+            bail!("render job {job_id} progress update changed no rows");
+        }
+        let changed_attempts = transaction.execute(
+            "UPDATE render_attempts SET progress = ?3
+             WHERE owner_id = ?1 AND job_id = ?2
+               AND attempt = (SELECT current_attempt FROM render_jobs
+                              WHERE owner_id = ?1 AND id = ?2)",
+            params![owner_id, job_id, progress],
+        )?;
+        ensure!(
+            changed_attempts == 1,
+            "render job {job_id} has no current attempt to record progress on"
+        );
         transaction.commit()?;
         Ok(())
     }

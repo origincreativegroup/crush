@@ -852,6 +852,19 @@
         plans.set(plan.id, plan); return clone(planView(plan));
       }
       case "plan_delete": return plans.delete(args.id);
+      case "list_render_presets":
+        // Mirrors the Rust enum facts (RenderPresetCatalog, camelCase) exactly.
+        return clone({
+          photo: [
+            { id: "jpeg-srgb-v1", label: "JPEG — smaller, easy to share", extension: "jpg", extensions: ["jpg", "jpeg"], mediaType: "image/jpeg", muxer: null },
+            { id: "png-srgb-v1", label: "PNG — lossless", extension: "png", extensions: ["png"], mediaType: "image/png", muxer: null },
+            { id: "tiff-srgb-v1", label: "TIFF — lossless 8-bit copy", extension: "tif", extensions: ["tif", "tiff"], mediaType: "image/tiff", muxer: null },
+          ],
+          clip: [
+            { id: "mp4-h264-sdr-v1", label: "MP4 — compatible H.264", extension: "mp4", extensions: ["mp4"], mediaType: "video/mp4", muxer: "mp4" },
+            { id: "mov-h264-sdr-v1", label: "MOV — editing-friendly H.264", extension: "mov", extensions: ["mov"], mediaType: "video/quicktime", muxer: "mov" },
+          ],
+        });
       case "render_photo": {
         return {
           jobId: "render-job-detail-photo",
@@ -1275,6 +1288,7 @@
         return "/Volumes/Video Production/clips.db";
       },
       async save(options) {
+        calls.push({ command: "dialog.save", args: options });
         return `/tmp/${options.defaultPath}`;
       },
     },

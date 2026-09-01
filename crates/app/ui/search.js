@@ -819,11 +819,28 @@
     }
   }
 
-  const photoPresetFor = (value) => ({
-    "jpeg-srgb-v1": { extension: "jpg", filter: { name: "JPEG image", extensions: ["jpg", "jpeg"] } },
-    "png-srgb-v1": { extension: "png", filter: { name: "PNG image", extensions: ["png"] } },
-    "tiff-srgb-v1": { extension: "tif", filter: { name: "TIFF image", extensions: ["tif", "tiff"] } },
-  }[value]);
+  // Preset facts come from the backend enums (`list_render_presets`); the drawer keeps no
+  // local table that can drift. The select starts empty and populates when the catalog lands.
+  const photoPresetFacts = {};
+  invoke("list_render_presets").then((catalog) => {
+    el.photoExportPreset.replaceChildren(...catalog.photo.map((preset) => {
+      const option = document.createElement("option");
+      option.value = preset.id;
+      option.textContent = preset.label;
+      return option;
+    }));
+    for (const preset of catalog.photo) {
+      photoPresetFacts[preset.id] = {
+        extension: preset.extension,
+        filter: {
+          name: `${preset.label.split(" — ")[0]} image`,
+          extensions: preset.extensions,
+        },
+      };
+    }
+  }).catch(() => {});
+
+  const photoPresetFor = (value) => photoPresetFacts[value];
 
   async function revealFile() {
     const d = state.detail;
