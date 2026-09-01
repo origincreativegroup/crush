@@ -29,10 +29,16 @@
     if (className) element.className = className;
     return element;
   };
+  let messageTimer = null;
   function message(text, error = false) {
-    $("plans-message").textContent = text;
-    $("plans-message").hidden = false;
-    $("plans-message").classList.toggle("error", error);
+    const element = $("plans-message");
+    clearTimeout(messageTimer);
+    element.textContent = text;
+    element.hidden = false;
+    element.classList.toggle("error", error);
+    // Message parity (Task 039 B9): every other view auto-hides confirmations after
+    // 5 s; errors stay on screen until the next message replaces them.
+    if (!error) messageTimer = setTimeout(() => { element.hidden = true; }, 5000);
   }
   function dirty(key, value = true) {
     if (value) state.dirty.add(key); else state.dirty.delete(key);
@@ -78,7 +84,14 @@
     if (state.busy) return;
     state.busy = true;
     $("plans-controls").disabled = true;
-    try { await action(); } catch (error) { message(String(error), true); }
+    try { await action(); } catch (error) {
+      // Task 039 B8 — mapped editor-language headline; raw backend text stays one
+      // "Copy details" click away when the mapping translated it.
+      const raw = String(error);
+      const mapped = window.crushErrorText ? window.crushErrorText(error) : raw;
+      message(mapped, true);
+      if (mapped !== raw) $("plans-message").append(window.crushCopyDetailsButton(raw));
+    }
     finally { state.busy = false; $("plans-controls").disabled = false; }
   }
   function confirmAction(copy) {

@@ -58,6 +58,15 @@
     }, 5000);
   }
 
+  // Task 039 B8 — backend failures speak editor language (shared mapping in app.js);
+  // the raw text stays reachable through a "Copy details" button when mapped.
+  function showError(error) {
+    const raw = String(error);
+    const mapped = window.crushErrorText ? window.crushErrorText(error) : raw;
+    showMessage(mapped, true);
+    if (mapped !== raw) el.message.append(window.crushCopyDetailsButton(raw));
+  }
+
   // ---------- status ----------
   // Wording per the recorded verdict (docs/style-proof-review.md, 2026-08-31): the
   // "Learned profile" label appears ONLY for profiles whose training gate actually passed

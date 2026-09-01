@@ -1,7 +1,7 @@
 /* Search + Shot detail (Task 12c) */
 
 .search-toolbar {
-  gap: 18px;
+  gap: var(--space-9);
 }
 
 .search-box {
@@ -15,8 +15,8 @@
 .search-icon {
   position: absolute;
   left: 12px;
-  color: #777781;
-  font-size: 17px;
+  color: var(--muted);
+  font-size: var(--font-size-xl);
   pointer-events: none;
 }
 
@@ -24,10 +24,10 @@
   width: 100%;
   height: 38px;
   padding: 0 52px 0 36px;
-  border: 1px solid #34343b;
-  border-radius: 9px;
-  color: #ececf0;
-  background: #141416;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  background: var(--bg);
   outline: none;
   -webkit-appearance: none;
   appearance: none;
@@ -38,190 +38,176 @@
 }
 
 #search-input::placeholder {
-  color: #6f6f78;
+  color: var(--muted);
 }
 
 #search-input:focus {
-  border-color: #4f8cff;
-  box-shadow: 0 0 0 3px rgb(79 140 255 / 18%);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 18%);
 }
 
 .search-kbd {
   position: absolute;
   right: 10px;
-  padding: 2px 6px;
-  border: 1px solid #34343b;
-  border-radius: 5px;
-  color: #6f6f78;
-  font: 10px "SFMono-Regular", Consolas, monospace;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font: var(--font-size-xs) var(--font-mono);
 }
 
 .search-meta {
   display: flex;
   align-items: center;
-  gap: 12px;
-  color: #8a8a93;
-  font-size: 11px;
+  gap: var(--space-6);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
-.top-select select {
-  height: 30px;
-  padding: 0 8px;
-  border: 1px solid #3a3a42;
-  border-radius: 7px;
-  color: #d5d5da;
-  background: #26262b;
-}
+/* Skin for .top-select select comes from the shared raised-select rule in styles.css. */
 
 .search-content {
-  height: calc(100vh - 86px);
+  height: calc(100vh - var(--toolbar-height));
   overflow: auto;
-  padding: 20px 26px 40px;
+  padding: var(--space-10) var(--gutter) var(--space-20);
 }
 
 .dam-browser-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 16px;
+  gap: var(--space-9);
+  margin-bottom: var(--space-8);
 }
 
 .dam-browser-head h2 {
-  font-size: 18px;
+  font-size: var(--font-size-xl);
 }
 
 .dam-kind-switch {
   display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid #303037;
-  border-radius: 8px;
-  background: #1b1b1f;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-md);
+  background: var(--fill);
 }
 
 .dam-kind {
   min-height: 27px;
-  padding: 0 11px;
+  padding: 0 var(--space-6);
   border: 0;
-  border-radius: 6px;
-  color: #8f8f98;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
   background: transparent;
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   cursor: pointer;
 }
 
 .dam-kind:hover {
-  color: #d7d7dc;
+  color: var(--text);
 }
 
 .dam-kind.active {
-  color: #fff;
-  background: #34343b;
+  color: var(--white);
+  background: var(--control-active);
   box-shadow: inset 0 1px rgb(255 255 255 / 7%);
 }
 
 .empty-state.muted {
-  color: #6f6f78;
+  color: var(--muted);
 }
 
 .empty-state.muted h2 {
-  color: #b9b9c0;
+  color: var(--text-body);
 }
 
 .search-error {
-  margin: 0 0 16px;
+  margin: 0 0 var(--space-8);
 }
 
 .search-message {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
 }
 
 .shortcut-help {
-  margin: 0 0 10px;
-  color: #8a8a93;
-  font-size: 11px;
+  margin: 0 0 var(--space-5);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
 }
 
 .shortcut-help summary {
   cursor: pointer;
-  color: #aaaab4;
+  color: var(--text-dim);
 }
 
 .shortcut-help dl {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 18px;
-  margin: 8px 0 0;
+  gap: var(--space-2) var(--space-9);
+  margin: var(--space-4) 0 0;
 }
 
 .shortcut-help dl > div {
   display: flex;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .shortcut-help dt {
-  color: #c0c0cc;
-  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  color: var(--text-body);
+  font-family: var(--font-mono);
   min-width: 96px;
 }
 
 .shortcut-help dd {
   margin: 0;
-  color: #8a8a93;
-}
-
-.button.small {
-  min-height: 26px;
-  padding: 0 10px;
-  font-size: 11px;
+  color: var(--muted);
 }
 
 .results-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 16px 14px;
+  gap: var(--space-8) var(--space-7);
 }
 
 .result-card {
   min-width: 0;
-  padding: 6px;
+  padding: var(--space-3);
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
-  outline: none;
 }
 
 .result-card:hover {
-  background: #1c1c20;
+  background: var(--fill);
 }
 
 .result-card.selected {
-  border-color: #4f8cff;
-  background: #1c1c20;
+  border-color: var(--accent);
+  background: var(--fill);
 }
 
 .result-card.browse-card {
-  border-color: #242429;
-  background: #18181b;
+  border-color: var(--border);
+  background: var(--surface);
 }
 
 .result-card.browse-card:hover,
 .result-card.browse-card.selected {
-  border-color: #41414a;
-  background: #1e1e23;
+  border-color: var(--border-bright);
+  background: var(--fill);
 }
 
 .thumb-box {
   position: relative;
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border-radius: 7px;
-  background: #26262b;
+  border-radius: var(--radius-md);
+  background: var(--control);
 }
 
 .thumb-box img {
@@ -236,25 +222,21 @@
   inset: 0;
   display: grid;
   place-items: center;
-  color: #fff;
+  color: var(--white);
   background: rgb(0 0 0 / 28%);
-  font-size: 26px;
+  font-size: 26px; /* play glyph */
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) ease;
 }
 
 .result-card:hover .play-overlay {
   opacity: 1;
 }
 
+/* Badge chrome (padding/radius/fill/type) is the shared overlay-badge rule in
+   styles.css; only the bottom anchor lives here. */
 .badge {
-  position: absolute;
   bottom: 6px;
-  padding: 2px 6px;
-  border-radius: 5px;
-  color: #ececf0;
-  background: rgb(0 0 0 / 66%);
-  font-size: 10px;
 }
 
 .badge-duration {
@@ -263,53 +245,53 @@
 
 .badge-score {
   right: 6px;
-  color: #bdd1ff;
+  color: var(--accent-bright);
 }
 
 .badge-standout {
   right: 6px;
-  color: #f0d78d;
+  color: var(--gold);
 }
 
 .result-name {
-  margin-top: 8px;
+  margin-top: var(--space-4);
 }
 
 .result-snippet {
   overflow: hidden;
-  margin-top: 3px;
-  color: #8a8a93;
-  font-size: 11px;
+  margin-top: var(--space-2);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .result-style {
-  margin-top: 3px;
-  color: #9fb4d8;
-  font-size: 11px;
+  margin-top: var(--space-2);
+  color: var(--accent-muted);
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
 .result-breakdown {
-  margin-top: 4px;
-  color: #8a8a93;
-  font-size: 11px;
+  margin-top: var(--space-2);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
 }
 
 .result-breakdown summary {
   cursor: pointer;
-  color: #6f6f78;
+  color: var(--muted);
   user-select: none;
 }
 
 .result-breakdown summary:hover {
-  color: #b9b9c0;
+  color: var(--text-body);
 }
 
 .result-breakdown ul {
-  margin: 4px 0 0;
-  padding-left: 14px;
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-7);
 }
 
 /* ---- detail slide-over ---- */
@@ -323,18 +305,18 @@
   width: 520px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px 22px;
+  gap: var(--space-7);
+  padding: var(--space-10) var(--space-11);
   overflow: auto;
-  border-left: 1px solid #2a2a30;
-  background: #1d1d21;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
   box-shadow: -24px 0 60px rgb(0 0 0 / 40%);
 }
 
 /* Keep Review/Search usable while inspecting an asset. The detail surface is a real third
    column on desktop rather than an overlay that hides the candidate grid underneath it. */
 .app-shell.detail-open {
-  grid-template-columns: 220px minmax(360px, 1fr) minmax(400px, 520px);
+  grid-template-columns: var(--sidebar-width) minmax(360px, 1fr) minmax(400px, 520px);
 }
 
 .app-shell.detail-open .workspace:not([hidden]) {
@@ -358,12 +340,12 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
 }
 
 .detail-file {
   max-width: 420px;
-  font-size: 13px;
+  font-size: var(--font-size-base);
 }
 
 .player-box {
@@ -371,8 +353,8 @@
   flex: 0 0 auto;
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border-radius: 9px;
-  background: #000;
+  border-radius: var(--radius-md);
+  background: var(--media-bg);
 }
 
 .player-box video,
@@ -387,13 +369,13 @@
   position: absolute;
   right: 8px;
   bottom: 8px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  color: #a8a8b0;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
   background: rgb(0 0 0 / 55%);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) ease;
 }
 
 .player-box:hover .player-hint {
@@ -404,70 +386,63 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
-  color: #dedee2;
-  font-size: 13px;
+  gap: var(--space-6);
+  color: var(--text);
+  font-size: var(--font-size-base);
 }
 
 .detail-playback {
   display: grid;
   grid-template-columns: auto auto minmax(120px, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .detail-playback input[type="range"] {
   width: 100%;
-  accent-color: #4f8cff;
+  accent-color: var(--accent);
 }
 
 #detail-position {
-  color: #a8a8b0;
-  font-size: 11px;
+  color: var(--text-dim);
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
 .detail-shot-index {
-  color: #8a8a93;
-  font-size: 11px;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
 }
 
 .detail-actions,
 .detail-nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
   align-items: center;
 }
 
 .photo-detail-export {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .photo-detail-export select {
   min-height: 32px;
-  border: 1px solid #3a3a43;
-  border-radius: 6px;
-  color: #e8e8ea;
-  background: #24242a;
 }
 
 .detail-export-status {
-  margin: 8px 2px 0;
-  color: #c9d8ce;
-  font-size: 12px;
+  margin: var(--space-4) var(--space-1) 0;
+  color: var(--verify-text);
+  font-size: var(--font-size-md);
 }
 
+/* Skin comes from the shared drawer sub-panel rule in styles.css; layout only here. */
 .detail-feedback {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #303039;
-  border-radius: 8px;
-  background: #19191d;
+  gap: var(--space-4);
 }
 
 .detail-feedback .eyebrow {
@@ -476,23 +451,19 @@
 
 .rating-control select {
   min-height: 32px;
-  border: 1px solid #3a3a43;
-  border-radius: 6px;
-  color: #e8e8ea;
-  background: #24242a;
 }
 
 .standout-control {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: #e8e8ea;
+  gap: var(--space-3);
+  font-size: var(--font-size-md);
+  color: var(--text);
   cursor: pointer;
 }
 
 .standout-control input {
-  accent-color: #4f8cff;
+  accent-color: var(--accent);
 }
 
 .detail-nav {
@@ -500,31 +471,31 @@
 }
 
 .detail-transcript {
-  padding-top: 6px;
-  border-top: 1px solid #2a2a30;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
 }
 
 .transcript-row {
   display: grid;
   grid-template-columns: 84px 1fr;
-  gap: 10px;
-  padding: 6px 0;
-  color: #c9c9cf;
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
+  color: var(--text-body);
   line-height: 1.5;
 }
 
 .transcript-time {
-  color: #6f6f78;
-  font-size: 11px;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
 }
 
 .transcript-text mark {
-  padding: 0 2px;
-  border-radius: 3px;
-  color: #fff;
-  background: rgb(79 140 255 / 38%);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  color: var(--white);
+  background: rgb(var(--accent-rgb) / 38%);
 }
 
 .transcript-empty {
-  color: #6f6f78;
+  color: var(--muted);
 }

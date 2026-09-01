@@ -610,16 +610,260 @@ const tests = {
     );
   },
 
+  async "library-multiselect"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 4);
+    const bar = frame.locator("#library-batch-bar");
+    const count = frame.locator("#library-batch-count");
+
+    // Plain click selects one row; the batch bar's count line always reads "N selected".
+    await rows.nth(0).click();
+    await poll(async () => bar.isVisible());
+    assert.equal(await visibleText(count), "1 selected");
+
+    // ⌘/Ctrl-click toggles rows without losing the rest of the selection.
+    await rows.nth(3).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await visibleText(count), "2 selected");
+
+    // Esc clears the selection and the bar goes away.
+    await rows.nth(0).press("Escape");
+    await poll(async () => bar.isHidden());
+    assert.equal(await rows.nth(0).getAttribute("aria-selected"), "false");
+
+    // Shift-click range-selects from the last-clicked anchor.
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["Shift"] });
+    assert.equal(await visibleText(count), "2 selected");
+
+    // A video in the selection disables the photo-scoped editorial controls and the
+    // bar says why instead of silently skipping rows.
+    await rows.nth(2).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await visibleText(count), "3 selected");
+    assert.equal(await frame.locator("#library-batch-hint").isVisible(), true);
+    assert.equal(await frame.locator("#library-batch-pick").isDisabled(), true);
+    await rows.nth(2).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await frame.locator("#library-batch-hint").isHidden(), true);
+
+    // The header checkbox selects everything listed.
+    await frame.locator("#library-select-all").check();
+    assert.equal(await visibleText(count), "4 selected");
+    await frame.locator("#library-select-all").uncheck();
+    await poll(async () => bar.isHidden());
+    // ⌘A does the same from the keyboard — asserted from one row selected, so the
+    // shortcut has to do the selecting itself (review LOW).
+    await rows.nth(0).click();
+    assert.equal(await visibleText(count), "1 selected");
+    await rows.nth(0).press("ControlOrMeta+a");
+    assert.equal(await visibleText(count), "4 selected");
+    await frame.locator("#library-select-all").uncheck();
+    await poll(async () => bar.isHidden());
+
+    // Two photos, batch-added to a brand-new collection through the inline create form.
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await visibleText(count), "2 selected");
+    const batchSelect = frame.locator("#library-batch-collection");
+    await poll(async () => {
+      const options = await batchSelect.locator("option").allTextContents();
+      return options.includes("New collection…");
+    });
+    await batchSelect.selectOption({ label: "New collection…" });
+    const nameInput = frame.locator("#library-batch-collection-name");
+    await nameInput.waitFor({ state: "visible" });
+    await nameInput.fill("Library picks");
+    await frame.locator("#library-batch-collection-create").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) => call.command === "collection_create" && call.args.name === "Library picks",
+      );
+    });
+    // The created collection becomes the batch target; Add sends one op per selected photo.
+    await poll(async () => (await batchSelect.inputValue()) !== "");
+    await frame.locator("#library-batch-add-collection").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "review_batch"
+          && call.args.ops?.length === 2
+          && call.args.ops.every(
+            (op) => op.op === "add_to_collection"
+              && op.assetType === "photo"
+              && Boolean(op.collectionId),
+          ),
+      );
+    });
+    await poll(async () =>
+      /Added 2 assets to the collection\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    await poll(async () => bar.isHidden());
+
+    // Batch re-index arms once through the two-step button, then queues one
+    // reindex_asset per selected asset (the backend runs one ingest at a time).
+    // The background snapshot carries a STALE cancelled ingest task from earlier
+    // in the session (mock-bridge pre-seeds it): cancel detection must match this
+    // batch's own job id, so the fresh batch still completes (review HIGH-1).
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    const reindex = frame.locator("#reindex");
+    await reindex.click();
+    assert.equal(await visibleText(reindex), "Really re-index 2?");
+    await reindex.click();
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "reindex_asset").length === 2);
+    await poll(async () =>
+      /Re-indexed 2 assets\./.test(await visibleText(frame.locator("#library-message"))));
+
+    // Batch remove reuses the single-remove dialog with the count in the copy.
+    // Cancel first (the dialog is dismissable), then run the confirm path for real:
+    // one remove_asset per selected asset, in table order, then the success message
+    // and both rows gone (review LOW).
+    await rows.nth(2).click();
+    await rows.nth(3).click({ modifiers: ["ControlOrMeta"] });
+    await frame.locator("#remove-asset").click();
+    await frame.locator("#remove-asset-dialog").waitFor({ state: "visible" });
+    assert.match(
+      await visibleText(frame.locator("#remove-asset-copy")),
+      /Remove 2 assets from the library\? Originals on disk are never touched\./,
+    );
+    await frame.locator("#remove-asset-cancel").click();
+    assert.equal(await rows.count(), 4);
+    await frame.locator("#remove-asset").click();
+    await frame.locator("#remove-asset-dialog").waitFor({ state: "visible" });
+    await frame.locator("#remove-asset-confirm").click();
+    await poll(async () => {
+      const removes = (await mockCalls(page))
+        .filter((call) => call.command === "remove_asset")
+        .map((call) => call.args.id);
+      return removes.length === 2
+        && removes[0] === "video-one"
+        && removes[1] === "photo-three";
+    });
+    await poll(async () => (await rows.count()) === 2);
+    await poll(async () =>
+      /Removed 2 assets from your library\. The original files were not changed\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+  },
+
+  async "library-remove-partial"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 2);
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    await frame.locator("#remove-asset").click();
+    await frame.locator("#remove-asset-dialog").waitFor({ state: "visible" });
+    await frame.locator("#remove-asset-confirm").click();
+    // The second remove fails with a mappable backend error: the partial-failure
+    // message carries the B8-mapped headline (review LOW), not the raw string.
+    await poll(async () =>
+      /Removed 1 of 2 — 1 could not be removed: Disk full — free up space on the drive, then try again\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    assert.doesNotMatch(
+      await visibleText(frame.locator("#library-message")),
+      /no space left on the device/,
+    );
+    // The raw backend text stays reachable through Copy details…
+    const copyButton = frame.locator("#library-message .button.secondary.small");
+    await copyButton.waitFor({ state: "visible" });
+    await copyButton.click();
+    const copyCalls = (await mockCalls(page)).filter(
+      (call) => call.command === "clipboard.writeText",
+    );
+    assert.equal(copyCalls.length, 1);
+    assert.match(copyCalls[0].args.text, /no space left on the device/);
+    // …and a failed clipboard write says so in the message row instead of
+    // failing silently (review LOW).
+    await poll(async () =>
+      /Could not copy — select the text manually/.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    // The removed asset left the selection; the failed one stays selected.
+    await poll(async () => (await rows.count()) === 1);
+    assert.equal(await visibleText(frame.locator("#library-batch-count")), "1 selected");
+  },
+
+  async "reindex-cancel"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 2);
+    const reindex = frame.locator("#reindex");
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    await reindex.click();
+    assert.equal(await visibleText(reindex), "Really re-index 2?");
+    await reindex.click();
+    // The first asset's job really runs: the mock surfaces it as a running
+    // background ingest, so Cancel appears and the queue waits on it.
+    await frame.locator("#cancel").waitFor({ state: "visible" });
+    await poll(async () =>
+      (await mockCalls(page)).some(
+        (call) => call.command === "reindex_asset" && call.args.id === "photo-one",
+      ));
+    // Cancelling the in-flight job stops the queue (review HIGH-1): the stop is
+    // detected by matching THIS batch's job id, and the in-flight asset counts in
+    // the not-re-indexed tally alongside the never-started one.
+    await frame.locator("#cancel").click();
+    await poll(async () =>
+      /Re-index stopped — 2 assets not re-indexed\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    const reindexCalls = (await mockCalls(page))
+      .filter((call) => call.command === "reindex_asset");
+    assert.equal(reindexCalls.length, 1);
+    assert.equal(reindexCalls[0].args.id, "photo-one");
+    // The queue is really stopped: the second asset is never started.
+    await poll(async () => (await frame.locator("#cancel").isHidden()));
+    assert.equal(await reindex.isEnabled(), true);
+  },
+
+  async "reindex-stale-asset"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    const reindex = frame.locator("#reindex");
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    await reindex.click();
+    assert.equal(await visibleText(reindex), "Really re-index 2?");
+    await reindex.click();
+    // The second asset answers "asset … was not found" (removed mid-batch): the
+    // queue must skip it, still start every queued asset, and finish with the
+    // skip counted in the summary together with the mapped error (review LOW).
+    await poll(async () => {
+      const ids = (await mockCalls(page))
+        .filter((call) => call.command === "reindex_asset")
+        .map((call) => call.args.id);
+      return ids.length === 2 && ids[0] === "photo-one" && ids[1] === "photo-two";
+    });
+    await poll(async () =>
+      /Re-indexed 1 of 2 assets · 1 skipped — asset photo-two was not found\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+  },
+
   async "search-error"(page) {
     const frame = page.frameLocator("#app-frame");
     const input = frame.locator("#search-input");
     await input.waitFor({ state: "visible" });
     await input.fill("boom");
     await input.press("Enter");
-    assert.equal(
-      await visibleText(frame.locator("#search-error")),
-      "The vector store is unavailable.",
-    );
+    // Task 039 B8: internal vocabulary is mapped to editor language; the raw backend
+    // text stays reachable through Copy details.
+    assert.match(await visibleText(frame.locator("#search-error")), /Search could not run — the local search index is unavailable\./);
+    assert.match(await visibleText(frame.locator("#search-error")), /Copy details/);
   },
 
   async "photo-export-detail"(page) {
@@ -847,6 +1091,64 @@ const tests = {
     );
     await frame.locator("#detail-close").click();
     assert.equal(await frame.locator("#app-shell").getAttribute("class"), "app-shell");
+  },
+
+  async "library-collections"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    // Select two tiles so the batch bar appears; with no collections yet the target
+    // select must say so honestly instead of offering an empty list.
+    await frame.locator("#review-grid .review-select input").nth(0).check();
+    await frame.locator("#review-grid .review-select input").nth(1).check();
+    const bar = frame.locator("#batch-bar");
+    await poll(async () => bar.isVisible());
+    const batchSelect = frame.locator("#batch-collection");
+    assert.equal(
+      (await batchSelect.locator("option").first().textContent())?.trim(),
+      "No collections yet — create one to group assets",
+    );
+    assert.equal(await frame.locator("#batch-add-collection").isDisabled(), true);
+    // "New collection…" swaps the select for an inline name field (no prompt dialog).
+    await batchSelect.selectOption({ label: "New collection…" });
+    const nameInput = frame.locator("#batch-collection-name");
+    await nameInput.waitFor({ state: "visible" });
+    await nameInput.fill("MacBook user test");
+    await frame.locator("#batch-collection-create").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) => call.command === "collection_create" && call.args.name === "MacBook user test",
+      );
+    });
+    // The created collection becomes the batch target without a second pick.
+    await poll(async () => (await batchSelect.inputValue()) !== "");
+    await frame.locator("#batch-add-collection").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "review_batch"
+          && call.args.ops?.length === 2
+          && call.args.ops.every(
+            (op) => op.op === "add_to_collection" && Boolean(op.collectionId),
+          ),
+      );
+    });
+    await poll(async () =>
+      /Added 2 assets to the collection\./.test(
+        await visibleText(frame.locator("#review-message")),
+      ));
+    // The grid refreshes with the new membership pill on the previously uncollected tile.
+    await poll(async () =>
+      (await tiles.nth(1).locator(".review-flags").textContent())?.includes("▤ 1 collection") === true);
+    // The filter select now offers the created collection too.
+    await frame.locator("#filter-more").click();
+    await poll(async () => {
+      const options = await frame.locator("#filter-collection option").allTextContents();
+      return options.includes("MacBook user test");
+    });
   },
 
   async "library-feedback"(page) {
