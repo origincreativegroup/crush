@@ -134,6 +134,175 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Generate a deterministic 60 fps source with AAC audio in-test (the TASK-036 fixture
+/// pattern) — no tracked fixture, so no license/determinism review. Pinned lavfi parameters
+/// keep generation reproducible. This is the fps/AAC-priming shape that exposed the
+/// pass-then-fail duration-tolerance window (encoder ≈0.067 s vs executor 0.05 s).
+#[cfg(target_os = "macos")]
+fn generate_60fps_aac_source(ffmpeg: &Path, output: &Path) {
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x180:rate=60:duration=1",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:sample_rate=44100:duration=1",
+        ])
+        .args(["-map", "0:v", "-map", "1:a"])
+        .args(["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p"])
+        .args([
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-tag:v",
+            "avc1",
+        ])
+        .args(["-c:a", "aac", "-b:a", "192k"])
+        .arg(output)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// TASK-035 item 1: a 60 fps AAC-priming source renders through the durable clip path with
+/// the executor's re-check using the ONE shared duration-tolerance rule
+/// (`frame_tolerance + 0.05`), so nothing the encoder accepted can fail the executor. The
+/// manifest pins the shared value (1/60 + 0.05 ≈ 0.0667 s) for this 60 fps source.
+#[cfg(target_os = "macos")]
+#[test]
+fn sixty_fps_aac_clip_uses_the_shared_duration_tolerance_rule() {
+    if crush_stage_split::ffmpeg::resolve().is_err() {
+        eprintln!("skipping video render: bundled/development FFmpeg is unavailable");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("sixty-fps-aac.mp4");
+    let resolved = crush_stage_split::ffmpeg::resolve().unwrap();
+    generate_60fps_aac_source(&resolved.path, &source);
+    let source_hash = sha256_file(&source).unwrap();
+    let destination = directory.path().join("exports/sixty-fps-clip.mp4");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &Video {
+                id: "video-60fps".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                sha256: source_hash.clone(),
+                duration_s: Some(1.0),
+                fps: Some(60.0),
+                width: Some(320),
+                height: Some(180),
+                has_audio: true,
+                status: VideoStatus::Done,
+                indexed_at: Some(Utc::now()),
+            },
+        )
+        .unwrap();
+    store
+        .render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: "clip-60fps".to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::VideoClip,
+                name: "60 fps clip".to_owned(),
+                schema_json: serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "video_clip",
+                    "in_s": 0.25,
+                    "out_s": 1.0,
+                    "crop": null,
+                    "grade": {"mode": "none"},
+                    "transition": {"kind": "cut"},
+                    "audio": {"mode": "source"},
+                    "output": {"preset": "mp4-h264-sdr-v1"}
+                })
+                .to_string(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-clip-60fps".to_owned(),
+                recipe_id: "clip-60fps".to_owned(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "render-test",
+                    "selection_provenance": {"origin": "general"},
+                    "sources": [{
+                        "media_kind": "video",
+                        "media_id": "video-60fps",
+                        "source_id": "video-60fps",
+                        "sha256": source_hash,
+                        "path": source,
+                    }]
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used"
+                    }
+                })
+                .to_string(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    drop(store);
+    let pipeline = Pipeline::new(
+        Config {
+            data_dir: Some(directory.path().to_path_buf()),
+            ..Config::default()
+        },
+        AppPaths {
+            root: directory.path().to_path_buf(),
+        },
+        CancellationToken::default(),
+    );
+
+    let output = pipeline
+        .execute_render_job(DEFAULT_OWNER_ID, "render-clip-60fps")
+        .unwrap();
+
+    assert!(destination.is_file());
+    let manifest: serde_json::Value = serde_json::from_str(&output.manifest_json).unwrap();
+    let tolerance = manifest["verification"]["duration_tolerance_s"]
+        .as_f64()
+        .unwrap();
+    let expected = 1.0 / 60.0 + 0.05;
+    assert!(
+        (tolerance - expected).abs() < 1e-9,
+        "executor tolerance must equal the shared rule's value {expected}, got {tolerance}"
+    );
+    assert_eq!(manifest["verification"]["fps"], 60.0);
+    assert_eq!(manifest["verification"]["source_unchanged"], true);
+    assert!((output.duration_s.unwrap() - 0.75).abs() <= expected);
+}
+
 /// Decode one frame by index to raw YUV420P planes. Raw planes avoid color-matrix
 /// assumptions: the untagged MPEG-4 fixture and the BT.709-tagged H.264 reel would
 /// otherwise round-trip through different RGB matrices and hide the frame identity.

@@ -129,6 +129,43 @@ pub struct Progress {
     pub percent: f64,
 }
 
+/// Container/muxer slack shared by every rendered-container duration check. The native AAC
+/// encoder's priming packet is presented through the MP4 edit list and can pad the container
+/// duration slightly past the video stream (the TASK-021/036 AAC-priming finding), so the
+/// duration rule below adds this slack on top of the frame-boundary term.
+pub const DURATION_TOLERANCE_SLACK_S: f64 = 0.05;
+
+/// One source-frame period of boundary slack, the frame term of the duration-tolerance rule.
+/// A container whose video starts on the first source frame at or after the requested start
+/// and ends on the last delivered frame can differ from the requested duration by up to one
+/// source-frame period. Probes that report no usable frame rate fall back to 30 fps.
+pub fn frame_tolerance_s(fps: f64) -> f64 {
+    if fps > 0.0 {
+        1.0 / fps
+    } else {
+        1.0 / 30.0
+    }
+}
+
+/// The documented duration-tolerance rule shared by every rendered-container duration check —
+/// stage-split verification (`verify_clip_render`, the export path) and the durable executor's
+/// re-checks in `crates/pipeline/src/render.rs`:
+///
+/// `duration_tolerance_s = frame_tolerance + 0.05`, where `frame_tolerance = 1.0 / fps`
+/// (fallback 1/30).
+///
+/// `frame_tolerance` covers frame-boundary rounding; the extra 0.05 s
+/// ([`DURATION_TOLERANCE_SLACK_S`]) covers container padding from the AAC priming packet.
+/// Without one shared rule, a 60 fps render could pass the encoder-side check
+/// (1/60 + 0.05 ≈ 0.067 s) and then fail a stricter executor re-check (0.05 s) — the
+/// pass-then-fail window this function removes. A reel of N items renders N independent
+/// frame-boundary cuts, so the reel executor sums per-item frame slacks plus the shared
+/// container slack: `DURATION_TOLERANCE_SLACK_S + N / fps`. Every duration check in the render
+/// path must derive from this rule; do not add a second tolerance formula.
+pub fn duration_tolerance_s(fps: f64) -> f64 {
+    frame_tolerance_s(fps) + DURATION_TOLERANCE_SLACK_S
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Operation<T> {
     pub value: T,
@@ -809,11 +846,7 @@ impl Runner {
                 "clip render source has no video stream".to_owned(),
             ));
         }
-        let frame_tolerance = if source_probe.fps > 0.0 {
-            1.0 / source_probe.fps
-        } else {
-            1.0 / 30.0
-        };
+        let frame_tolerance = frame_tolerance_s(source_probe.fps);
         if request.out_s > source_probe.duration_s + frame_tolerance {
             return Err(Error::InvalidArgument(format!(
                 "clip out_s {:.6} exceeds source duration {:.6}",
@@ -914,7 +947,7 @@ impl Runner {
             expected_width,
             expected_height,
             expected_duration,
-            frame_tolerance,
+            duration_tolerance_s(source_probe.fps),
         )?;
         fs::File::open(&rendered)?.sync_all()?;
         // The caller path is published exclusively. A racing writer wins without being replaced;
@@ -987,7 +1020,7 @@ impl Runner {
                     .to_owned(),
             ));
         }
-        let frame_tolerance = 1.0 / source_probe.fps;
+        let frame_tolerance = frame_tolerance_s(source_probe.fps);
         if spec.out_s > source_probe.duration_s + frame_tolerance {
             return Err(Error::InvalidArgument(format!(
                 "reel item out_s {:.6} exceeds source duration {:.6}",
@@ -1300,12 +1333,14 @@ impl Runner {
                 }
             };
 
-        let frame_tolerance = if source_probe.fps > 0.0 {
-            1.0 / source_probe.fps
-        } else {
-            1.0 / 30.0
-        };
-        if self.copy_is_accurate(input, start_s, output, expected_duration, frame_tolerance) {
+        let duration_tolerance = duration_tolerance_s(source_probe.fps);
+        if self.copy_is_accurate(
+            input,
+            start_s,
+            output,
+            expected_duration,
+            duration_tolerance,
+        ) {
             return Ok(ExportResult {
                 command: copy_command.clone(),
                 attempted_commands: vec![copy_command],
@@ -1360,7 +1395,7 @@ impl Runner {
                 Err(error) => return Err(error),
             };
         let output_probe = self.probe(output)?.value;
-        if (output_probe.duration_s - expected_duration).abs() > frame_tolerance + 0.05 {
+        if (output_probe.duration_s - expected_duration).abs() > duration_tolerance {
             return Err(Error::InvalidProbe(format!(
                 "export duration {:.6}s differs from requested {:.6}s",
                 output_probe.duration_s, expected_duration
@@ -1379,12 +1414,12 @@ impl Runner {
         start_s: f64,
         output: &Path,
         expected_duration: f64,
-        tolerance: f64,
+        duration_tolerance: f64,
     ) -> bool {
         let Ok(probe) = self.probe(output) else {
             return false;
         };
-        if (probe.value.duration_s - expected_duration).abs() > tolerance + 0.05 {
+        if (probe.value.duration_s - expected_duration).abs() > duration_tolerance {
             return false;
         }
         match (self.frame_md5(input, start_s), self.frame_md5(output, 0.0)) {
@@ -1873,7 +1908,7 @@ fn verify_clip_render(
     expected_width: u32,
     expected_height: u32,
     expected_duration: f64,
-    frame_tolerance: f64,
+    duration_tolerance: f64,
 ) -> Result<()> {
     if output.video_codec.as_deref() != Some("h264") {
         return Err(Error::InvalidProbe(format!(
@@ -1893,7 +1928,7 @@ fn verify_clip_render(
             output.pixel_format, output.bit_depth
         )));
     }
-    if (output.duration_s - expected_duration).abs() > frame_tolerance + 0.05 {
+    if (output.duration_s - expected_duration).abs() > duration_tolerance {
         return Err(Error::InvalidProbe(format!(
             "clip output duration {:.6}s differs from requested {:.6}s",
             output.duration_s, expected_duration
@@ -2279,6 +2314,25 @@ mod tests {
             permissions.set_mode(0o755);
             fs::set_permissions(path, permissions).unwrap();
         }
+    }
+
+    /// Pins the one documented duration-tolerance rule shared by stage-split and the durable
+    /// executor: frame_tolerance = 1/fps (fallback 1/30), plus the shared container slack.
+    /// The 60 fps value is the AAC-priming case: the encoder check and the executor re-check
+    /// must agree exactly (before the shared rule the executor rejected beyond 0.05 s what
+    /// the encoder accepted up to ≈0.067 s).
+    #[test]
+    fn duration_tolerance_rule_is_the_single_shared_formula() {
+        assert!(
+            (duration_tolerance_s(60.0) - (1.0 / 60.0 + 0.05)).abs() < 1e-12,
+            "60 fps must allow the AAC-priming container slack"
+        );
+        assert!((duration_tolerance_s(30.0) - (1.0 / 30.0 + 0.05)).abs() < 1e-12);
+        assert!((duration_tolerance_s(15.0) - (1.0 / 15.0 + 0.05)).abs() < 1e-12);
+        assert!((duration_tolerance_s(0.0) - (1.0 / 30.0 + 0.05)).abs() < 1e-12);
+        assert!((duration_tolerance_s(-12.0) - duration_tolerance_s(0.0)).abs() < 1e-12);
+        assert!((frame_tolerance_s(24.0) - 1.0 / 24.0).abs() < 1e-12);
+        assert!((DURATION_TOLERANCE_SLACK_S - 0.05).abs() < 1e-12);
     }
 
     #[test]

@@ -478,8 +478,13 @@ impl Pipeline {
         let output_size = i64::try_from(fs::metadata(&staging.output)?.len())
             .context("render output size overflowed i64")?;
         let output_sha256 = sha256_file(&staging.output)?;
+        // Reel duration rule: N independent frame-boundary cuts, so the tolerance is the sum
+        // of per-item frame slacks plus the shared container slack
+        // (`DURATION_TOLERANCE_SLACK_S + items / fps`), per the documented rule in
+        // `crush_stage_split::ffmpeg::duration_tolerance_s`.
         let duration_tolerance_s = if rendered.output_probe.fps > 0.0 {
-            0.05 + sources.request.items.len() as f64 / rendered.output_probe.fps
+            ffmpeg::DURATION_TOLERANCE_SLACK_S
+                + sources.request.items.len() as f64 / rendered.output_probe.fps
         } else {
             0.1
         };
@@ -670,11 +675,10 @@ impl Pipeline {
         let output_size = i64::try_from(fs::metadata(&staging.output)?.len())
             .context("render output size overflowed i64")?;
         let output_sha256 = sha256_file(&staging.output)?;
-        let duration_tolerance_s = if rendered.output_probe.fps > 0.0 {
-            (2.0 / rendered.output_probe.fps).max(0.05)
-        } else {
-            0.1
-        };
+        // Same documented rule as the encoder-side check (crush_stage_split::ffmpeg):
+        // duration_tolerance = frame_tolerance + slack, so a container the encoder accepted
+        // can never fail here — no pass-then-fail window (e.g. 60 fps AAC priming).
+        let duration_tolerance_s = ffmpeg::duration_tolerance_s(rendered.output_probe.fps);
         let duration_delta_s =
             (rendered.output_probe.duration_s - rendered.requested_duration_s).abs();
         ensure!(
