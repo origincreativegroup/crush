@@ -104,10 +104,10 @@ Every task landed as its own squash PR gated by Linux + macOS CI: #14–#19 (ori
 ops), #24+#27 (027 app robustness + integration repair), #25 (018a style learner), #29 (018b style
 UI), #30 (019a DAM organization), #31 (019b review UI), #33+#34 (020a editorial plans core).
 
-Schema is at v12 (0009 plans with boundary-safe shot clamps and selection provenance; 0010 durable
+Schema is at v13 (0009 plans with boundary-safe shot clamps and selection provenance; 0010 durable
 render recipes/jobs/attempts/manifests; 0011 Reel Studio manual spans + import ledger; 0012 span
-plan items clamp to the source video). App command
-surface is 71 registered commands.
+plan items clamp to the source video; 0013 span-keyed reference-set items + `manual_spans_fts`).
+App command surface is 73 registered commands.
 
 Branching note for future agents: the app `generate_handler!` list and the big command block in
 `crates/app/src-tauri/src/lib.rs` conflict-prone across parallel branches — rebase onto main before
@@ -145,6 +145,23 @@ Windows delivery track; they do not replace or bypass Tasks 021–023 or their h
 Task 022 is implemented in draft PR #38, stacked on #37, with imported/manual spans and honest
 historical/imported provenance. John explicitly allowed that work to proceed while Task 021's
 render-golden review remains pending. Keep the PRs separate and rebase #38 after #37 lands.
+
+## Task 034 continuation (2026-09-01, catalogue unification step 2)
+
+Task 034 (schema v13) finishes the span unification TASK-037 started: imported span catalogue text
+now joins search (`manual_spans_fts`, triggers-synced in the migration) as TEXT-MATCH-ONLY results
+(`asset_type: "span"`, score/cosine 0.0, `score_breakdown.text_match_only: true`, verbatim
+provenance, never a fabricated thumbnail), spans appear in Review/All-assets browse (third
+`browse_assets` UNION branch; provenance pills; not selectable for batch editorial; excluded from
+the pairwise compare pool), and Preferences gains the explicit "confirm imported evidence" flow
+(`imported_evidence_list`/`imported_evidence_confirm` — two-step, creating an unconfirmed
+span-keyed reference set that the ordinary confirm/disable/delete machinery reverses). The v13
+migration header records the why: span evidence must be REVERSIBLE, so `feedback_events`
+(append-only) stays photo/shot, and confirmed span evidence is INERT for the current trainer (no
+vectors) — every UI surface says "does not train recommendations until clip analysis lands" and
+nothing claims "learned". Re-import survival is proven by
+`confirmed_span_evidence_survives_re_import_without_duplication_or_revocation` (pipeline) and
+`span_reference_evidence_admits_spans_survives_upsert_and_cleans_on_delete` (store).
 
 ## Task 022 continuation (2026-08-30, Claude)
 

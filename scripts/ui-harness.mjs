@@ -1504,6 +1504,153 @@ const tests = {
     );
     await frame.locator("#compare-close").click();
   },
+
+  // ---- Task 034: catalogue unification ----
+
+  async "search-span-text"(page) {
+    const frame = page.frameLocator("#app-frame");
+    const input = frame.locator("#search-input");
+    await input.waitFor({ state: "visible" });
+    await input.fill("rocket");
+    await input.press("Enter");
+    const cards = frame.locator("#results-grid .result-card");
+    // Poll on the span card itself: the browse pool also holds three cards, so a bare
+    // count would race the in-flight search.
+    const spanCard = cards.filter({ hasText: "Imported · Reel Studio" });
+    await poll(async () => (await spanCard.count()) === 1);
+    await poll(async () => (await cards.count()) === 3);
+    // The imported clip is a distinct, honestly labeled kind: provenance pill instead of a
+    // score badge, the matched catalogue text as the snippet, and no fabricated thumbnail.
+    assert.equal(await spanCard.count(), 1);
+    assert.equal(await spanCard.locator("img").count(), 0);
+    assert.equal(await visibleText(spanCard.locator(".badge-span-provenance")), "Imported · Reel Studio");
+    assert.match(await visibleText(spanCard.locator(".result-style")), /Catalogue text match/);
+    assert.match(await visibleText(spanCard.locator(".result-snippet")), /rocket clear of the tower/);
+    // The kind filter narrows to imported clips alone.
+    await frame.locator('.dam-kind[data-kind="span"]').click();
+    await poll(async () => (await cards.count()) === 1);
+    await frame.locator('.dam-kind[data-kind=""]').click();
+    await poll(async () => (await cards.count()) === 3);
+    // The drawer shows read-only catalogue evidence with provenance, plays the source
+    // video, and offers none of the photo/shot editorial machinery.
+    await spanCard.click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    assert.equal(await visibleText(frame.locator("#detail-kind")), "Imported clip detail");
+    assert.equal(await frame.locator("#detail-video").isVisible(), true);
+    assert.match(await visibleText(frame.locator("#detail-transcript")), /Catalogue id V1-0001_S1/);
+    assert.match(await visibleText(frame.locator("#detail-transcript")), /Catalogued evidence/);
+    assert.match(await visibleText(frame.locator("#detail-transcript")), /does not train recommendations/);
+    assert.equal(await frame.locator("#feedback-pick").isHidden(), true);
+    assert.equal(await frame.locator("#safety-apply").isHidden(), true);
+    assert.equal(await frame.locator("#compare-open").isHidden(), true);
+    // The explicit evidence path stays reachable from the drawer.
+    assert.equal(await frame.locator("#detail-style-set").isVisible(), true);
+    await frame.locator("#detail-close").click();
+  },
+
+  async "review-spans"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 4);
+    const spanTile = tiles.filter({ hasText: "Imported · Reel Studio" });
+    assert.equal(await spanTile.count(), 1);
+    assert.equal(await visibleText(spanTile.locator(".review-kind")), "CLIP");
+    assert.equal(await spanTile.locator("img").count(), 0, "no thumbnail is fabricated");
+    assert.match(await visibleText(spanTile.locator(".review-meta")), /0:03 → 0:06/);
+    assert.match(await visibleText(spanTile.locator(".review-flags")), /Imported · Reel Studio/);
+    assert.equal(
+      await spanTile.locator(".review-select input").count(),
+      0,
+      "imported clips are not batch pick/reject/rating targets",
+    );
+    // The kind filter narrows to imported clips and reaches library_browse.
+    await frame.locator("#filter-kind").selectOption("span");
+    await poll(async () => (await tiles.count()) === 1);
+    const browse = (await mockCalls(page))
+      .filter((call) => call.command === "library_browse").at(-1);
+    assert.equal(browse.args.filter.kind, "span");
+    await frame.locator("#filter-kind").selectOption("");
+    await poll(async () => (await tiles.count()) === 4);
+    // The drawer for an imported clip is the read-only catalogue view.
+    await spanTile.click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    assert.equal(await visibleText(frame.locator("#detail-kind")), "Imported clip detail");
+    assert.match(await visibleText(frame.locator("#detail-transcript")), /Catalogued evidence/);
+    await frame.locator("#detail-close").click();
+    // The pairwise compare pool excludes imported clips — prefer needs compared-media
+    // semantics and vectors, and spans have neither.
+    await frame.locator('.review-tile[data-key="photo|photo-one"]').click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    await frame.locator("#compare-open").click();
+    const dialog = frame.locator("#compare-dialog");
+    await dialog.waitFor({ state: "visible" });
+    await poll(async () => (await dialog.locator("#compare-select-a option").count()) >= 3);
+    const poolValues = await dialog
+      .locator("#compare-select-a option")
+      .evaluateAll((options) => options.map((option) => option.value));
+    assert.equal(poolValues.includes("span-rev-1"), false);
+    await frame.locator("#compare-close").click();
+  },
+
+  async "preferences-span-evidence"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-style").click();
+    const rows = frame.locator("#imported-evidence-list .style-set-row");
+    await poll(async () => (await rows.count()) === 2);
+    // The honest inertness copy is part of the section, not fine print.
+    assert.match(
+      await visibleText(frame.locator("#imported-evidence-note")),
+      /do not train recommendations yet/,
+    );
+    assert.equal(await visibleText(rows.nth(0).locator(".status-pill")), "Awaiting decision");
+    assert.match(await visibleText(rows.nth(0).locator(".style-set-meta")), /Imported · Reel Studio/);
+
+    // Per-item confirm, step one: the evidence joins a NEW set that is still unconfirmed.
+    await rows.nth(0).getByRole("button", { name: "Confirm", exact: true }).click();
+    await poll(async () => (await visibleText(frame.locator("#style-message"))).includes("stays inert until you confirm it"));
+    const sets = frame.locator("#style-sets .style-set-row");
+    await poll(async () => (await sets.count()) === 1);
+    assert.equal(await visibleText(sets.nth(0).locator(".status-pill")), "Unconfirmed");
+    assert.match(await visibleText(sets.nth(0).locator(".style-set-name")), /imported evidence/);
+
+    // Step two is the ordinary set confirm — the one reversible evidence lifecycle.
+    await sets.nth(0).locator("button.secondary").click();
+    await poll(async () => (await visibleText(sets.nth(0).locator(".status-pill"))) === "Confirmed");
+    await poll(async () => (await visibleText(rows.nth(0).locator(".status-pill"))) === "Confirmed");
+    assert.match(await visibleText(rows.nth(0).locator(".style-set-sets")), /Confirmed as evidence/);
+
+    // Skip records a local decision only: the clip leaves the list, nothing else moves.
+    await rows.nth(1).getByRole("button", { name: "Skip", exact: true }).click();
+    await poll(async () => (await rows.count()) === 1);
+    assert.match(await visibleText(frame.locator("#imported-evidence-count")), /1 skipped/);
+    assert.match(
+      await visibleText(frame.locator("#style-message")),
+      /Nothing was written to the library/,
+    );
+
+    // Bulk confirm of an already-confirmed clip is idempotent and says so.
+    await rows.nth(0).locator(".review-select input").check();
+    const bulkConfirm = frame.locator("#imported-evidence-confirm");
+    await poll(() => bulkConfirm.isEnabled());
+    await bulkConfirm.click();
+    await poll(async () => (await visibleText(frame.locator("#style-message"))).includes("nothing to add"));
+
+    // Withdrawal is the existing machinery: disable mutes the set, delete removes it —
+    // and the evidence rows reflect the real state either way.
+    await sets.nth(0).locator("button.secondary").click();
+    await poll(async () => (await visibleText(sets.nth(0).locator(".status-pill"))) === "Disabled");
+    await poll(async () => (await visibleText(rows.nth(0).locator(".status-pill"))) === "Awaiting decision");
+    const remove = sets.nth(0).locator("button.danger");
+    await remove.click();
+    assert.equal(await visibleText(remove), "Really delete?");
+    await remove.click();
+    await poll(async () => (await sets.count()) === 0);
+    // The skipped clip stays hidden (skip is persistent local state); the confirmed-then-
+    // withdrawn clip is back to "Awaiting decision" with its skip/confirm actions intact.
+    await poll(async () => (await rows.count()) === 1);
+    assert.equal(await visibleText(rows.nth(0).locator(".status-pill")), "Awaiting decision");
+  },
 };
 
 const contextOptions = {

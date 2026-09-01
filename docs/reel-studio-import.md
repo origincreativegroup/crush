@@ -48,6 +48,21 @@ invalidate items that were extended past the old span — the clamp is the video
 caveat: if you **delete** the project and re-import, the recipe is recreated with the catalogue's
 original boundaries; the adjustment lived on the deleted project.
 
+## Confirming imported evidence (Task 034)
+
+Imported catalogue evidence (quality, standout, `used_in`) and imported finished projects become
+preference evidence ONLY through an explicit confirmation in **Preferences → Imported evidence**.
+Confirming is a two-step, reversible act: the first click adds the clips to a named previous-work
+reference set (e.g. `Reel Studio · imported evidence`) that starts **unconfirmed** and therefore
+inert; the second click confirms the set, using the same confirm / disable / delete machinery as
+any other reference set — disabling or deleting it withdraws the evidence and invalidates anything
+it influenced. Skip records a local decision only; nothing is written to the library, and
+re-importing never resurrects a skipped clip as new.
+
+Honesty note, stated in the panel itself: confirmed imported clips are **catalogued evidence**.
+Spans carry no embedding vectors, so they do not train the current preference model — that starts
+when clip (span interval) analysis lands. Nothing in the interface claims "learned" for them.
+
 ## Running it
 
 Dry run first — nothing is written except an audit row:
@@ -87,7 +102,13 @@ reported as `skipped` so your edits are never overwritten.
   matched source whose duration was never probed (indexing never finished) is also reported as
   `not_indexed` per segment: span clips clamp to the source video, so a video of unknown length
   cannot host them until it is re-indexed.
-- Catalogue descriptions are stored on spans; they are not yet part of the search index.
+- Catalogue text on spans is indexed for **text-match** search results and Review filtering
+  (Task 034). Spans have no embedding vectors, so these results never join the semantic cosine
+  ranking — they are labeled text matches with their catalogue provenance.
+- Confirmed span evidence does not yet train the preference model (no vectors). It is stored,
+  readable and reversible, and the trainer skips it without counting it as a sample.
+- Spans cannot enter collections or version stacks yet; those filters exclude spans, and the
+  pairwise compare dialog excludes spans too (prefer needs compared-media semantics and vectors).
 - Reel v2 treatments beyond hard cuts (captions, music, motion, keyframed crops, extended grades)
   are stored faithfully but the Task 021 renderer refuses them with an explicit capability error
   rather than rendering an approximation.
