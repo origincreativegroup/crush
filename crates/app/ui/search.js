@@ -28,6 +28,7 @@
     nothingIndexed: $("#search-nothing-indexed"),
     idle: $("#search-idle"),
     busy: $("#search-busy"),
+    warmup: $("#search-warmup"),
     noMatches: $("#search-no-matches"),
     error: $("#search-error"),
     grid: $("#results-grid"),
@@ -83,6 +84,8 @@
     pendingQuery: null,
     debounce: null,
     searchCueTimer: null,
+    warmupTimer: null,
+    everSearched: false,
     messageTimer: null,
     detail: null,
     loop: false,
@@ -252,6 +255,17 @@
     state.searching = true;
     el.error.hidden = true;
     scheduleSearchCue();
+    // First-search warmup honesty (Task 039 B7): the test route documents that the
+    // first search can stall while the local encoder initializes. If that first
+    // search is still running after ~1.5 s, the busy panel says so instead of
+    // reading as a hang. Later searches never show the line, and errors render
+    // immediately — this timer never delays or masks them.
+    if (!state.everSearched) {
+      clearTimeout(state.warmupTimer);
+      state.warmupTimer = setTimeout(() => {
+        if (state.searching) el.warmup.hidden = false;
+      }, 1500);
+    }
     renderStates();
     const started = performance.now();
     try {
@@ -273,6 +287,9 @@
     } finally {
       state.searching = false;
       clearTimeout(state.searchCueTimer);
+      clearTimeout(state.warmupTimer);
+      el.warmup.hidden = true;
+      state.everSearched = true;
       renderStates();
       if (state.pendingQuery && state.pendingQuery !== query) {
         state.pendingQuery = null;

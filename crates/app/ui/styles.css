@@ -1189,6 +1189,12 @@ nav {
   accent-color: var(--accent);
 }
 
+/* First-search warmup honesty (Task 039 B7): appears inside the busy panel only when
+   the first search of the session runs past ~1.5 s. */
+.search-warmup {
+  margin: calc(-1 * var(--space-6)) 0 var(--space-10) !important;
+}
+
 .review-content {
   height: calc(100vh - var(--toolbar-height));
   overflow: auto;
