@@ -80,6 +80,8 @@
   /* Brand mark gradient */
   --brand-light: #65a0ff;
   --brand-dark: #3f75dd;
+  /* Deep brand shade used only for the brand-mark shadow (darker than --brand-dark). */
+  --brand-deep-rgb: 29 83 184;
 
   /* rgb companions for alpha tints */
   --bg-rgb: 20 20 22;
@@ -232,7 +234,7 @@ body {
   border-radius: var(--radius-xl);
   color: white;
   background: linear-gradient(145deg, var(--brand-light), var(--brand-dark));
-  box-shadow: inset 0 1px rgb(255 255 255 / 24%), 0 12px 30px rgb(29 83 184 / 26%);
+  box-shadow: inset 0 1px rgb(255 255 255 / 24%), 0 12px 30px rgb(var(--brand-deep-rgb) / 26%);
   font-size: 21px; /* brand glyph, sized to its 48px mark */
   font-weight: 750;
 }
@@ -724,9 +726,9 @@ nav {
 }
 
 /* Shared pill skin (Task 039 A2): status pills (Library rows, Preferences, Review
-   thumbs) and Review flag pills are one pattern with tone variants. Flag pills
-   previously used 2px vertical padding vs 3px — unified on 3px, so flag pills grow
-   2px taller in the tile flag row. */
+   thumbs) and Review flag pills are one pattern with tone variants. Vertical
+   padding unified on 4px (--space-2; flag pills previously used 2px, status pills
+   3px) — status pills grow 2px taller, flag pills 4px, in their rows. */
 .status-pill,
 .review-flag-pill {
   width: max-content;
@@ -1118,7 +1120,7 @@ nav {
 
 /* Shared control skins (Task 039 A2). Two families cover every text input and
    select in the app:
-   - text inputs: --border-input edge, 7px radius, --bg well, --text label;
+   - text inputs: --border-input edge, 8px radius (--radius-md), --bg well, --text label;
    - raised selects: --border-raised edge, 6px radius, --control fill.
    Heights/padding stay contextual (30px inline, 32–38px feature controls). The
    Review filter inputs previously used the raised dialog border and the drawer
