@@ -219,6 +219,19 @@
     }, 500);
   }
 
+  // Task 039 B8 — search errors speak editor language (the shared mapping in app.js);
+  // the untouched backend text stays one "Copy details" click away.
+  function showSearchError(error) {
+    const raw = String(error);
+    const mapped = window.crushErrorText ? window.crushErrorText(error) : raw;
+    el.error.replaceChildren();
+    const text = document.createElement("span");
+    text.textContent = mapped;
+    el.error.append(text);
+    if (mapped !== raw) el.error.append(window.crushCopyDetailsButton(raw));
+    el.error.hidden = false;
+  }
+
   // ---------- search ----------
   function scheduleSearch() {
     clearTimeout(state.debounce);
@@ -256,8 +269,7 @@
           : "";
       }
     } catch (error) {
-      el.error.textContent = String(error);
-      el.error.hidden = false;
+      showSearchError(error);
     } finally {
       state.searching = false;
       clearTimeout(state.searchCueTimer);
@@ -332,8 +344,7 @@
       renderResults();
       el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
     } catch (error) {
-      el.error.textContent = String(error);
-      el.error.hidden = false;
+      showSearchError(error);
     } finally {
       state.browsing = false;
       renderStates();

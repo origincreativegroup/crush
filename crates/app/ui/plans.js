@@ -84,7 +84,14 @@
     if (state.busy) return;
     state.busy = true;
     $("plans-controls").disabled = true;
-    try { await action(); } catch (error) { message(String(error), true); }
+    try { await action(); } catch (error) {
+      // Task 039 B8 — mapped editor-language headline; raw backend text stays one
+      // "Copy details" click away when the mapping translated it.
+      const raw = String(error);
+      const mapped = window.crushErrorText ? window.crushErrorText(error) : raw;
+      message(mapped, true);
+      if (mapped !== raw) $("plans-message").append(window.crushCopyDetailsButton(raw));
+    }
     finally { state.busy = false; $("plans-controls").disabled = false; }
   }
   function confirmAction(copy) {

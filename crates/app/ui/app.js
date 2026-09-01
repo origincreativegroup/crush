@@ -1,6 +1,41 @@
 const bridge = window.__TAURI__;
 const invoke = bridge?.core?.invoke;
 
+// Task 039 B8 — error-language pass. Backend failures used to surface verbatim
+// ("Disk full", "The vector store is unavailable."); this maps the common ones into
+// editor language while the raw text stays available through a "Copy details" button
+// (same affordance as the Library failure row). Unmatched errors pass through
+// unchanged — an unmapped message is honest; an invented one is not.
+const errorRules = [
+  [/disk full|no space left/i,
+    "Disk full — free up space on the drive, then try again."],
+  [/vector store/i,
+    "Search could not run — the local search index is unavailable. Try again in a moment; if it keeps failing, run Doctor from the sidebar."],
+  [/permission denied|eperm|eacces|operation not permitted/i,
+    "Crush does not have permission to read that location — grant access, then try again."],
+  [/database.*(locked|busy)|locked.*database/i,
+    "The library database is busy — try again in a moment."],
+];
+
+window.crushErrorText = (error) => {
+  const raw = String(error ?? "");
+  return errorRules.find(([pattern]) => pattern.test(raw))?.[1] ?? raw;
+};
+
+// Returns a "Copy details" button carrying the untouched backend text, so a mapped
+// headline never destroys the detail someone may need to report a bug.
+window.crushCopyDetailsButton = (raw) => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button secondary small";
+  button.textContent = "Copy details";
+  button.title = "Copy the original error text";
+  button.addEventListener("click", () => {
+    bridge?.clipboardManager?.writeText(`Crush error: ${String(raw)}`).catch(() => {});
+  });
+  return button;
+};
+
 const elements = {
   boot: document.querySelector("#boot"),
   firstRun: document.querySelector("#first-run"),

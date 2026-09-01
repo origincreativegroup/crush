@@ -115,6 +115,16 @@
     }, 5000);
   }
 
+  // Task 039 B8 — surfaced backend errors go through the shared editor-language
+  // mapping (app.js); when the headline was translated, the untouched backend text
+  // stays reachable through a "Copy details" button in the message row.
+  function showError(error) {
+    const raw = String(error);
+    const mapped = window.crushErrorText ? window.crushErrorText(error) : raw;
+    showMessage(mapped, true);
+    if (mapped !== raw) el.message.append(window.crushCopyDetailsButton(raw));
+  }
+
   // ---------- filters ----------
   function filterArgs() {
     const args = {};
@@ -459,7 +469,7 @@
       state.selection.clear();
       await refreshReview();
     } catch (error) {
-      showMessage(String(error), true);
+      showError(error);
     }
   }
 
@@ -533,7 +543,7 @@
         }
       }
     } catch (error) {
-      showMessage(String(error), true);
+      showError(error);
     } finally {
       el.grid.removeAttribute("aria-busy");
       el.grid.classList.remove("refreshing");

@@ -616,10 +616,10 @@ const tests = {
     await input.waitFor({ state: "visible" });
     await input.fill("boom");
     await input.press("Enter");
-    assert.equal(
-      await visibleText(frame.locator("#search-error")),
-      "The vector store is unavailable.",
-    );
+    // Task 039 B8: internal vocabulary is mapped to editor language; the raw backend
+    // text stays reachable through Copy details.
+    assert.match(await visibleText(frame.locator("#search-error")), /Search could not run — the local search index is unavailable\./);
+    assert.match(await visibleText(frame.locator("#search-error")), /Copy details/);
   },
 
   async "photo-export-detail"(page) {
