@@ -7,6 +7,8 @@
 //
 // Determinism: page.clock.install() freezes the app's 850 ms poll interval and 5 s message
 // timers so re-renders cannot race assertions; the mock emits its events on microtasks.
+// compare-advance uses page.clock.fastForward() to observe the 600 ms auto-advance beat;
+// compare-advance-reduced runs with emulated prefers-reduced-motion and must not need it.
 
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -315,7 +317,13 @@ const tests = {
     assert.equal(addition.args.item.profileVersion, null);
     assert.equal(JSON.parse(addition.args.item.signalsJson).lane, "personalized");
     await frame.locator("#nav-style").click();
-    assert.doesNotMatch(await visibleText(frame.locator("#style-status-line")), /^Learned/);
+    // The pre-verdict hard stop ("no surface claims learned") was resolved by the recorded
+    // verdict (docs/style-proof-review.md, 2026-08-31): the label may appear, but only in
+    // its bounded form — next to the visible scope line, never claiming more.
+    await poll(async () =>
+      (await visibleText(frame.locator("#style-status-line"))) === "Learned profile",
+    );
+    assert.match(await visibleText(frame.locator("#style-scope-note")), /not on unseen future work/);
   },
 
   async "plans-sequence"(page) {
@@ -608,11 +616,16 @@ const tests = {
   async "style-panel"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-style").click();
-    // Automated success is not human approval. Never claim learned at the open hard stop.
+    // Verdict conditions (docs/style-proof-review.md, 2026-08-31): a gate-passed profile
+    // reads "Learned profile" and carries the visible plain-language scope line.
     await poll(async () =>
-      /Experimental preferences · human review pending/.test(
-        await visibleText(frame.locator("#style-status-line")),
-      ));
+      (await visibleText(frame.locator("#style-status-line"))) === "Learned profile",
+    );
+    const scopeNote = frame.locator("#style-scope-note");
+    await scopeNote.waitFor({ state: "visible" });
+    assert.match(await visibleText(scopeNote), /held-out media/);
+    assert.match(await visibleText(scopeNote), /not on unseen future work/);
+    assert.match(await visibleText(frame.locator("#style-status-meta")), /Automated pair evaluation/);
     const rows = frame.locator("#style-sets .style-set-row");
     await rows.first().waitFor({ state: "visible" });
     assert.equal(await rows.count(), 2);
@@ -649,6 +662,24 @@ const tests = {
     await reset.click();
     await poll(
       async () => (await visibleText(frame.locator("#style-status-line"))) === "General model only",
+    );
+    assert.equal(await frame.locator("#style-scope-note").isHidden(), true);
+  },
+
+  async "style-not-learned"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-style").click();
+    // Verdict condition 1: a profile whose training gate did not pass keeps the
+    // experimental copy, and no scope line is shown for it.
+    await poll(
+      async () =>
+        (await visibleText(frame.locator("#style-status-line")))
+          === "Experimental preferences · human review pending",
+    );
+    assert.equal(await frame.locator("#style-scope-note").isHidden(), true);
+    assert.match(
+      await visibleText(frame.locator("#style-status-meta")),
+      /have not beaten the general model on held-out examples/,
     );
   },
 
@@ -958,6 +989,84 @@ const tests = {
     });
     await frame.locator("#compare-close").click();
   },
+
+  async "compare-advance"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    await frame.locator('.review-tile[data-key="photo|photo-one"]').click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    await frame.locator("#compare-open").click();
+    const dialog = frame.locator("#compare-dialog");
+    await dialog.waitFor({ state: "visible" });
+    await poll(async () => (await frame.locator("#compare-media-a img").count()) === 1);
+    const selectB = frame.locator("#compare-select-b");
+    await poll(async () => (await selectB.inputValue()) === "photo-two");
+    const hint = frame.locator("#compare-advance-hint");
+    const complete = frame.locator("#compare-complete");
+    assert.equal(await hint.isHidden(), true);
+    assert.equal(await complete.isHidden(), true);
+
+    // Passive viewing never advances: time passes, nothing moves, no hint.
+    await page.clock.fastForward(700);
+    assert.equal(await selectB.inputValue(), "photo-two");
+    assert.equal(await hint.isHidden(), true);
+
+    // An explicit decision schedules the advance; the frozen clock holds it until the
+    // harness fast-forwards past the --dur-advance beat (600 ms).
+    await dialog.press("Enter"); // prefer focused side A (photo-one over photo-two)
+    await poll(async () =>
+      (await mockCalls(page)).some(
+        (call) => call.command === "record_feedback" && call.args.signal === "prefer",
+      ));
+    assert.equal(await selectB.inputValue(), "photo-two");
+    await page.clock.fastForward(700);
+    await poll(async () => (await selectB.inputValue()) === "shot-1");
+    assert.match(await visibleText(hint), /Advancing automatically\s+after each decision/);
+
+    // The last comparison completes instead of advancing: the completion line appears
+    // immediately (a state, not motion), side B stays put, and further time never wraps it.
+    await dialog.press("p"); // pick focused side A (photo-one)
+    await poll(async () =>
+      (await mockCalls(page)).some(
+        (call) => call.command === "record_feedback" && call.args.signal === "pick",
+      ));
+    await complete.waitFor({ state: "visible" });
+    // Copy per the review fix: completion means end-of-pool, not "everything decided",
+    // and the earlier prefer is counted (1 picked, 1 preferred).
+    assert.equal(await visibleText(complete), "End of pool — 1 picked, 1 preferred.");
+    await page.clock.fastForward(700);
+    assert.equal(await selectB.inputValue(), "shot-1");
+    await frame.locator("#compare-close").click();
+  },
+
+  async "compare-advance-reduced"(page) {
+    // Context is created with emulated prefers-reduced-motion (see contextOptions below):
+    // the advance must jump immediately with no fast-forwarding.
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    await frame.locator('.review-tile[data-key="photo|photo-one"]').click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    await frame.locator("#compare-open").click();
+    const dialog = frame.locator("#compare-dialog");
+    await dialog.waitFor({ state: "visible" });
+    const selectB = frame.locator("#compare-select-b");
+    await poll(async () => (await selectB.inputValue()) === "photo-two");
+    await dialog.press("Enter"); // prefer focused side A
+    await poll(async () => (await selectB.inputValue()) === "shot-1");
+    assert.match(
+      await visibleText(frame.locator("#compare-advance-hint")),
+      /Advancing automatically\s+after each decision/,
+    );
+    await frame.locator("#compare-close").click();
+  },
+};
+
+const contextOptions = {
+  "compare-advance-reduced": { reducedMotion: "reduce" },
 };
 
 const requested = process.argv.slice(2);
@@ -982,7 +1091,10 @@ const browser = await chromium.launch(
 
 let failures = 0;
 for (const name of names) {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    ...(contextOptions[name] || {}),
+  });
   await context.addInitScript({ path: mockBridgePath });
   const page = await context.newPage();
   await page.clock.install();

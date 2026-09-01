@@ -1152,8 +1152,10 @@ mod macos {
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct StyleProfileStatusView {
-        /// Automated eval result only. NOT human approval: the UI must label this
-        /// experimental until the held-out proof review in HANDOFF is signed off.
+        /// Automated eval result only. The held-out proof review was recorded 2026-08-31
+        /// (docs/style-proof-review.md): the UI labels a gate-passed profile "Learned
+        /// profile" with the required scope line; gate-failed profiles keep the
+        /// experimental copy. This flag alone never unlocks stronger claims.
         learned: bool,
         has_active_profile: bool,
         profile_id: Option<String>,
@@ -1204,8 +1206,9 @@ mod macos {
     }
 
     /// Status surface for the "learned vs. baseline" badge. A profile that exists but never
-    /// passed the eval gate reports `learned: false`, so the UI shows the general-model copy
-    /// (the ranking path ignores unlearned profiles too).
+    /// passed the eval gate reports `learned: false`, so the UI keeps the experimental copy
+    /// per the 2026-08-31 verdict conditions (docs/style-proof-review.md); the ranking path
+    /// ignores unlearned profiles too.
     fn style_profile_status_view(store: &Store) -> anyhow::Result<StyleProfileStatusView> {
         let profile = store.active_style_profile(DEFAULT_OWNER_ID)?;
         let sets = store.reference_set_list(DEFAULT_OWNER_ID)?;

@@ -354,8 +354,10 @@
   // Task 018b style mock state: one confirmed set (feeding the "learned" profile) and one
   // unconfirmed set (inert until confirmed). style_profile_status reports the Task 018a
   // eval-gate metrics verbatim; style_profile_reset flips the profile to the general model.
+  // style-not-learned serves the other gate outcome: the eval ran but the profile did not
+  // pass (personal 0.45 vs baseline 0.61), so the UI must keep the experimental copy.
   const styleState = {
-    sets: ["style-panel", "style-add-item"].includes(scenario)
+    sets: ["style-panel", "style-add-item", "style-not-learned"].includes(scenario)
       ? [
           {
             id: "set-confirmed",
@@ -401,22 +403,23 @@
       referenceSetsConfirmed: confirmed,
     };
     if (styleState.profileReset) return base;
+    const learned = scenario !== "style-not-learned";
     return {
       ...base,
       hasActiveProfile: true,
-      learned: true,
+      learned,
       profileId: "profile-demo",
       contextKey: "default",
       version: 3,
       algorithmVersion: "personal-residual-v1",
       sampleCount: 12,
-      heldOutMetric: 0.78,
+      heldOutMetric: learned ? 0.78 : 0.45,
       baselineMetric: 0.61,
       metrics: {
         held_out_pairs: 6,
-        personal_accuracy: 0.78,
+        personal_accuracy: learned ? 0.78 : 0.45,
         baseline_accuracy: 0.61,
-        learned: true,
+        learned,
         split: "media-disjoint-every-3rd",
         trainer: "personal-residual-v1",
       },
@@ -441,6 +444,8 @@
     "library-flags",
     "library-saved-search",
     "compare-view",
+    "compare-advance",
+    "compare-advance-reduced",
   ].includes(scenario);
 
   const reviewAssets = reviewScenario

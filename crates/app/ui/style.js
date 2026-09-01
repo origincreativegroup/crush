@@ -1,6 +1,8 @@
 // Preferences panel (Task 018b). Loaded after search.js; owns #style-view and the preference evidence
 // block inside the asset detail drawer. Confirmed sets are evidence, not human acceptance
-// of the model. Automated eval success must not bypass HANDOFF's held-out proof review.
+// of the model. The "learned" wording follows the recorded verdict in
+// docs/style-proof-review.md (2026-08-31): gate-passed profiles say "Learned profile" with
+// its scope line; gate-failed profiles keep the experimental copy.
 
 (() => {
   const bridge = window.__TAURI__;
@@ -11,6 +13,7 @@
   const el = {
     statusLine: $("#style-status-line"),
     statusMeta: $("#style-status-meta"),
+    scopeNote: $("#style-scope-note"),
     message: $("#style-message"),
     form: $("#style-create-form"),
     name: $("#style-set-name"),
@@ -56,20 +59,42 @@
   }
 
   // ---------- status ----------
+  // Wording per the recorded verdict (docs/style-proof-review.md, 2026-08-31): the
+  // "Learned profile" label appears ONLY for profiles whose training gate actually passed
+  // (status.learned — held-out media-disjoint improvement), and it always travels with the
+  // plain-language scope line so the claim stays bounded (conditions 1 and 2). Profiles that
+  // did not pass keep the experimental copy. No surface ever claims more than the gate
+  // measured: probe evidence over held-out media, not unseen future work.
+  const LEARNED_SCOPE_TEXT =
+    "This claim rests on synthetic probe evidence over held-out media from your indexed library — not on unseen future work.";
+
+  function setProfileClasses(learned) {
+    el.statusLine.classList.toggle("learned", learned);
+    el.statusLine.classList.toggle("general", !learned);
+  }
+
   function renderStatus() {
     const status = state.status;
-    if (!status || !status.hasActiveProfile || !status.learned) {
+    if (!status || !status.hasActiveProfile) {
       el.statusLine.textContent = "General model only";
-      el.statusLine.classList.remove("learned");
-      el.statusLine.classList.add("general");
-      el.statusMeta.textContent = status && status.hasActiveProfile
-        ? "Your preference examples have not beaten the general model on held-out examples yet."
-        : "Recommendations use the general strong-shot model. Confirm an example set, then update recommendations.";
+      setProfileClasses(false);
+      el.statusMeta.textContent =
+        "Recommendations use the general strong-shot model. Confirm an example set, then update recommendations.";
+      el.scopeNote.hidden = true;
       return;
     }
-    el.statusLine.textContent = "Experimental preferences · human review pending";
-    el.statusLine.classList.remove("learned");
-    el.statusLine.classList.add("general");
+    if (!status.learned) {
+      // Gate not passed: the profile exists but never beat the general model on held-out
+      // media, so the cautious experimental copy stays (verdict condition 1).
+      el.statusLine.textContent = "Experimental preferences · human review pending";
+      setProfileClasses(false);
+      el.statusMeta.textContent =
+        "Your preference examples have not beaten the general model on held-out examples yet.";
+      el.scopeNote.hidden = true;
+      return;
+    }
+    el.statusLine.textContent = "Learned profile";
+    setProfileClasses(true);
     const parts = [`Automated pair evaluation ${metric(status.heldOutMetric)} vs baseline ${metric(status.baselineMetric)}`];
     if (Number.isFinite(status.sampleCount)) parts.push(`${status.sampleCount} samples`);
     if (status.contextKey) parts.push(`context ${status.contextKey}`);
@@ -78,6 +103,9 @@
       `${status.referenceSetsTotal === 1 ? "" : "s"} confirmed`,
     );
     el.statusMeta.textContent = parts.join(" · ");
+    // Condition 2: the scope line is visible copy next to the label, never a tooltip.
+    el.scopeNote.textContent = LEARNED_SCOPE_TEXT;
+    el.scopeNote.hidden = false;
   }
 
   // ---------- reference sets ----------
