@@ -714,6 +714,9 @@ const tests = {
       /Re-indexed 2 assets\./.test(await visibleText(frame.locator("#library-message"))));
 
     // Batch remove reuses the single-remove dialog with the count in the copy.
+    // Cancel first (the dialog is dismissable), then run the confirm path for real:
+    // one remove_asset per selected asset, in table order, then the success message
+    // and both rows gone (review LOW).
     await rows.nth(2).click();
     await rows.nth(3).click({ modifiers: ["ControlOrMeta"] });
     await frame.locator("#remove-asset").click();
@@ -724,6 +727,63 @@ const tests = {
     );
     await frame.locator("#remove-asset-cancel").click();
     assert.equal(await rows.count(), 4);
+    await frame.locator("#remove-asset").click();
+    await frame.locator("#remove-asset-dialog").waitFor({ state: "visible" });
+    await frame.locator("#remove-asset-confirm").click();
+    await poll(async () => {
+      const removes = (await mockCalls(page))
+        .filter((call) => call.command === "remove_asset")
+        .map((call) => call.args.id);
+      return removes.length === 2
+        && removes[0] === "video-one"
+        && removes[1] === "photo-three";
+    });
+    await poll(async () => (await rows.count()) === 2);
+    await poll(async () =>
+      /Removed 2 assets from your library\. The original files were not changed\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+  },
+
+  async "library-remove-partial"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 2);
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    await frame.locator("#remove-asset").click();
+    await frame.locator("#remove-asset-dialog").waitFor({ state: "visible" });
+    await frame.locator("#remove-asset-confirm").click();
+    // The second remove fails with a mappable backend error: the partial-failure
+    // message carries the B8-mapped headline (review LOW), not the raw string.
+    await poll(async () =>
+      /Removed 1 of 2 — 1 could not be removed: Disk full — free up space on the drive, then try again\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    assert.doesNotMatch(
+      await visibleText(frame.locator("#library-message")),
+      /no space left on the device/,
+    );
+    // The raw backend text stays reachable through Copy details…
+    const copyButton = frame.locator("#library-message .button.secondary.small");
+    await copyButton.waitFor({ state: "visible" });
+    await copyButton.click();
+    const copyCalls = (await mockCalls(page)).filter(
+      (call) => call.command === "clipboard.writeText",
+    );
+    assert.equal(copyCalls.length, 1);
+    assert.match(copyCalls[0].args.text, /no space left on the device/);
+    // …and a failed clipboard write says so in the message row instead of
+    // failing silently (review LOW).
+    await poll(async () =>
+      /Could not copy — select the text manually/.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    // The removed asset left the selection; the failed one stays selected.
+    await poll(async () => (await rows.count()) === 1);
+    assert.equal(await visibleText(frame.locator("#library-batch-count")), "1 selected");
   },
 
   async "reindex-cancel"(page) {

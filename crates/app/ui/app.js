@@ -31,7 +31,23 @@ window.crushCopyDetailsButton = (raw) => {
   button.textContent = "Copy details";
   button.title = "Copy the original error text";
   button.addEventListener("click", () => {
-    bridge?.clipboardManager?.writeText(`Crush error: ${String(raw)}`).catch(() => {});
+    // Clipboard writes can fail (WKWebView permission or focus). Silence is not
+    // honest: say so in the message row the button lives in, and point at the
+    // manual fallback instead of swallowing the failure.
+    const fail = () => {
+      const surface = button.parentElement;
+      if (!surface || surface.querySelector(".copy-failure")) return;
+      const note = document.createElement("span");
+      note.className = "copy-failure";
+      note.textContent = "Could not copy — select the text manually";
+      surface.append(note);
+    };
+    const clipboard = bridge?.clipboardManager;
+    if (!clipboard?.writeText) {
+      fail();
+      return;
+    }
+    clipboard.writeText(`Crush error: ${String(raw)}`).then(() => {}, fail);
   });
   return button;
 };
@@ -1008,10 +1024,16 @@ async function removeConfirmed() {
           : `Removed ${removed} assets from your library. The original files were not changed.`,
       );
     } else {
+      // The failure part goes through the B8 error-language mapping like every
+      // other backend failure, with the raw text kept reachable via Copy details.
+      const mapped = crushErrorText(firstError);
       showMessage(
-        `Removed ${removed} of ${ids.length} — ${ids.length - removed} could not be removed: ${firstError}`,
+        `Removed ${removed} of ${ids.length} — ${ids.length - removed} could not be removed: ${mapped}`,
         true,
       );
+      if (mapped !== String(firstError)) {
+        elements.libraryMessage.append(crushCopyDetailsButton(String(firstError)));
+      }
     }
     // Selection hygiene: renderVideos prunes ids that left the list, so removed
     // assets drop out while any that failed stay selected — the honest outcome.

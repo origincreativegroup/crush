@@ -98,6 +98,9 @@
     // id that must be skipped, not abort the queue.
     "reindex-cancel": () => [{ ...photo }, { ...photoTwo }],
     "reindex-stale-asset": () => [{ ...photo }, { ...photoTwo }],
+    // Two photos where the second remove fails (disk full): the partial-failure
+    // message path, its B8 mapping, and the Copy-details clipboard fallback.
+    "library-remove-partial": () => [{ ...photo }, { ...photoTwo }],
     "search-error": () => [{ ...video }],
     "dam-home": () => [{ ...video }, { ...photo }],
     feedback: () => [{ ...video }],
@@ -929,6 +932,12 @@
       case "list_videos":
         return libraryList.map((asset) => ({ ...asset }));
       case "remove_asset": {
+        if (scenario === "library-remove-partial" && args.id === "photo-two") {
+          // The second remove fails with a mappable backend error: the partial
+          // message must surface the mapped headline, with the raw text only
+          // reachable through Copy details.
+          throw "Disk full — no space left on the device";
+        }
         const index = libraryList.findIndex((asset) => asset.id === args.id);
         if (index === -1) throw `No asset ${args.id}`;
         const [removed] = libraryList.splice(index, 1);
@@ -1270,7 +1279,14 @@
       },
     },
     clipboardManager: {
-      async writeText() {},
+      async writeText(text) {
+        calls.push({ command: "clipboard.writeText", args: { text } });
+        if (scenario === "library-remove-partial") {
+          // Clipboard writes can fail for real (WKWebView permission/focus); the
+          // UI must say so instead of failing silently.
+          throw "clipboard unavailable";
+        }
+      },
     },
   };
 
