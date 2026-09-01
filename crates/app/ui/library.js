@@ -499,6 +499,10 @@
 
   async function refreshReview() {
     const filters = filterArgs();
+    // Refresh cue (Task 039 B12): dim the grid and mark it busy while library_browse
+    // runs, so a slow refresh never silently leaves the previous tiles looking current.
+    el.grid.setAttribute("aria-busy", "true");
+    el.grid.classList.add("refreshing");
     try {
       const [counts, collections, stacks, saved, assets] = await Promise.all([
         invoke("library_counts"),
@@ -524,6 +528,9 @@
       }
     } catch (error) {
       showMessage(String(error), true);
+    } finally {
+      el.grid.removeAttribute("aria-busy");
+      el.grid.classList.remove("refreshing");
     }
     renderAll();
   }
@@ -681,6 +688,21 @@
     event.preventDefault();
     refreshReview();
   });
+  // Filters apply as they change (Task 039 B6) — every tweak no longer demands a
+  // "Show results" click. The button stays as the explicit fallback (and the only path
+  // for Enter in the name field), so nothing about the existing flow breaks. Selects
+  // apply immediately; free-text fields debounce so mid-word keystrokes don't churn
+  // the grid.
+  for (const select of [el.kind, el.status, el.usable, el.blur, el.feedback, el.minRating, el.collection, el.stack]) {
+    select.addEventListener("change", () => refreshReview());
+  }
+  let textFilterTimer = null;
+  for (const input of [el.context, el.search]) {
+    input.addEventListener("input", () => {
+      clearTimeout(textFilterTimer);
+      textFilterTimer = setTimeout(refreshReview, 250);
+    });
+  }
   el.reset.addEventListener("click", () => {
     applyFilterArgs({});
     refreshReview();

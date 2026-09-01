@@ -29,10 +29,16 @@
     if (className) element.className = className;
     return element;
   };
+  let messageTimer = null;
   function message(text, error = false) {
-    $("plans-message").textContent = text;
-    $("plans-message").hidden = false;
-    $("plans-message").classList.toggle("error", error);
+    const element = $("plans-message");
+    clearTimeout(messageTimer);
+    element.textContent = text;
+    element.hidden = false;
+    element.classList.toggle("error", error);
+    // Message parity (Task 039 B9): every other view auto-hides confirmations after
+    // 5 s; errors stay on screen until the next message replaces them.
+    if (!error) messageTimer = setTimeout(() => { element.hidden = true; }, 5000);
   }
   function dirty(key, value = true) {
     if (value) state.dirty.add(key); else state.dirty.delete(key);

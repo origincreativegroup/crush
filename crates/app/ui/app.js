@@ -260,6 +260,9 @@ function renderVideos() {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         selectVideo(video.id);
+      } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveRowSelection(video.id, event.key === "ArrowDown" ? 1 : -1);
       }
     });
 
@@ -356,6 +359,19 @@ function renderVideos() {
 function selectVideo(videoId) {
   state.selectedVideoId = state.selectedVideoId === videoId ? null : videoId;
   renderVideos();
+}
+
+// Arrow keys move the row selection (Task 039 B11). Selection follows the cursor
+// instead of toggling, and focus is restored after renderVideos rebuilds the rows.
+function moveRowSelection(fromId, delta) {
+  const index = state.videos.findIndex((video) => video.id === fromId);
+  const next = state.videos[index + delta];
+  if (!next) return;
+  state.selectedVideoId = next.id;
+  renderVideos();
+  elements.videoRows
+    .querySelector(`tr[data-video-id="${CSS.escape(next.id)}"]`)
+    ?.focus();
 }
 
 function toggleError(videoId) {
