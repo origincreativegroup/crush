@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
 use chrono::Utc;
@@ -92,6 +93,75 @@ struct ManagedStaging {
     output: PathBuf,
     manifest: PathBuf,
     marker: PathBuf,
+}
+
+/// Throttled, monotonic job-progress writer fed by the ffmpeg `-progress pipe:1` callbacks
+/// (TASK-035 item 4; the TASK-040 B10 item). The renderer's overall `Progress.percent` —
+/// measured out_time against the requested duration, mapped by the reel renderer across items,
+/// remuxes, and assembly — lands in the job's 0.1..0.75 window; 1.0 stays reserved for
+/// verification and the executor's final 0.75 write is unchanged. Writes are throttled
+/// (one SQLite immediate transaction per update), monotonic, and honestly limited to what the
+/// executor can measure: if the store refuses an update, further attempts stop and the render
+/// continues — progress is advisory, the durable guards remain the contract.
+struct JobProgressWriter<'a> {
+    store: &'a mut Store,
+    owner_id: &'a str,
+    job_id: &'a str,
+    last_progress: f64,
+    last_write: Option<Instant>,
+    stopped: bool,
+}
+
+impl JobProgressWriter<'_> {
+    const BASE: f64 = 0.1;
+    const SPAN: f64 = 0.65;
+    const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(250);
+
+    fn new<'a>(store: &'a mut Store, owner_id: &'a str, job_id: &'a str) -> JobProgressWriter<'a> {
+        JobProgressWriter {
+            store,
+            owner_id,
+            job_id,
+            last_progress: Self::BASE,
+            last_write: None,
+            stopped: false,
+        }
+    }
+
+    fn record(&mut self, progress: &ffmpeg::Progress) {
+        if self.stopped {
+            return;
+        }
+        let mapped = Self::BASE + Self::SPAN * (progress.percent / 100.0).clamp(0.0, 1.0);
+        if mapped <= self.last_progress {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_write
+            .is_some_and(|last| now.duration_since(last) < Self::MIN_WRITE_INTERVAL)
+        {
+            return;
+        }
+        match self
+            .store
+            .render_job_set_progress(self.owner_id, self.job_id, mapped)
+        {
+            Ok(()) => {
+                self.last_progress = mapped;
+                self.last_write = Some(now);
+            }
+            Err(error) => {
+                self.stopped = true;
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    stage = "render",
+                    error = %error,
+                    "render progress updates stopped after a refused write"
+                );
+            }
+        }
+    }
 }
 
 impl ManagedStaging {
@@ -443,12 +513,14 @@ impl Pipeline {
             self.config.limits.threads,
             job.id.clone(),
         );
+        let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
         let rendered = runner.render_reel_with_control(
             &sources.request,
             &staging.output,
             &self.cancellation,
-            |_| {},
+            |progress| progress_writer.record(&progress),
         )?;
+        drop(progress_writer);
         store.render_job_set_progress(owner_id, &job.id, 0.75)?;
         ensure!(!self.cancellation.is_cancelled(), "reel render cancelled");
 
@@ -671,13 +743,15 @@ impl Pipeline {
             self.config.limits.threads,
             job.id.clone(),
         );
+        let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
         let rendered = runner.render_clip_with_control(
             &source.path,
             recipe,
             &staging.output,
             &self.cancellation,
-            |_| {},
+            |progress| progress_writer.record(&progress),
         )?;
+        drop(progress_writer);
         store.render_job_set_progress(owner_id, &job.id, 0.75)?;
         ensure!(!self.cancellation.is_cancelled(), "video render cancelled");
         let source_hash_after = sha256_file(&source.path)?;
@@ -1984,6 +2058,66 @@ mod tests {
             PhotoOutputPreset::JpegSrgbV1
         )
         .is_err());
+    }
+
+    /// TASK-035 item 4: ffmpeg's measured progress maps monotonically into the job's
+    /// 0.1..0.75 window through the real guarded store UPDATE — never reaching the
+    /// verification-reserved values — and writes are throttled.
+    #[test]
+    fn ffmpeg_progress_maps_monotonically_into_the_job_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        let _destination = running_photo_job(&mut store, directory.path(), "progress-job");
+        let mut writer = JobProgressWriter::new(&mut store, DEFAULT_OWNER_ID, "progress-job");
+        let job_progress = |root: &Path| {
+            Store::open(root)
+                .unwrap()
+                .render_job_by_id(DEFAULT_OWNER_ID, "progress-job")
+                .unwrap()
+                .unwrap()
+                .progress
+        };
+
+        // Half of the measured render maps to 0.1 + 0.65*0.5 — beyond the 0.1 staging mark.
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.0,
+            percent: 50.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.5);
+
+        // Equal or lower ffmpeg progress never writes.
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.0,
+            percent: 50.0,
+        });
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 0.2,
+            percent: 10.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.5);
+
+        // A higher value inside the throttle window is skipped, then written after the
+        // interval passes.
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.2,
+            percent: 60.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.5);
+        std::thread::sleep(JobProgressWriter::MIN_WRITE_INTERVAL);
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 1.2,
+            percent: 60.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.1 + 0.65 * 0.6);
+
+        // Even a completed encode stays at 0.75: 1.0 is reserved for verification, and the
+        // executor's explicit final 0.75 write remains the terminal pre-verify value.
+        std::thread::sleep(JobProgressWriter::MIN_WRITE_INTERVAL);
+        writer.record(&ffmpeg::Progress {
+            out_time_s: 2.0,
+            percent: 100.0,
+        });
+        assert_eq!(job_progress(directory.path()), 0.75);
     }
 
     /// Startup recovery verifies a publication by size first: a truncated or missing output

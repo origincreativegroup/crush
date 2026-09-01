@@ -175,6 +175,209 @@ fn generate_60fps_aac_source(ffmpeg: &Path, output: &Path) {
     assert!(status.success());
 }
 
+/// TASK-035 item 4 (the TASK-040 B10 wiring): a durable clip job's progress is fed by real
+/// ffmpeg `-progress` output. A watcher thread polls the job row and cancels the render the
+/// moment an intermediate value beyond the 0.1 staging mark is observed; the cancelled
+/// attempt row then durably preserves that intermediate value. Real ffmpeg progress only —
+/// the encode of a 29 s 1080p clip takes several seconds, so the watcher reliably sees
+/// writes between 0.1 and 0.75.
+#[cfg(target_os = "macos")]
+#[test]
+fn clip_job_progress_is_fed_by_real_ffmpeg_progress() {
+    use std::time::{Duration, Instant};
+    if crush_stage_split::ffmpeg::resolve().is_err() {
+        eprintln!("skipping video render: bundled/development FFmpeg is unavailable");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("hd-source.mp4");
+    let resolved = crush_stage_split::ffmpeg::resolve().unwrap();
+    let status = std::process::Command::new(&resolved.path)
+        .args(["-v", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=1920x1080:rate=30:duration=30",
+        ])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:sample_rate=44100:duration=30",
+        ])
+        .args(["-map", "0:v", "-map", "1:a"])
+        .args(["-c:v", "h264_videotoolbox", "-pix_fmt", "yuv420p"])
+        .args([
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-tag:v",
+            "avc1",
+        ])
+        .args(["-c:a", "aac", "-b:a", "192k"])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let source_hash = sha256_file(&source).unwrap();
+    let destination = directory.path().join("exports/hd-clip.mp4");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &Video {
+                id: "video-hd".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                path: source.to_string_lossy().into_owned(),
+                sha256: source_hash.clone(),
+                duration_s: Some(30.0),
+                fps: Some(30.0),
+                width: Some(1920),
+                height: Some(1080),
+                has_audio: true,
+                status: VideoStatus::Done,
+                indexed_at: Some(Utc::now()),
+            },
+        )
+        .unwrap();
+    store
+        .render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: "clip-hd".to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::VideoClip,
+                name: "HD clip".to_owned(),
+                schema_json: serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "video_clip",
+                    "in_s": 0.5,
+                    "out_s": 29.5,
+                    "crop": null,
+                    "grade": {"mode": "none"},
+                    "transition": {"kind": "cut"},
+                    "audio": {"mode": "mute"},
+                    "output": {"preset": "mp4-h264-sdr-v1"}
+                })
+                .to_string(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-progress-stream".to_owned(),
+                recipe_id: "clip-hd".to_owned(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "render-test",
+                    "selection_provenance": {"origin": "general"},
+                    "sources": [{
+                        "media_kind": "video",
+                        "media_id": "video-hd",
+                        "source_id": "video-hd",
+                        "sha256": source_hash,
+                        "path": source,
+                    }]
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used"
+                    }
+                })
+                .to_string(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    let cancellation = CancellationToken::default();
+    let watcher_token = cancellation.clone();
+    let watcher_root = directory.path().to_path_buf();
+    let watcher = std::thread::spawn(move || -> f64 {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            if let Some(job) = Store::open(&watcher_root)
+                .unwrap()
+                .render_job_by_id(DEFAULT_OWNER_ID, "render-progress-stream")
+                .unwrap()
+            {
+                if job.status == RenderJobStatus::Running
+                    && job.progress > 0.1
+                    && job.progress < 0.75
+                {
+                    watcher_token.cancel();
+                    return job.progress;
+                }
+                if !matches!(
+                    job.status,
+                    RenderJobStatus::Running | RenderJobStatus::Queued
+                ) {
+                    return 0.0;
+                }
+            }
+            if Instant::now() > deadline {
+                return 0.0;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+
+    let result = pipeline_with_cancellation(directory.path(), cancellation)
+        .execute_render_job(DEFAULT_OWNER_ID, "render-progress-stream");
+
+    let observed = watcher.join().unwrap();
+    assert!(
+        observed > 0.1 && observed < 0.75,
+        "the watcher must observe real intermediate ffmpeg progress; saw {observed}"
+    );
+    assert!(
+        result.is_err(),
+        "the watcher's cancellation must stop the render"
+    );
+
+    // The cancelled attempt row durably preserves the intermediate ffmpeg-driven value.
+    let job = Store::open(directory.path())
+        .unwrap()
+        .render_job_by_id(DEFAULT_OWNER_ID, "render-progress-stream")
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, RenderJobStatus::Cancelled);
+    assert!(job.progress > 0.1 && job.progress < 0.75);
+}
+
+#[cfg(target_os = "macos")]
+fn pipeline_with_cancellation(root: &Path, cancellation: CancellationToken) -> Pipeline {
+    Pipeline::new(
+        Config {
+            data_dir: Some(root.to_path_buf()),
+            ..Config::default()
+        },
+        AppPaths {
+            root: root.to_path_buf(),
+        },
+        cancellation,
+    )
+}
+
 /// TASK-035 item 1: a 60 fps AAC-priming source renders through the durable clip path with
 /// the executor's re-check using the ONE shared duration-tolerance rule
 /// (`frame_tolerance + 0.05`), so nothing the encoder accepted can fail the executor. The
