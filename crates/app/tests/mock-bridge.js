@@ -691,12 +691,15 @@
       id: "plan-hist", name: "Reel Studio · Healthy Earth", contextKey: "default",
       description: "Imported from Reel Studio recipe healthy-earth.json (historical; recipe reel-studio-healthy-earth v1)", brief: "",
       items: [{
-        mediaKind: "span", mediaId: "span-hist-1", position: 0, startS: 3.45, endS: 4.45, pacing: null, cropX: 0.42, gradeJson: null,
+        mediaKind: "span", mediaId: "span-hist-1", position: 0, startS: 3.45, endS: 4.45, pacing: null, cropX: null, gradeJson: null,
         reason: "Reel Studio segment V1-0001_S1 (historical choice)",
         signalsJson: JSON.stringify({ candidate: { kind: "span", path: video.path, start_s: 3.2, end_s: 5.95, boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0 }, historical: { source: "reel_studio", external_id: "V1-0001_S1", used_in: "reel-01" } }),
         origin: "historical", rank: null, profileVersion: null,
-        provenanceJson: JSON.stringify({ source: "reel_studio", external_id: "V1-0001_S1", boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0 }),
+        provenanceJson: JSON.stringify({ source: "reel_studio", external_id: "V1-0001_S1", boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0, imported_start_s: 3.45, imported_end_s: 4.45 }),
         addedAt: "2026-08-30T12:00:00Z",
+        // Task 037: span items are adjustable clips — the editable range is the source
+        // video, not the imported span (3.2..5.95), which is only the item's default.
+        sourceRange: { startS: 0, endS: video.durationS },
       }],
       revisions: [{ revision: 1, label: "imported from Reel Studio", createdAt: "2026-08-30T12:00:00Z" }],
       createdAt: "2026-08-30T12:00:00Z", updatedAt: "2026-08-30T12:00:00Z",
@@ -749,7 +752,13 @@
     };
   };
   const validatePlanItem = (item) => {
-    if ((item.mediaKind === "shot" || item.mediaKind === "span") && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
+    // Task 037: span items clamp to the source video range (sourceRange), not the imported
+    // span; shots stay inside their source shot (the mock's stand-in 3.2..5.95).
+    if (item.mediaKind === "shot" && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
+    if (item.mediaKind === "span") {
+      const range = item.sourceRange || { startS: 0, endS: video.durationS };
+      if (!(item.startS >= range.startS && item.endS <= range.endS && item.endS > item.startS)) throw "Clip must stay inside the source video";
+    }
     if ((item.origin === "historical" || item.origin === "imported") && item.profileVersion != null) throw "Invalid provenance";
     if ((item.origin === "personal") !== (item.profileVersion != null)) throw "Invalid provenance";
   };
@@ -802,6 +811,18 @@
         if (failPlanSave) { failPlanSave = false; throw "Disk full — plan not saved"; }
         const item = planItemFor(planFor(args.id), args);
         const updated = { ...item, ...args.patch }; validatePlanItem(updated);
+        // Task 037 parity: the real store derives the `adjusted` marker against the item's
+        // import-time boundaries (imported_start_s/imported_end_s, else the span candidate).
+        if (updated.mediaKind === "span") {
+          const provenance = (() => { try { return JSON.parse(updated.provenanceJson || "{}"); } catch { return {}; } })();
+          const candidate = (() => { try { return JSON.parse(updated.signalsJson || "{}").candidate || {}; } catch { return {}; } })();
+          const defaultStart = provenance.imported_start_s ?? candidate.start_s;
+          const defaultEnd = provenance.imported_end_s ?? candidate.end_s;
+          const matchesDefault = updated.startS === defaultStart && updated.endS === defaultEnd;
+          if (matchesDefault) { delete provenance.adjusted; delete provenance.adjusted_at; }
+          else { provenance.adjusted = true; provenance.adjusted_at = "2026-08-29T12:00:00Z"; }
+          updated.provenanceJson = JSON.stringify(provenance);
+        }
         Object.assign(item, updated); return clone(item);
       }
       case "plan_remove_item": {
@@ -897,7 +918,10 @@
         };
       }
       case "render_project_clip": {
-        const item = planItemFor(planFor(args.projectId), { assetType: "video", mediaId: args.shotId });
+        // Task 037: span clips export like shot clips — find the item by id across kinds.
+        const plan = planFor(args.projectId);
+        const item = plan.items.find((value) => value.mediaId === args.shotId && (value.mediaKind === "shot" || value.mediaKind === "span"));
+        if (!item) throw "clip not selected in this project";
         if (item.pacing != null) throw "saved pacing is not supported by single-clip export yet; remove the pacing value before rendering";
         if (item.cropX != null) throw "the saved horizontal crop cannot map exactly to this export; remove it before rendering";
         const grade = JSON.parse(item.gradeJson || "{}");
@@ -914,14 +938,16 @@
           mediaType: args.preset.startsWith("mp4") ? "video/mp4" : "video/quicktime",
           width: 1920,
           height: 1080,
-          durationS: 1.8,
+          durationS: item.endS - item.startS,
           completedAt: "2026-08-29T12:31:00Z",
         };
       }
       case "render_project_reel": {
         const plan = planFor(args.projectId);
         if (!plan.items.length) throw "add at least one clip before rendering a reel";
-        if (plan.items.some((item) => item.mediaKind !== "shot")) throw "whole-reel photo holds need a saved duration and framing contract";
+        // Task 037: imported spans render in the reel; photos still need a versioned
+        // duration and framing contract.
+        if (plan.items.some((item) => item.mediaKind === "photo")) throw "whole-reel photo holds need a saved duration and framing contract";
         return {
           jobId: "render-job-reel-demo",
           outputPath: args.destination,

@@ -296,8 +296,14 @@
     const form = $("plan-items").querySelector(`[data-asset-key="${CSS.escape(itemKey(item))}"]`);
     const draftStart = Number(form?.elements?.startS?.value ?? item.startS);
     const draftEnd = Number(form?.elements?.endS?.value ?? item.endS);
-    const sourceStart = Number.isFinite(candidate.start_s) ? candidate.start_s : item.startS;
-    const sourceEnd = Number.isFinite(candidate.end_s) ? candidate.end_s : item.endS;
+    // Span items are adjustable clips: they can move anywhere inside the source video
+    // (Task 037), so the preview range is the video, not the imported span. Shots stay
+    // inside their source shot.
+    const range = item.mediaKind === "span" && item.sourceRange ? item.sourceRange : null;
+    const sourceStart = range ? range.startS
+      : Number.isFinite(candidate.start_s) ? candidate.start_s : item.startS;
+    const sourceEnd = range ? range.endS
+      : Number.isFinite(candidate.end_s) ? candidate.end_s : item.endS;
     const start = Math.max(sourceStart, Math.min(sourceEnd, draftStart));
     const end = Math.max(sourceStart, Math.min(sourceEnd, draftEnd));
     return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : null;
@@ -338,15 +344,6 @@
     photoExport.render.textContent = `Render ${isPhoto ? "photo" : "clip"}`;
     photoExport.outputLabel.textContent = `Finished ${isPhoto ? "photo" : "clip"}`;
     clearPhotoExport(item);
-    if (item.mediaKind === "span") {
-      // Imported spans render through the reel executor, but single-clip export for them is not
-      // wired through the app yet. Keep the panel visible and honest instead of letting the
-      // render fail with a false "not selected in this project" error.
-      photoExport.preset.disabled = true;
-      photoExport.choose.disabled = true;
-      photoExport.render.disabled = true;
-      photoExport.status.textContent = "Clip export for imported clips lands with the next update — the sequence can still be rendered as a reel once span export is enabled.";
-    }
   }
   function showPhotoRenderResult(result) {
     state.photoExportResult = result;
@@ -366,17 +363,16 @@
   }
   function setPhotoExportBusy(value) {
     state.photoExportBusy = value;
-    const spanLocked = previewItem()?.mediaKind === "span";
-    photoExport.preset.disabled = value || spanLocked;
-    photoExport.choose.disabled = value || spanLocked;
-    photoExport.render.disabled = value || spanLocked || !photoExport.destination.value;
+    photoExport.preset.disabled = value;
+    photoExport.choose.disabled = value;
+    photoExport.render.disabled = value || !photoExport.destination.value;
     photoExport.progress.hidden = !value;
   }
   function setReelExportBusy(value) {
     state.reelExportBusy = value;
     reelExport.preset.disabled = value;
     reelExport.audio.disabled = value;
-    reelExport.choose.disabled = value || !state.items.length || state.items.some((item) => item.mediaKind !== "shot");
+    reelExport.choose.disabled = value || !state.items.length || state.items.some((item) => item.mediaKind === "photo");
     reelExport.render.disabled = value || !reelExport.destination.value || state.dirty.size > 0;
     reelExport.cancel.hidden = !value;
     reelExport.cancel.disabled = !value;
@@ -393,18 +389,16 @@
       reelExport.result.hidden = true;
     }
     if (!key) return;
+    // Imported spans are first-class clips (Task 037) and render in the reel; photos still
+    // need a versioned duration and framing contract.
     const hasPhotos = state.items.some((item) => item.mediaKind === "photo");
-    const hasSpans = state.items.some((item) => item.mediaKind === "span");
-    const hasUnsupportedItems = hasPhotos || hasSpans;
-    reelExport.choose.disabled = state.reelExportBusy || !state.items.length || hasUnsupportedItems;
-    reelExport.render.disabled = state.reelExportBusy || !reelExport.destination.value || state.dirty.size > 0 || !state.items.length || hasUnsupportedItems;
+    reelExport.choose.disabled = state.reelExportBusy || !state.items.length || hasPhotos;
+    reelExport.render.disabled = state.reelExportBusy || !reelExport.destination.value || state.dirty.size > 0 || !state.items.length || hasPhotos;
     reelExport.status.classList.remove("error");
     if (!state.items.length) {
       reelExport.status.textContent = "Add at least one clip before exporting a reel.";
     } else if (hasPhotos) {
       reelExport.status.textContent = "This sequence includes photos. Export those individually above; whole-reel photo timing is not enabled yet.";
-    } else if (hasSpans) {
-      reelExport.status.textContent = "This sequence is built from imported clips. Whole-reel export for imported clips lands with the next update.";
     } else if (state.dirty.size) {
       reelExport.status.textContent = "Save every clip edit before rendering so the reel matches this sequence.";
     } else if (!reelExport.destination.value) {
@@ -550,12 +544,24 @@
     form.append(heading);
     const fields = node("div", undefined, "plans-fields");
     if (isClip(item)) {
-      const basis = item.mediaKind === "span" && candidate.boundary_basis === "catalogue_tc" && candidate.boundary_tolerance_s > 0
+      const isSpan = item.mediaKind === "span";
+      // Span items are adjustable clips (Task 037): In/Out start at the imported span
+      // boundaries but can move anywhere inside the source video, so the editable range
+      // comes from the bridge's sourceRange. Shots stay inside their source shot.
+      const range = isSpan && item.sourceRange ? item.sourceRange : null;
+      const lo = range ? range.startS : candidate.start_s;
+      const hi = range ? range.endS : candidate.end_s;
+      const basis = isSpan && candidate.boundary_basis === "catalogue_tc" && candidate.boundary_tolerance_s > 0
         ? ` Imported boundaries come from the catalogue timecodes and may be off by up to ${number(candidate.boundary_tolerance_s)} s.`
         : "";
-      form.append(node("p", Number.isFinite(candidate.start_s) ? `Available source ${number(candidate.start_s)}–${number(candidate.end_s)} s. Preview and saved edits stay inside it.${basis}` : "Clip edits are validated against the source shot by the store.", "plans-muted"));
+      const available = Number.isFinite(lo) && Number.isFinite(hi)
+        ? `Available source ${number(lo)}–${number(hi)} s. ${isSpan
+          ? `In and Out start at the imported boundaries and can move anywhere inside the video.${basis}`
+          : `Preview and saved edits stay inside it.${basis}`}`
+        : "Clip edits are validated against the source shot by the store.";
+      form.append(node("p", available, "plans-muted"));
       for (const [label, name, value] of [["In (seconds)", "startS", item.startS], ["Out (seconds)", "endS", item.endS]]) {
-        fields.append(input(label, name, value, { type: "number", min: candidate.start_s ?? 0, ...(candidate.end_s != null ? { max: candidate.end_s } : {}), step: "any", required: true }));
+        fields.append(input(label, name, value, { type: "number", min: lo ?? 0, ...(hi != null ? { max: hi } : {}), step: "any", required: true }));
       }
     }
     form.append(fields, input("Edit note", "reason", item.reason, { multiline: true }));
@@ -825,7 +831,7 @@
     renderReelExport();
   });
   reelExport.choose.addEventListener("click", async () => {
-    if (state.reelExportBusy || !state.plan || !state.items.length || state.items.some((item) => item.mediaKind !== "shot")) return;
+    if (state.reelExportBusy || !state.plan || !state.items.length || state.items.some((item) => item.mediaKind === "photo")) return;
     const preset = presetFacts[reelExport.preset.value];
     if (!preset) return;
     const projectName = String(state.plan.name || "project").trim().replace(/[^a-z0-9_-]+/gi, "-").replace(/^-|-$/g, "") || "project";

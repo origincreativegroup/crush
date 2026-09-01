@@ -8,7 +8,7 @@ mod macos {
         Arc, Mutex, MutexGuard,
     };
 
-    use anyhow::{ensure, Context};
+    use anyhow::{bail, ensure, Context};
     use crush_core::cancellation::CancellationToken;
     use crush_core::job::JobRecord;
     use crush_core::models::{self, ModelStatus};
@@ -2002,6 +2002,13 @@ mod macos {
 
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
+    struct SourceRangeView {
+        start_s: f64,
+        end_s: f64,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct PlanItemView {
         media_kind: String,
         media_id: String,
@@ -2018,6 +2025,10 @@ mod macos {
         profile_version: Option<i64>,
         provenance_json: String,
         added_at: String,
+        /// For span items: the range In/Out can move inside — the source video
+        /// (0..duration), not the imported span, which is only the item's default
+        /// (Task 037). Shot items keep their candidate range; photos carry none.
+        source_range: Option<SourceRangeView>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -2468,10 +2479,13 @@ mod macos {
         let project = store
             .plan_get(DEFAULT_OWNER_ID, project_id)?
             .with_context(|| format!("project {project_id} was not found"))?;
+        // Task 037: imported spans are first-class clips, so per-item clip export accepts
+        // them alongside shots.
         let selected = store
             .plan_items(DEFAULT_OWNER_ID, project_id)?
             .into_iter()
-            .find(|item| item.media_kind == MediaKind::Shot && item.media_id == shot_id)
+            .find(|item| item.media_id == shot_id)
+            .filter(|item| matches!(item.media_kind, MediaKind::Shot | MediaKind::Span))
             .with_context(|| format!("clip {shot_id} is not selected in this project"))?;
         ensure!(
             selected.pacing.is_none(),
@@ -2492,21 +2506,56 @@ mod macos {
             "the selected clip's Out point must be after its In point"
         );
         let grade = clip_grade_from_plan(selected.grade_json.as_deref())?;
-        let shot = store
-            .shot_by_id(DEFAULT_OWNER_ID, shot_id)?
-            .with_context(|| format!("clip {shot_id} was not found"))?;
-        ensure!(
-            start_s >= shot.start_s && end_s <= shot.end_s,
-            "the selected clip's saved In and Out points must stay inside its source shot"
-        );
-        let video = store
-            .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
-            .with_context(|| format!("source video {} was not found", shot.video_id))?;
-        let annotation = store.editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, shot_id)?;
-        ensure!(
-            !annotation.is_some_and(|value| !value.usable || value.blur_required),
-            "this clip is flagged unusable or blur-required and cannot be rendered"
-        );
+        // Task 037: span clips validate against the source video (0..duration) — the
+        // imported span is the item's default, not a limit — and honour the catalogue's
+        // unusable/blur-required evidence like the shot annotation gate does.
+        let (media_kind, media_id, video) = match selected.media_kind {
+            MediaKind::Shot => {
+                let shot = store
+                    .shot_by_id(DEFAULT_OWNER_ID, shot_id)?
+                    .with_context(|| format!("clip {shot_id} was not found"))?;
+                ensure!(
+                    start_s >= shot.start_s && end_s <= shot.end_s,
+                    "the selected clip's saved In and Out points must stay inside its source shot"
+                );
+                let annotation =
+                    store.editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, shot_id)?;
+                ensure!(
+                    !annotation.is_some_and(|value| !value.usable || value.blur_required),
+                    "this clip is flagged unusable or blur-required and cannot be rendered"
+                );
+                let video = store
+                    .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
+                    .with_context(|| format!("source video {} was not found", shot.video_id))?;
+                ("shot", shot.id, video)
+            }
+            MediaKind::Span => {
+                let span = store
+                    .manual_span_by_id(DEFAULT_OWNER_ID, shot_id)?
+                    .with_context(|| format!("clip {shot_id} was not found"))?;
+                let video = store
+                    .video_by_id(DEFAULT_OWNER_ID, &span.video_id)?
+                    .with_context(|| format!("source video {} was not found", span.video_id))?;
+                let duration = video.duration_s.with_context(|| {
+                    format!(
+                        "clip {shot_id} source video {} has no known duration; re-index it \
+                         before rendering",
+                        span.video_id
+                    )
+                })?;
+                ensure!(
+                    start_s >= 0.0 && end_s <= duration + 0.001,
+                    "the selected clip's saved In and Out points must stay inside its source \
+                     video 0..{duration:.3}"
+                );
+                ensure!(
+                    span.usable && !span.blur_required,
+                    "this clip is flagged unusable or blur-required and cannot be rendered"
+                );
+                ("span", span.id, video)
+            }
+            MediaKind::Photo => bail!("photos export through the photo path, not as clips"),
+        };
 
         let recipe_id = format!("crush-video-clip-{}", Uuid::new_v4());
         let recipe = RenderRecipe {
@@ -2542,8 +2591,8 @@ mod macos {
                     "profile_version": selected.profile_version,
                 },
                 "sources": [{
-                    "media_kind": "shot",
-                    "media_id": shot.id,
+                    "media_kind": media_kind,
+                    "media_id": media_id,
                     "source_id": video.id,
                     "sha256": video.sha256,
                     "path": video.path,
@@ -2613,11 +2662,6 @@ mod macos {
         let mut sources = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             ensure!(
-                item.media_kind == MediaKind::Shot,
-                "item {} is a photo; whole-reel photo holds need a saved duration and framing contract, so export it individually for now",
-                index + 1
-            );
-            ensure!(
                 item.pacing.is_none(),
                 "item {} has pacing that the current reel renderer cannot reproduce",
                 index + 1
@@ -2644,27 +2688,72 @@ mod macos {
                 "item {} needs an Out point after its In point",
                 index + 1
             );
-            let shot = store
-                .shot_by_id(DEFAULT_OWNER_ID, &item.media_id)?
-                .with_context(|| format!("clip {} was not found", item.media_id))?;
-            ensure!(
-                start_s >= shot.start_s && end_s <= shot.end_s,
-                "item {} boundaries must stay inside its source shot",
-                index + 1
-            );
-            let annotation =
-                store.editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, &shot.id)?;
-            ensure!(
-                !annotation.is_some_and(|value| !value.usable || value.blur_required),
-                "item {} is flagged unusable or blur-required and cannot be rendered",
-                index + 1
-            );
-            let video = store
-                .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
-                .with_context(|| format!("source video {} was not found", shot.video_id))?;
+            // Task 037: imported spans are first-class clips — the reel path renders them
+            // against the source video (0..duration), not the imported span, which is only
+            // the item's default. Photos still need a versioned duration/framing contract.
+            let (media_kind, media_id, video) = match item.media_kind {
+                MediaKind::Photo => bail!(
+                    "item {} is a photo; whole-reel photo holds need a saved duration and framing contract, so export it individually for now",
+                    index + 1
+                ),
+                MediaKind::Shot => {
+                    let shot = store
+                        .shot_by_id(DEFAULT_OWNER_ID, &item.media_id)?
+                        .with_context(|| format!("clip {} was not found", item.media_id))?;
+                    ensure!(
+                        start_s >= shot.start_s && end_s <= shot.end_s,
+                        "item {} boundaries must stay inside its source shot",
+                        index + 1
+                    );
+                    let annotation = store
+                        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, &shot.id)?;
+                    ensure!(
+                        !annotation.is_some_and(|value| !value.usable || value.blur_required),
+                        "item {} is flagged unusable or blur-required and cannot be rendered",
+                        index + 1
+                    );
+                    let video = store
+                        .video_by_id(DEFAULT_OWNER_ID, &shot.video_id)?
+                        .with_context(|| {
+                            format!("source video {} was not found", shot.video_id)
+                        })?;
+                    ("shot", shot.id, video)
+                }
+                MediaKind::Span => {
+                    let span = store
+                        .manual_span_by_id(DEFAULT_OWNER_ID, &item.media_id)?
+                        .with_context(|| format!("clip {} was not found", item.media_id))?;
+                    let video = store
+                        .video_by_id(DEFAULT_OWNER_ID, &span.video_id)?
+                        .with_context(|| {
+                            format!("source video {} was not found", span.video_id)
+                        })?;
+                    let duration = video.duration_s.with_context(|| {
+                        format!(
+                            "item {} source video {} has no known duration; re-index it \
+                             before rendering",
+                            index + 1,
+                            span.video_id
+                        )
+                    })?;
+                    ensure!(
+                        start_s >= 0.0 && end_s <= duration + 0.001,
+                        "item {} boundaries must stay inside its source video 0..{duration:.3}",
+                        index + 1
+                    );
+                    // Imported spans carry the catalogue's safety evidence; the same
+                    // unusable/blur-required gate that applies to shots applies here.
+                    ensure!(
+                        span.usable && !span.blur_required,
+                        "item {} is flagged unusable or blur-required and cannot be rendered",
+                        index + 1
+                    );
+                    ("span", span.id, video)
+                }
+            };
             sources.push(serde_json::json!({
-                "media_kind": "shot",
-                "media_id": shot.id,
+                "media_kind": media_kind,
+                "media_id": media_id,
                 "source_id": video.id,
                 "sha256": video.sha256,
                 "path": video.path,
@@ -2752,8 +2841,26 @@ mod macos {
         })
     }
 
-    fn plan_item_view(item: PlanItem) -> PlanItemView {
-        PlanItemView {
+    fn plan_item_view(store: &Store, item: PlanItem) -> anyhow::Result<PlanItemView> {
+        // Span items are adjustable clips: their editable range is the source video's
+        // (0..duration), resolved through the span. Unknown durations carry no range and
+        // the store refuses edits for them with a clear error.
+        let source_range = if item.media_kind == MediaKind::Span {
+            let span = store.manual_span_by_id(DEFAULT_OWNER_ID, &item.media_id)?;
+            let video = match span {
+                Some(span) => store.video_by_id(DEFAULT_OWNER_ID, &span.video_id)?,
+                None => None,
+            };
+            video
+                .and_then(|video| video.duration_s)
+                .map(|duration| SourceRangeView {
+                    start_s: 0.0,
+                    end_s: duration,
+                })
+        } else {
+            None
+        };
+        Ok(PlanItemView {
             media_kind: match item.media_kind {
                 MediaKind::Photo => "photo".to_owned(),
                 MediaKind::Shot => "shot".to_owned(),
@@ -2778,7 +2885,8 @@ mod macos {
             profile_version: item.profile_version,
             provenance_json: item.provenance_json,
             added_at: item.added_at.to_rfc3339(),
-        }
+            source_range,
+        })
     }
 
     fn parse_plan_origin(origin: Option<&str>) -> anyhow::Result<PlanOrigin> {
@@ -2864,11 +2972,11 @@ mod macos {
     fn plan_items(id: String, state: State<'_, RuntimeState>) -> CommandResult<Vec<PlanItemView>> {
         command_result((|| {
             let store = Store::open(&state.paths.root)?;
-            Ok(store
+            store
                 .plan_items(DEFAULT_OWNER_ID, &id)?
                 .into_iter()
-                .map(plan_item_view)
-                .collect())
+                .map(|item| plan_item_view(&store, item))
+                .collect::<anyhow::Result<Vec<_>>>()
         })())
     }
 
@@ -2911,7 +3019,7 @@ mod macos {
                 .into_iter()
                 .find(|stored| stored.media_id == media_id && stored.media_kind == media_kind)
                 .context("stored plan item was not found after insert")?;
-            Ok(plan_item_view(stored))
+            plan_item_view(&store, stored)
         })())
     }
 
@@ -2945,7 +3053,7 @@ mod macos {
                 .into_iter()
                 .find(|stored| stored.media_id == media_id && stored.media_kind == media_kind)
                 .context("stored plan item was not found after update")?;
-            Ok(plan_item_view(stored))
+            plan_item_view(&store, stored)
         })())
     }
 
@@ -2985,11 +3093,11 @@ mod macos {
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             store.plan_reorder_items(DEFAULT_OWNER_ID, &id, &ordered)?;
-            Ok(store
+            store
                 .plan_items(DEFAULT_OWNER_ID, &id)?
                 .into_iter()
-                .map(plan_item_view)
-                .collect())
+                .map(|item| plan_item_view(&store, item))
+                .collect::<anyhow::Result<Vec<_>>>()
         })())
     }
 
@@ -3070,11 +3178,11 @@ mod macos {
         command_result((|| {
             let mut store = Store::open(&state.paths.root)?;
             store.plan_restore_revision(DEFAULT_OWNER_ID, &id, revision)?;
-            Ok(store
+            store
                 .plan_items(DEFAULT_OWNER_ID, &id)?
                 .into_iter()
-                .map(plan_item_view)
-                .collect())
+                .map(|item| plan_item_view(&store, item))
+                .collect::<anyhow::Result<Vec<_>>>()
         })())
     }
 
