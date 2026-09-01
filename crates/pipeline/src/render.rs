@@ -453,13 +453,26 @@ impl Pipeline {
         ensure!(!self.cancellation.is_cancelled(), "reel render cancelled");
 
         let mut source_evidence = Vec::with_capacity(sources.snapshots.len());
+        // After-pass source-hash memo: each distinct source path is re-read and hashed once
+        // per attempt (not once per item). This is deliberately a FRESH read — the point of
+        // hash_after is to measure that the bytes did not change while the render ran, so it
+        // never reuses the before-pass memoized values.
+        let mut hash_after_cache: BTreeMap<PathBuf, String> = BTreeMap::new();
         for snapshot in &sources.snapshots {
             let path = sources
                 .resolved_paths
                 .get(&snapshot.media_id)
                 .context("resolved reel source path is missing")?;
-            let hash_after = sha256_file(path)
-                .with_context(|| format!("failed to recheck reel source {}", path.display()))?;
+            let hash_after = match hash_after_cache.get(path) {
+                Some(hash) => hash.clone(),
+                None => {
+                    let hash = sha256_file(path).with_context(|| {
+                        format!("failed to recheck reel source {}", path.display())
+                    })?;
+                    hash_after_cache.insert(path.clone(), hash.clone());
+                    hash
+                }
+            };
             ensure!(
                 hash_after.eq_ignore_ascii_case(&snapshot.sha256),
                 "reel source changed while it was rendering"
@@ -1340,6 +1353,11 @@ fn resolve_reel_v1_sources(
     };
     let mut resolved_paths = BTreeMap::new();
     let mut items = Vec::with_capacity(plan_items.len());
+    // Before-pass source-hash memo: a reel that cuts several items from one source video
+    // hashes that file once per distinct path, not once per item. (The after-pass keeps its
+    // own memo in execute_reel_attempt — sharing this map with it would fabricate the
+    // "sources unchanged while rendering" evidence instead of measuring it.)
+    let mut hash_before_cache: BTreeMap<PathBuf, String> = BTreeMap::new();
     for (index, item) in plan_items.iter().enumerate() {
         let snapshot = by_media_id.remove(&item.media_id).with_context(|| {
             format!(
@@ -1404,8 +1422,15 @@ fn resolve_reel_v1_sources(
         }
         let path = PathBuf::from(video.path);
         ensure!(path.is_absolute(), "library video path is not absolute");
-        let hash_before = sha256_file(&path)
-            .with_context(|| format!("failed to hash reel source {}", path.display()))?;
+        let hash_before = match hash_before_cache.get(&path) {
+            Some(hash) => hash.clone(),
+            None => {
+                let hash = sha256_file(&path)
+                    .with_context(|| format!("failed to hash reel source {}", path.display()))?;
+                hash_before_cache.insert(path.clone(), hash.clone());
+                hash
+            }
+        };
         ensure!(
             hash_before.eq_ignore_ascii_case(&snapshot.sha256),
             "reel source bytes changed after this render was queued"
@@ -1763,7 +1788,10 @@ fn verified_publication_matches(output: &RenderOutput) -> anyhow::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("failed to inspect published output {}", output_path.display())
+                format!(
+                    "failed to inspect published output {}",
+                    output_path.display()
+                )
             })
         }
     }
@@ -1999,7 +2027,11 @@ mod tests {
         assert!(!verified_publication_matches(&truncated).unwrap());
 
         let missing = RenderOutput {
-            output_path: directory.path().join("gone.png").to_string_lossy().into_owned(),
+            output_path: directory
+                .path()
+                .join("gone.png")
+                .to_string_lossy()
+                .into_owned(),
             ..output.clone()
         };
         assert!(!verified_publication_matches(&missing).unwrap());

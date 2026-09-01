@@ -462,3 +462,66 @@ fn ordered_reel_never_overwrites_a_staging_destination() {
     assert!(error.to_string().contains("already exists"));
     assert_eq!(std::fs::read(&output).unwrap(), b"another job");
 }
+
+/// TASK-035: a reel cutting two items from ONE source performs exactly one ffprobe per
+/// distinct source. Before the probe cache, one reel like this probed the same file six
+/// times (topology check + item loop + item renderer, per item). The counting wrapper
+/// ffprobe logs every invocation and delegates to the real sidecar, so every verification
+/// still runs on real probe data.
+#[test]
+fn reel_probes_each_distinct_source_once() {
+    let temporary = tempfile::tempdir().unwrap();
+    let resolved = ffmpeg::resolve().expect("reel fixture tests require sidecars/get-sidecars.sh");
+    let log = temporary.path().join("probes.log");
+    let wrapper = temporary.path().join("counting-ffprobe");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {}\nexec \"{}\" \"$@\"\n",
+            log.display(),
+            resolved.ffprobe_path.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = wrapper.metadata().unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).unwrap();
+    }
+    let runner = Runner::new(
+        ffmpeg::Resolved {
+            path: resolved.path.clone(),
+            ffprobe_path: wrapper.clone(),
+            source: resolved.source,
+        },
+        2,
+        "probe-count-test",
+    )
+    .with_debug_dir(temporary.path().join("debug"));
+
+    let source = fixture("synthetic-speech.mp4");
+    let output = temporary.path().join("probe-dedup-reel.mp4");
+    let request = ResolvedReelRequest {
+        items: vec![item(&source, 0.25, 1.25), item(&source, 3.25, 4.25)],
+        format: ReelFormat::Source,
+        music: None,
+        master_volume: 1.0,
+        watermark: None,
+        cover: None,
+        output: ClipOutputPreset::Mp4H264SdrV1,
+    };
+
+    let result = runner.render_reel(&request, &output).unwrap();
+
+    assert_eq!(result.item_verifications.len(), 2);
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    let source_probes = log_text
+        .lines()
+        .filter(|line| line.ends_with(source.to_string_lossy().as_ref()))
+        .count();
+    assert_eq!(
+        source_probes, 1,
+        "one ffprobe per distinct source per reel, not one per item"
+    );
+}

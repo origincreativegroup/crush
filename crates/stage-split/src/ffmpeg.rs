@@ -1,6 +1,8 @@
 //! Bundled FFmpeg/FFprobe resolution and the five supported video operations.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -552,6 +554,11 @@ pub struct Runner {
     threads: usize,
     job_id: String,
     debug_dir: Option<PathBuf>,
+    /// `-encoders`/`-filters` listings captured once per Runner lifetime. A Runner is created
+    /// per render job, so a clip render that checks several filters queries each listing at
+    /// most once instead of spawning one `ffmpeg -encoders`/`-filters` per check. The cache
+    /// is deliberately not process-wide: it must never outlive the ffmpeg binary it listed.
+    capability_listings: RefCell<HashMap<&'static str, String>>,
 }
 
 impl Runner {
@@ -561,6 +568,7 @@ impl Runner {
             threads: effective_threads(configured_threads),
             job_id: job_id.into(),
             debug_dir: None,
+            capability_listings: RefCell::new(HashMap::new()),
         }
     }
 
@@ -971,7 +979,9 @@ impl Runner {
     /// own command shape, while reel items must pin an exact output frame count and a
     /// zero-based video timeline so the concat assembly lands cuts on frame boundaries.
     ///
-    /// Frame contract, computed by the caller from the source probe:
+    /// The caller supplies the source probe (`source_probe`), so a reel that cuts several
+    /// items from one source video performs one ffprobe per distinct source, not one per
+    /// item. The frame contract is computed from that probe:
     /// - input-side `-ss` lands on the first source frame at or after `in_s` (the caller
     ///   subtracts a microsecond-scale epsilon so an `in_s` exactly on a frame boundary is
     ///   never rounded past that frame by FFmpeg's microsecond seek parsing);
@@ -991,6 +1001,7 @@ impl Runner {
     pub(crate) fn render_reel_item_with_control<F>(
         &self,
         input: &Path,
+        source_probe: &Probe,
         spec: &ReelItemRenderSpec,
         staging_output: &Path,
         cancellation: &CancellationToken,
@@ -1007,8 +1018,6 @@ impl Runner {
         }
         self.require_ffmpeg_component("-encoders", "h264_videotoolbox", "video encoder")?;
 
-        let source_operation = self.probe(input)?;
-        let source_probe = source_operation.value;
         if source_probe.width == 0 || source_probe.height == 0 {
             return Err(Error::InvalidProbe(
                 "reel item source has no video stream".to_owned(),
@@ -1187,18 +1196,29 @@ impl Runner {
 
     fn require_ffmpeg_component(
         &self,
-        listing_flag: &str,
+        listing_flag: &'static str,
         component: &str,
         capability_kind: &str,
     ) -> Result<()> {
-        let spec = CommandSpec::new(&self.resolved.path).args(["-hide_banner", listing_flag]);
-        let output =
-            self.run_capture(&spec, false)
-                .map_err(|error| Error::CapabilityUnavailable {
-                    capability: format!("{capability_kind} {component}"),
-                    reason: format!("could not query bundled FFmpeg: {error}"),
+        let cached = self.capability_listings.borrow().get(listing_flag).cloned();
+        let listing = match cached {
+            Some(listing) => listing,
+            None => {
+                let spec =
+                    CommandSpec::new(&self.resolved.path).args(["-hide_banner", listing_flag]);
+                let output = self.run_capture(&spec, false).map_err(|error| {
+                    Error::CapabilityUnavailable {
+                        capability: format!("{capability_kind} {component}"),
+                        reason: format!("could not query bundled FFmpeg: {error}"),
+                    }
                 })?;
-        if component_listing_contains(&output.stdout, component) {
+                self.capability_listings
+                    .borrow_mut()
+                    .insert(listing_flag, output.stdout.clone());
+                output.stdout
+            }
+        };
+        if component_listing_contains(&listing, component) {
             Ok(())
         } else {
             Err(Error::CapabilityUnavailable {
@@ -2604,6 +2624,81 @@ mod tests {
         assert!(component_listing_contains(listing, "aac"));
         assert!(component_listing_contains(listing, "exposure"));
         assert!(!component_listing_contains(listing, "libx264"));
+    }
+
+    /// TASK-035: `-encoders`/`-filters` listings are captured once per Runner lifetime. A
+    /// counting fake ffmpeg proves repeated capability checks reuse the cached listing, that a
+    /// missing component still fails closed (fresh and cached), and that a NEW Runner
+    /// re-queries — the cache must never outlive the binary it listed.
+    #[test]
+    fn capability_listings_are_cached_per_runner_and_fail_closed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let log = temporary.path().join("invocations.log");
+        let script = temporary.path().join("ffmpeg");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> {}\nif [ \"$2\" = -encoders ]; then\n  printf ' V....D h264_videotoolbox VideoToolbox H.264\\n A....D aac AAC\\n'\nelif [ \"$2\" = -filters ]; then\n  printf ' TSC exposure V->V\\n'\nfi\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = script.metadata().unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).unwrap();
+        }
+        let resolved = Resolved {
+            path: script.clone(),
+            ffprobe_path: script.clone(),
+            source: Source::Path,
+        };
+        let runner = Runner::new(resolved.clone(), 1, "capability-cache");
+
+        for _ in 0..3 {
+            runner
+                .require_ffmpeg_component("-encoders", "h264_videotoolbox", "video encoder")
+                .unwrap();
+        }
+        for _ in 0..2 {
+            runner
+                .require_ffmpeg_component("-filters", "exposure", "video filter")
+                .unwrap();
+        }
+        let invocations = fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            invocations.matches("-encoders").count(),
+            1,
+            "one -encoders listing per Runner"
+        );
+        assert_eq!(
+            invocations.matches("-filters").count(),
+            1,
+            "one -filters listing per Runner"
+        );
+
+        // A missing component fails closed on the fresh listing and again from the cache.
+        for _ in 0..2 {
+            let error = runner
+                .require_ffmpeg_component("-filters", "libx264", "video filter")
+                .unwrap_err();
+            assert!(matches!(error, Error::CapabilityUnavailable { .. }));
+        }
+
+        // A new Runner re-queries: per-Runner cache, not process-wide.
+        let fresh = Runner::new(resolved, 1, "capability-fresh");
+        fresh
+            .require_ffmpeg_component("-encoders", "aac", "audio encoder")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .matches("-encoders")
+                .count(),
+            2,
+            "a fresh Runner must query the listing again"
+        );
     }
 
     #[test]

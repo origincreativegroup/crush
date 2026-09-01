@@ -27,6 +27,7 @@ use crate::ffmpeg::{
     BasicVideoGrade, CancellationToken, ClipAudio, ClipOutputPreset, Error, NormalizedVideoCrop,
     Probe, Progress, ReelItemRenderSpec, Result, Runner, VideoGrade,
 };
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -316,13 +317,26 @@ impl Runner {
             SupportedAudio::Mute => ClipAudio::Mute,
         };
 
+        // One ffprobe per distinct source per reel: a reel that cuts several items from one
+        // source video probes that file once. The cache is per render call, never per Runner,
+        // so a re-render of a changed source always re-probes.
+        let mut probe_cache: HashMap<PathBuf, Probe> = HashMap::new();
+        let mut probe_cached = |path: &Path| -> Result<Probe> {
+            if let Some(probe) = probe_cache.get(path) {
+                return Ok(probe.clone());
+            }
+            let probe = self.probe(path)?.value;
+            probe_cache.insert(path.to_path_buf(), probe.clone());
+            Ok(probe)
+        };
+
         // Source-audio assembly decodes every item's audio and encodes one reel track, so the
         // items must share one audio topology. Silence insertion and a true audio mix graph
         // are separate capabilities and must not be inferred here.
         let mut audio_sample_rate = None;
         if validated.audio == SupportedAudio::Source {
             for item in &request.items {
-                let probe = self.probe(&item.source_path)?.value;
+                let probe = probe_cached(&item.source_path)?;
                 if !probe.has_audio {
                     return Err(unsupported(
                         "reel source-audio topology",
@@ -368,7 +382,7 @@ impl Runner {
             .zip(validated.grades.iter().copied())
             .enumerate()
         {
-            let source_probe = self.probe(&item.source_path)?.value;
+            let source_probe = probe_cached(&item.source_path)?;
             let plan = plan_item_frames(item.in_s, item.out_s, source_probe.fps)?;
             let item_output = private_render
                 .path()
@@ -383,6 +397,7 @@ impl Runner {
             };
             let rendered = self.render_reel_item_with_control(
                 &item.source_path,
+                &source_probe,
                 &ReelItemRenderSpec {
                     in_s: item.in_s,
                     out_s: item.out_s,
