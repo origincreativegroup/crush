@@ -4400,6 +4400,14 @@ impl Store {
     /// removed by the cleanup trigger like every other kind of evidence; they are never
     /// silently rewritten, and the render-time clamp still refuses an item that no longer
     /// fits its shot.
+    ///
+    /// One deliberate exception: the stable id covers the index and start but NOT `end_s`
+    /// or `rep_frame_s`, so a re-cut that moves a cut boundary changes what a surviving
+    /// shot shows while its id survives. When a survivor's `end_s` or `rep_frame_s`
+    /// changed, its `shot_vectors` row is deleted in the same transaction (the same
+    /// discipline as the vanished-shot cascade), so the next embed pass re-embeds it —
+    /// `embed_missing_shots` skips shots that already have a vector. No other evidence is
+    /// touched; see the honest assessment note in the store test.
     pub fn replace_shots(
         &mut self,
         owner_id: &str,
@@ -4475,6 +4483,18 @@ impl Store {
                 };
                 if *stored == candidate {
                     continue;
+                }
+                // The stable id does not cover end_s or rep_frame_s: a re-cut that moves a
+                // cut boundary or rep frame changes what this shot shows while its id
+                // survives, so the stored vector describes the pre-recut rep frame. Drop
+                // it in this same transaction (the same discipline as the vanished-shot
+                // cascade) so the next embed pass re-embeds the shot instead of skipping
+                // it as "already vectorized".
+                if stored.end_s != shot.end_s || stored.rep_frame_s != shot.rep_frame_s {
+                    transaction.execute(
+                        "DELETE FROM shot_vectors WHERE owner_id = ?1 AND shot_id = ?2",
+                        params![owner_id, shot.id],
+                    )?;
                 }
                 statement.execute(params![
                     owner_id,

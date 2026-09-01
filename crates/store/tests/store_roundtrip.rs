@@ -5383,6 +5383,104 @@ fn resplit_preserves_shot_evidence_and_cleans_only_vanished_shots() {
         VideoStatus::Split
     );
 
+    // 3) A survivor whose END boundary moved but whose stable id returned. The stable id
+    //    covers the index and start but not end_s or rep_frame_s, so the id survives, the
+    //    row is updated in place — and the stored vector now describes the pre-recut rep
+    //    frame. replace_shots deletes that vector row in the same transaction, so the
+    //    next embed pass re-embeds this shot (embed_missing_shots skips shots that
+    //    already have a vector). Every other kind of evidence survives, exactly like the
+    //    vanished-shot discipline promises.
+    //
+    //    Honest knock-on limit, verified against `video_assessments_current`
+    //    (pipeline lib.rs): the aesthetic assessment describes the pre-recut rep frame
+    //    too, but that staleness check keys only on the assessment's presence and model
+    //    version — NOT on vectors. So the stale assessment still reads as "current" and
+    //    the analyze-staleness machinery will NOT refresh it on its own; a re-analyze
+    //    (or a model-version bump) is the manual path. The vector is the only
+    //    automatically invalidated artifact here, and the deletion is only same-
+    //    transaction-atomic by construction (it rides the replace_shots transaction).
+    let mut re_cut_survivor = shot("shot-ev-0", "video-ev", 0);
+    re_cut_survivor.end_s = 1.5;
+    // Rebuild the second shot with the exact values it got in step 2 so only the
+    // survivor's boundary changes in this step.
+    let mut kept_second = shot("shot-ev-1b", "video-ev", 1);
+    kept_second.start_s = 1.25;
+    kept_second.end_s = 2.0;
+    kept_second.rep_frame_s = 1.6;
+    store
+        .replace_shots(
+            DEFAULT_OWNER_ID,
+            "video-ev",
+            &[re_cut_survivor, kept_second],
+        )
+        .unwrap();
+
+    let survivor_row = store
+        .shot_by_id(DEFAULT_OWNER_ID, "shot-ev-0")
+        .unwrap()
+        .expect("the surviving id must still resolve");
+    assert_eq!(survivor_row.end_s, 1.5, "the new boundary lands on the row");
+    assert_eq!(
+        survivor_row.rep_frame_s, 0.4,
+        "only the fields that changed are rewritten"
+    );
+    assert_eq!(
+        store
+            .feedback_events(DEFAULT_OWNER_ID)
+            .unwrap()
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fb-ev-0"],
+        "feedback on the changed survivor stays"
+    );
+    assert!(store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(
+        store
+            .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+            .unwrap()
+            .is_some(),
+        "the (stale, per the comment above) assessment row survives — it is not \
+         auto-refreshed, only the vector is invalidated"
+    );
+    assert!(
+        store
+            .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-0")
+            .unwrap()
+            .is_none(),
+        "the vector described the pre-recut rep frame; it must be gone so the next \
+         embed pass re-embeds the survivor"
+    );
+    assert!(
+        store
+            .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-1b")
+            .unwrap()
+            .is_none(),
+        "the re-cut newcomer never had a vector"
+    );
+    assert_eq!(
+        store
+            .plan_items(DEFAULT_OWNER_ID, "plan-ev")
+            .unwrap()
+            .iter()
+            .map(|item| item.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-ev-0"],
+        "the plan item on the changed survivor stays (its in/out still fit the shot)"
+    );
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-ev")
+            .unwrap()
+            .iter()
+            .map(|item| item.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-ev-0"]
+    );
+
     // Owner isolation is unchanged: another owner can neither see nor replace these shots.
     assert!(store
         .shot_by_id("someone-else", "shot-ev-0")
@@ -5438,6 +5536,43 @@ fn relink_updates_the_row_path_only_after_verifying_the_recorded_hash() {
     assert!(store
         .relink_video("someone-else", "video-rl", "/x", "sha-rl")
         .is_err());
+
+    // The empty-STORED-hash branch (fail closed from the other side): even a verified
+    // caller hash cannot relink a row that has no recorded sha256 to compare against.
+    {
+        let connection = Connection::open(store.db_path()).unwrap();
+        connection
+            .execute(
+                "UPDATE videos SET sha256 = '' WHERE owner_id = ?1 AND id = ?2",
+                rusqlite::params![DEFAULT_OWNER_ID, "video-rl"],
+            )
+            .unwrap();
+    }
+    let empty_stored = store
+        .relink_video(DEFAULT_OWNER_ID, "video-rl", "/x", "sha-rl")
+        .unwrap_err();
+    assert!(
+        format!("{empty_stored:#}").contains("no recorded sha256"),
+        "an empty stored hash must refuse with the honest fail-closed reason: {empty_stored:#}"
+    );
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, "video-rl")
+            .unwrap()
+            .unwrap()
+            .path,
+        "/footage/video-rl.mov",
+        "the refused relink leaves the row untouched"
+    );
+    {
+        let connection = Connection::open(store.db_path()).unwrap();
+        connection
+            .execute(
+                "UPDATE videos SET sha256 = 'sha-rl' WHERE owner_id = ?1 AND id = ?2",
+                rusqlite::params![DEFAULT_OWNER_ID, "video-rl"],
+            )
+            .unwrap();
+    }
 
     // A verified relink updates only the path on the existing identity row.
     let relinked = store
