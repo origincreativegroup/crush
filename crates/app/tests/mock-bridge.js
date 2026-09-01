@@ -60,6 +60,18 @@
     lastError: null,
     sourceMissing: false,
   };
+  const photoTwo = {
+    ...photo,
+    id: "photo-two",
+    path: "/Volumes/Photos/Campaign/alt.jpg",
+    indexedAt: "2026-08-28T12:03:00Z",
+  };
+  const photoThree = {
+    ...photo,
+    id: "photo-three",
+    path: "/Volumes/Photos/Campaign/third.jpg",
+    indexedAt: "2026-08-28T12:04:00Z",
+  };
 
   const library = {
     empty: () => [],
@@ -76,6 +88,9 @@
     // authoritative state even if a list refresh arrives out of order.
     "recovered-row": () => [{ ...video, lastError: "Older failure" }],
     "photo-row": () => [{ ...video }, { ...photo }],
+    // Four rows so click / ⌘-click / Shift-click ranges and the all-photo boundary all
+    // have room: two photos, one video, one more photo (Task 039 C5).
+    "library-multiselect": () => [{ ...photo }, { ...photoTwo }, { ...video }, { ...photoThree }],
     "search-error": () => [{ ...video }],
     "dam-home": () => [{ ...video }, { ...photo }],
     feedback: () => [{ ...video }],
@@ -465,6 +480,7 @@
     "library-collections",
     "library-feedback",
     "library-flags",
+    "library-multiselect",
     "library-saved-search",
     "compare-view",
     "compare-advance",

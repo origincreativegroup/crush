@@ -1174,6 +1174,21 @@ nav {
   gap: var(--space-4);
 }
 
+/* Library batch bar hint (Task 039 C5): shown while a video sits in the selection —
+   editorial batch actions are photo-scoped and the bar says so instead of silently
+   skipping rows. */
+.batch-hint {
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Header select-all checkbox for the Library table (Task 039 C5). */
+.video-table th.select-column input[type="checkbox"] {
+  display: block;
+  margin: 0 auto;
+  accent-color: var(--accent);
+}
+
 .review-content {
   height: calc(100vh - var(--toolbar-height));
   overflow: auto;

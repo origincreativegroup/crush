@@ -59,6 +59,21 @@ const elements = {
   videoRows: document.querySelector("#video-rows"),
   indexingStatus: document.querySelector("#indexing-status"),
   libraryMessage: document.querySelector("#library-message"),
+  libraryView: document.querySelector("#library-view"),
+  selectAll: document.querySelector("#library-select-all"),
+  batchBar: document.querySelector("#library-batch-bar"),
+  batchCount: document.querySelector("#library-batch-count"),
+  batchPick: document.querySelector("#library-batch-pick"),
+  batchReject: document.querySelector("#library-batch-reject"),
+  batchRating: document.querySelector("#library-batch-rating"),
+  batchCollection: document.querySelector("#library-batch-collection"),
+  batchNew: document.querySelector("#library-batch-collection-new"),
+  batchNewName: document.querySelector("#library-batch-collection-name"),
+  batchNewCreate: document.querySelector("#library-batch-collection-create"),
+  batchNewCancel: document.querySelector("#library-batch-collection-cancel"),
+  batchAdd: document.querySelector("#library-batch-add-collection"),
+  batchHint: document.querySelector("#library-batch-hint"),
+  batchClear: document.querySelector("#library-batch-clear"),
   dropOverlay: document.querySelector("#drop-overlay"),
   doctorLink: document.querySelector("#doctor-link"),
   doctorDialog: document.querySelector("#doctor-dialog"),
@@ -74,14 +89,31 @@ const state = {
   modelFailure: null,
   videos: [],
   jobs: { background: [], pipeline: [] },
-  selectedVideoId: null,
+  // Multi-select (Task 039 C5). selectedIds is the source of truth and survives
+  // re-renders (the table repaints on every 850 ms poll while indexing); anchorId
+  // is the last row the user clicked, the fixed end of a Shift-click range.
+  selectedIds: new Set(),
+  anchorId: null,
   expandedVideoIds: new Set(),
-  pendingRemoveId: null,
+  pendingRemoveIds: null,
   poll: null,
   messageTimer: null,
-  // Job ids whose finished-ingest relink summary has already been announced. Backend
-  // tasks are never pruned and every progress event re-carries them, so this is what
-  // keeps the "moved or renamed" message from re-firing forever.
+  // Batch re-index queue (C5): the backend runs one ingest at a time, so a batch
+  // re-index is an honest sequential queue — each asset's real job runs, reports
+  // progress, and finishes before the next starts.
+  reindexQueue: null,
+  reindexTotal: 0,
+  reindexFailed: 0,
+  reindexCurrentId: null,
+  reindexBusy: false,
+  reindexArmed: false,
+  reindexArmTimer: null,
+  // Batch bar collections (loaded on first use, not at boot).
+  collections: null,
+  collectionsLoading: false,
+  // Job ids whose finished-ingest relink summary has already been announced (Task 038).
+  // Backend tasks are never pruned and every progress event re-carries them, so this
+  // is what keeps the "moved or renamed" message from re-firing forever.
   announcedIngestJobs: new Set(),
 };
 
@@ -265,23 +297,51 @@ function cell(className, text) {
   return element;
 }
 
+// Selection helpers (Task 039 C5). The selection is a Set of asset ids ordered by
+// the table (state.videos), so batch operations run top-to-bottom regardless of the
+// click order.
+function selectedAssets() {
+  return state.videos.filter((video) => state.selectedIds.has(video.id));
+}
+
+function disarmReindex() {
+  clearTimeout(state.reindexArmTimer);
+  state.reindexArmed = false;
+}
+
 function renderVideos() {
   elements.videoRows.replaceChildren();
   setVisible(elements.emptyLibrary, state.videos.length === 0);
   setVisible(elements.videoTableWrap, state.videos.length > 0);
 
-  if (state.selectedVideoId && !state.videos.some((video) => video.id === state.selectedVideoId)) {
-    state.selectedVideoId = null;
+  // Rows that left the list (removed, or replaced between polls) drop out of the
+  // selection; everything still listed keeps its selected state across re-renders.
+  for (const id of [...state.selectedIds]) {
+    if (!state.videos.some((video) => video.id === id)) state.selectedIds.delete(id);
   }
-  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  elements.reindex.disabled = !selectedAsset || isIngestActive();
-  elements.removeAsset.disabled = !selectedAsset || isIngestActive();
-  elements.locateAsset.disabled = !selectedAsset || isIngestActive() || !selectedAsset.sourceMissing;
+  const selectionCount = state.selectedIds.size;
+  // Locate is inherently per-asset (one file → one new path): the toolbar button
+  // lights up only for exactly one selected asset whose source is missing, and each
+  // missing row also carries its own Locate action (rendered below) so the remedy
+  // stays reachable no matter what else is selected.
+  const selectedAsset = selectionCount === 1 ? selectedAssets()[0] : null;
+  const queueRunning = state.reindexQueue !== null;
+  elements.reindex.disabled = selectionCount === 0 || isIngestActive() || queueRunning;
+  elements.removeAsset.disabled = selectionCount === 0 || isIngestActive();
+  elements.reindex.textContent = state.reindexArmed
+    ? `Really re-index ${selectionCount}?`
+    : "Re-index selected";
+  elements.reindex.classList.toggle("armed", state.reindexArmed);
+  elements.locateAsset.disabled =
+    selectionCount !== 1 || isIngestActive() || !selectedAsset?.sourceMissing;
+  elements.selectAll.disabled = state.videos.length === 0;
+  elements.selectAll.checked = state.videos.length > 0 && selectionCount === state.videos.length;
+  elements.selectAll.indeterminate = selectionCount > 0 && selectionCount < state.videos.length;
 
   for (const video of state.videos) {
     const presentation = videoPresentation(video);
     const details = errorDetails(video, presentation);
-    const selected = state.selectedVideoId === video.id;
+    const selected = state.selectedIds.has(video.id);
     const expanded = state.expandedVideoIds.has(video.id);
     const parts = fileParts(video.path);
 
@@ -290,11 +350,17 @@ function renderVideos() {
     row.dataset.videoId = video.id;
     row.tabIndex = 0;
     row.setAttribute("aria-selected", String(selected));
-    row.addEventListener("click", () => selectVideo(video.id));
+    row.addEventListener("click", (event) => {
+      selectVideo(video.id, event);
+    });
+    // Shift-click extends the selection, not the DOM text selection.
+    row.addEventListener("mousedown", (event) => {
+      if (event.shiftKey) event.preventDefault();
+    });
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        selectVideo(video.id);
+        selectVideo(video.id, event);
       } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         moveRowSelection(video.id, event.key === "ArrowDown" ? 1 : -1);
@@ -328,11 +394,23 @@ function renderVideos() {
     if (video.sourceMissing) {
       // The row's recorded file is not on disk right now. A bare green Done would hide
       // that, so the row carries the same failed tone as a Failed row, in plain
-      // language; the "Locate moved file…" action stays gated on exactly this state.
+      // language, with the row's own "Locate…" action right under it — relinking is
+      // per-asset, so it must not depend on what else happens to be selected.
       const missing = document.createElement("span");
       missing.className = "status-pill failed";
       missing.textContent = "Source missing";
-      statusBox.append(missing);
+      const locate = document.createElement("button");
+      locate.className = "button secondary small";
+      locate.type = "button";
+      locate.textContent = "Locate…";
+      locate.setAttribute("aria-label", `Locate moved file for ${parts.name}`);
+      locate.addEventListener("click", (event) => {
+        event.stopPropagation();
+        locateMovedFile(video.id);
+      });
+      // Enter/Space must activate the button, not also toggle the row selection.
+      locate.addEventListener("keydown", (event) => event.stopPropagation());
+      statusBox.append(missing, locate);
     }
     if (presentation.active) {
       const progress = document.createElement("div");
@@ -389,10 +467,38 @@ function renderVideos() {
   }
 
   renderIndexingStatus();
+  renderLibraryBatchBar();
 }
 
-function selectVideo(videoId) {
-  state.selectedVideoId = state.selectedVideoId === videoId ? null : videoId;
+// Click model (Task 039 C5): plain click selects one row (clicking the only selected
+// row clears — the pre-existing toggle), ⌘/Ctrl-click toggles a row in or out, and
+// Shift-click selects the range from the last-clicked anchor. Modified clicks never
+// collapse the rest of the selection.
+function selectVideo(videoId, event = {}) {
+  const meta = event.metaKey || event.ctrlKey;
+  const shift = event.shiftKey;
+  if (meta) {
+    if (state.selectedIds.has(videoId)) state.selectedIds.delete(videoId);
+    else state.selectedIds.add(videoId);
+    state.anchorId = videoId;
+  } else if (shift) {
+    const anchor = state.anchorId && state.videos.some((video) => video.id === state.anchorId)
+      ? state.anchorId
+      : videoId;
+    const from = state.videos.findIndex((video) => video.id === anchor);
+    const to = state.videos.findIndex((video) => video.id === videoId);
+    const [start, end] = from <= to ? [from, to] : [to, from];
+    state.selectedIds = new Set(
+      state.videos.slice(start, end + 1).map((video) => video.id),
+    );
+  } else if (state.selectedIds.size === 1 && state.selectedIds.has(videoId)) {
+    state.selectedIds.clear();
+    state.anchorId = null;
+  } else {
+    state.selectedIds = new Set([videoId]);
+    state.anchorId = videoId;
+  }
+  disarmReindex();
   renderVideos();
 }
 
@@ -402,7 +508,9 @@ function moveRowSelection(fromId, delta) {
   const index = state.videos.findIndex((video) => video.id === fromId);
   const next = state.videos[index + delta];
   if (!next) return;
-  state.selectedVideoId = next.id;
+  state.selectedIds = new Set([next.id]);
+  state.anchorId = next.id;
+  disarmReindex();
   renderVideos();
   elements.videoRows
     .querySelector(`tr[data-video-id="${CSS.escape(next.id)}"]`)
@@ -437,10 +545,12 @@ function renderIndexingStatus() {
   const active = isIngestActive();
   elements.cancel.hidden = !active;
   elements.addFolder.disabled = active;
-  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  elements.reindex.disabled = !selectedAsset || active;
-  elements.removeAsset.disabled = !selectedAsset || active;
-  elements.locateAsset.disabled = !selectedAsset || active || !selectedAsset.sourceMissing;
+  const selectionCount = state.selectedIds.size;
+  const selectedAsset = selectionCount === 1 ? selectedAssets()[0] : null;
+  elements.reindex.disabled = selectionCount === 0 || active || state.reindexQueue !== null;
+  elements.removeAsset.disabled = selectionCount === 0 || active;
+  elements.locateAsset.disabled =
+    selectionCount !== 1 || active || !selectedAsset?.sourceMissing;
   const dot = document.createElement("span");
   dot.className = `status-dot${active ? "" : " idle"}`;
   dot.setAttribute("aria-hidden", "true");
@@ -461,12 +571,137 @@ function renderIndexingStatus() {
   elements.indexingStatus.replaceChildren(dot, text);
 }
 
+// ---------- Library batch bar (Task 039 C5) ----------
+// Mirrors the Review batch bar (wave 1): count line, editorial actions, inline
+// create-and-add collection flow. Editorial actions are photo-scoped: collections
+// hold photos and shots, and pick/reject/rating is defined per photo or shot — a
+// whole video's verdicts live on its shots in Review. Rather than pretend otherwise,
+// the controls disable with an honest hint while a video is in the selection.
+function renderLibraryBatchBar() {
+  const count = state.selectedIds.size;
+  if (count === 0 && !elements.batchNew.hidden) {
+    elements.batchNew.hidden = true;
+    elements.batchCollection.hidden = false;
+    elements.batchCollection.value = "";
+  }
+  elements.batchBar.hidden = count === 0;
+  elements.batchCount.textContent = `${count} selected`;
+  if (count > 0) loadLibraryCollections();
+
+  const photosOnly = selectedAssets().every((asset) => asset.assetType === "photo");
+  const editorialReady = count > 0 && photosOnly;
+  const target = elements.batchCollection.value;
+  elements.batchPick.disabled = !editorialReady;
+  elements.batchReject.disabled = !editorialReady;
+  elements.batchRating.disabled = !editorialReady;
+  elements.batchCollection.disabled = !editorialReady;
+  elements.batchAdd.disabled = !editorialReady || !target || target === "new";
+  elements.batchHint.hidden = count === 0 || photosOnly;
+}
+
+// The batch target list loads when the bar first appears (not at boot) and mirrors
+// the Review bar's option shape, including the honest empty state.
+async function loadLibraryCollections() {
+  if (state.collections || state.collectionsLoading) return;
+  state.collectionsLoading = true;
+  try {
+    state.collections = await invoke("collection_list");
+  } catch (error) {
+    showMessage(crushErrorText(error), true);
+    return;
+  } finally {
+    state.collectionsLoading = false;
+  }
+  renderLibraryCollectionOptions();
+}
+
+function renderLibraryCollectionOptions(selectedId = null) {
+  if (!state.collections) return;
+  const current = selectedId ?? elements.batchCollection.value;
+  elements.batchCollection.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = state.collections.length
+    ? "Add to collection…"
+    : "No collections yet — create one to group assets";
+  elements.batchCollection.append(placeholder);
+  for (const collection of state.collections) {
+    const option = document.createElement("option");
+    option.value = collection.id;
+    option.textContent = collection.name;
+    elements.batchCollection.append(option);
+  }
+  const create = document.createElement("option");
+  create.value = "new";
+  create.textContent = "New collection…";
+  elements.batchCollection.append(create);
+  elements.batchCollection.value = state.collections.some((set) => set.id === current)
+    ? current
+    : "";
+  renderLibraryBatchBar();
+}
+
+function closeLibraryBatchNewForm() {
+  elements.batchNew.hidden = true;
+  elements.batchCollection.hidden = false;
+  elements.batchCollection.value = "";
+  renderLibraryBatchBar();
+}
+
+async function createLibraryBatchCollection() {
+  const name = elements.batchNewName.value.trim();
+  if (!name) return;
+  // Double-submit guard (mirrors the Review bar): a second Enter while the first
+  // invoke is pending would create a duplicate collection.
+  if (elements.batchNewCreate.disabled) return;
+  elements.batchNewCreate.disabled = true;
+  try {
+    const created = await invoke("collection_create", { name });
+    elements.batchNew.hidden = true;
+    elements.batchCollection.hidden = false;
+    showMessage(`Created collection “${name}”.`);
+    state.collections = await invoke("collection_list");
+    renderLibraryCollectionOptions(created.id);
+    elements.batchCollection.focus();
+  } catch (error) {
+    showMessage(crushErrorText(error), true);
+  } finally {
+    elements.batchNewCreate.disabled = false;
+  }
+}
+
+// Photo members of the selection, in table order — the only assets the editorial
+// ops can honestly act on.
+function selectedPhotoOps(op, extra = {}) {
+  return selectedAssets()
+    .filter((asset) => asset.assetType === "photo")
+    .map((asset) => ({ op, assetType: "photo", mediaId: asset.id, ...extra }));
+}
+
+async function runLibraryBatch(ops, summary) {
+  try {
+    const applied = await invoke("review_batch", { ops });
+    showMessage(summary(applied));
+    state.selectedIds.clear();
+    state.anchorId = null;
+    await refreshLibrary();
+  } catch (error) {
+    showMessage(crushErrorText(error), true);
+    if (window.crushErrorText(error) !== String(error)) {
+      elements.libraryMessage.append(crushCopyDetailsButton(String(error)));
+    }
+  }
+}
+
 async function refreshLibrary() {
   const [videos, jobs] = await Promise.all([invoke("list_videos"), invoke("job_status")]);
   state.videos = videos;
   state.jobs = jobs;
   renderVideos();
   managePolling();
+  // A queued re-index starts its next asset from here (and from ingest-progress
+  // events) once the previous ingest reaches a terminal state.
+  pumpReindexQueue();
 }
 
 function managePolling() {
@@ -497,6 +732,7 @@ async function onIngestProgress(event) {
   }
   renderVideos();
   managePolling();
+  pumpReindexQueue();
 }
 
 function announceIngestRelinks(task) {
@@ -554,20 +790,105 @@ async function cancelIngest() {
 }
 
 async function reindexSelected() {
-  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  if (!selectedAsset || isIngestActive()) return;
+  const ids = selectedAssets().map((asset) => asset.id);
+  if (!ids.length || isIngestActive() || state.reindexQueue) return;
+  // Single selection keeps today's flow: no confirm, one job, one message.
+  if (ids.length === 1) {
+    try {
+      const started = await invoke("reindex_asset", { id: ids[0] });
+      showMessage(`Re-index started · job ${started.jobId.slice(0, 8)}`);
+      await refreshLibrary();
+    } catch (error) {
+      showMessage(crushErrorText(error), true);
+    }
+    return;
+  }
+  // Batch re-index asks once through the two-step armed-button pattern the rest of
+  // the app uses (saved-search delete, safety apply), then runs the honest queue.
+  if (!state.reindexArmed) {
+    state.reindexArmed = true;
+    renderVideos();
+    state.reindexArmTimer = setTimeout(() => {
+      state.reindexArmed = false;
+      renderVideos();
+    }, 6000);
+    return;
+  }
+  disarmReindex();
+  state.reindexQueue = ids;
+  state.reindexTotal = ids.length;
+  state.reindexFailed = 0;
+  state.reindexCurrentId = null;
+  showMessage(`Re-indexing ${ids.length} assets one at a time — progress shows below.`);
+  renderVideos();
+  await pumpReindexQueue();
+}
+
+// The backend runs one ingest at a time (reindex_asset answers "ingest … is already
+// running" otherwise), so a batch re-index is a frontend queue that starts the next
+// asset only after the previous ingest reaches a terminal state. Every job reports
+// its real progress through the existing ingest-progress events; nothing here fakes
+// completion.
+async function pumpReindexQueue() {
+  if (!state.reindexQueue || state.reindexBusy) return;
+  state.reindexBusy = true;
   try {
-    const started = await invoke("reindex_asset", { id: state.selectedVideoId });
-    showMessage(`Re-index started · job ${started.jobId.slice(0, 8)}`);
-    await refreshLibrary();
-  } catch (error) {
-    showMessage(String(error), true);
+    while (state.reindexQueue && !isIngestActive()) {
+      const ingestTask = state.jobs.background.find((task) => task.kind === "ingest");
+      if (state.reindexCurrentId && ingestTask?.status === "cancelled") {
+        const remaining = state.reindexQueue.length;
+        state.reindexQueue = null;
+        showMessage(
+          `Re-index stopped — ${remaining} asset${remaining === 1 ? "" : "s"} not re-indexed.`,
+          true,
+        );
+        renderVideos();
+        return;
+      }
+      if (state.reindexCurrentId) {
+        // The ingest just finished: the refreshed row status is the real outcome.
+        const asset = state.videos.find((video) => video.id === state.reindexCurrentId);
+        if (asset?.status === "failed") state.reindexFailed += 1;
+        state.reindexCurrentId = null;
+      }
+      const nextId = state.reindexQueue.shift();
+      if (!nextId) {
+        const { reindexTotal, reindexFailed } = state;
+        state.reindexQueue = null;
+        showMessage(reindexFailed
+          ? `Re-indexed ${reindexTotal - reindexFailed} of ${reindexTotal} assets · ${reindexFailed} failed — see the failed rows for details.`
+          : `Re-indexed ${reindexTotal} asset${reindexTotal === 1 ? "" : "s"}.`, reindexFailed > 0);
+        renderVideos();
+        return;
+      }
+      state.reindexCurrentId = nextId;
+      const done = state.reindexTotal - state.reindexQueue.length;
+      showMessage(`Re-indexing ${done} of ${state.reindexTotal}…`);
+      try {
+        await invoke("reindex_asset", { id: nextId });
+        // Reflects the now-active ingest (or, in tests/mock, its instant completion)
+        // before the loop decides to start the next asset.
+        await refreshLibrary();
+      } catch (error) {
+        state.reindexQueue = null;
+        state.reindexCurrentId = null;
+        showMessage(`Re-index stopped: ${crushErrorText(error)}`, true);
+        renderVideos();
+        return;
+      }
+    }
+  } finally {
+    state.reindexBusy = false;
   }
 }
 
-async function locateMovedFile() {
-  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  if (!selectedAsset || isIngestActive() || !selectedAsset.sourceMissing) return;
+async function locateMovedFile(assetId) {
+  // Relinking is per-asset: one file moves to one new path. The row-level button
+  // passes its own id; the toolbar path passes nothing and resolves the single
+  // selected asset (the toolbar button is disabled for any other selection).
+  const id = assetId ?? (state.selectedIds.size === 1 ? [...state.selectedIds][0] : null);
+  const asset = id ? state.videos.find((candidate) => candidate.id === id) : null;
+  if (!asset || isIngestActive() || !asset.sourceMissing) return;
   try {
     const picked = await bridge.dialog.open({
       directory: false,
@@ -575,7 +896,7 @@ async function locateMovedFile() {
       title: "Locate the moved file",
     });
     if (typeof picked !== "string" || !picked) return;
-    const outcome = await invoke("relink_asset", { id: selectedAsset.id, newPath: picked });
+    const outcome = await invoke("relink_asset", { id: asset.id, newPath: picked });
     showMessage(
       `The file moved. Crush verified the new copy is identical before relinking · ${outcome.newPath}`,
     );
@@ -586,29 +907,57 @@ async function locateMovedFile() {
 }
 
 function confirmRemove() {
-  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
-  if (!selectedAsset || isIngestActive()) return;
-  const kind = selectedAsset.assetType === "photo" ? "photo" : "video";
-  state.pendingRemoveId = selectedAsset.id;
-  elements.removeCopy.textContent =
-    `Remove “${fileParts(selectedAsset.path).name}” from the Crush library?` +
-    " The original file on disk is never touched. Crush forgets its index, previews, " +
-    "analysis, choices and project references to it.";
+  const assets = selectedAssets();
+  if (!assets.length || isIngestActive()) return;
+  state.pendingRemoveIds = assets.map((asset) => asset.id);
+  if (assets.length === 1) {
+    const selectedAsset = assets[0];
+    elements.removeCopy.textContent =
+      `Remove “${fileParts(selectedAsset.path).name}” from the Crush library?` +
+      " The original file on disk is never touched. Crush forgets its index, previews, " +
+      "analysis, choices and project references to it.";
+  } else {
+    elements.removeCopy.textContent =
+      `Remove ${assets.length} assets from the library? Originals on disk are never touched. ` +
+      "Crush forgets their index, previews, analysis, choices and project references to them.";
+  }
   elements.removeDialog.showModal();
 }
 
 async function removeConfirmed() {
-  const id = state.pendingRemoveId;
-  state.pendingRemoveId = null;
+  const ids = state.pendingRemoveIds || [];
+  state.pendingRemoveIds = null;
   elements.removeDialog.close();
-  if (!id) return;
+  if (!ids.length) return;
   elements.removeConfirm.disabled = true;
+  let removed = 0;
+  let firstError = null;
+  let removedKind = null;
   try {
-    const outcome = await invoke("remove_asset", { id });
-    showMessage(`Removed the ${outcome.kind} from your library. The original file was not changed.`);
+    for (const id of ids) {
+      try {
+        const outcome = await invoke("remove_asset", { id });
+        removed += 1;
+        removedKind = removedKind || outcome.kind;
+      } catch (error) {
+        firstError = firstError || String(error);
+      }
+    }
+    if (removed === ids.length) {
+      showMessage(
+        ids.length === 1
+          ? `Removed the ${removedKind || "asset"} from your library. The original file was not changed.`
+          : `Removed ${removed} assets from your library. The original files were not changed.`,
+      );
+    } else {
+      showMessage(
+        `Removed ${removed} of ${ids.length} — ${ids.length - removed} could not be removed: ${firstError}`,
+        true,
+      );
+    }
+    // Selection hygiene: renderVideos prunes ids that left the list, so removed
+    // assets drop out while any that failed stay selected — the honest outcome.
     await refreshLibrary();
-  } catch (error) {
-    showMessage(String(error), true);
   } finally {
     elements.removeConfirm.disabled = false;
   }
@@ -662,6 +1011,33 @@ async function runDoctor() {
   }
 }
 
+// Library-scoped keyboard (Task 039 C5): ⌘/Ctrl-A selects all listed assets, Esc
+// clears the selection. Both are guarded to the Library view, to no open dialog, and
+// to focus outside text controls — they never steal keys from the search field, the
+// drawer, or a modal (search.js's global handler keeps its own Search-view scope).
+function onLibraryKeydown(event) {
+  if (elements.libraryView.hidden || document.querySelector("dialog[open]")) return;
+  const target = event.target;
+  const inTextControl = target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement;
+  if (inTextControl) return;
+  const meta = event.metaKey || event.ctrlKey;
+  if (meta && event.key.toLowerCase() === "a" && state.videos.length) {
+    event.preventDefault();
+    window.getSelection()?.removeAllRanges();
+    state.selectedIds = new Set(state.videos.map((video) => video.id));
+    disarmReindex();
+    renderVideos();
+  } else if (event.key === "Escape" && state.selectedIds.size) {
+    event.preventDefault();
+    state.selectedIds.clear();
+    state.anchorId = null;
+    disarmReindex();
+    renderVideos();
+  }
+}
+
 function bindActions() {
   elements.retryModels.addEventListener("click", downloadModels);
   elements.continueModels.addEventListener("click", showLibrary);
@@ -669,16 +1045,82 @@ function bindActions() {
   elements.emptyAddFolder.addEventListener("click", chooseFolder);
   elements.cancel.addEventListener("click", cancelIngest);
   elements.reindex.addEventListener("click", reindexSelected);
-  elements.locateAsset.addEventListener("click", locateMovedFile);
+  elements.locateAsset.addEventListener("click", () => locateMovedFile());
   elements.removeAsset.addEventListener("click", confirmRemove);
+  elements.selectAll.addEventListener("change", () => {
+    // Tri-state header checkbox: checked selects everything listed, unchecked clears;
+    // the indeterminate middle state always resolves to clear-first for predictability.
+    if (elements.selectAll.checked) {
+      state.selectedIds = new Set(state.videos.map((video) => video.id));
+    } else {
+      state.selectedIds.clear();
+    }
+    state.anchorId = null;
+    disarmReindex();
+    renderVideos();
+  });
+  elements.batchPick.addEventListener("click", () => {
+    const ops = selectedPhotoOps("pick");
+    if (ops.length) runLibraryBatch(ops, (applied) => `Marked ${applied} as picks.`);
+  });
+  elements.batchReject.addEventListener("click", () => {
+    const ops = selectedPhotoOps("reject");
+    if (ops.length) runLibraryBatch(ops, (applied) => `Marked ${applied} as rejected.`);
+  });
+  elements.batchRating.addEventListener("change", () => {
+    const rating = Number(elements.batchRating.value);
+    elements.batchRating.value = "";
+    const ops = rating ? selectedPhotoOps("rate", { rating }) : [];
+    if (ops.length) runLibraryBatch(ops, (applied) => `Rated ${applied} photo${applied === 1 ? "" : "s"}.`);
+  });
+  elements.batchCollection.addEventListener("change", () => {
+    const creating = elements.batchCollection.value === "new";
+    elements.batchNew.hidden = !creating;
+    elements.batchCollection.hidden = creating;
+    if (creating) {
+      elements.batchNewName.value = "";
+      elements.batchNewName.focus();
+    }
+    renderLibraryBatchBar();
+  });
+  elements.batchNewCancel.addEventListener("click", closeLibraryBatchNewForm);
+  elements.batchNewCreate.addEventListener("click", createLibraryBatchCollection);
+  elements.batchNewName.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      createLibraryBatchCollection();
+    } else if (event.key === "Escape") {
+      // Cancel the inline form, not anything behind it — same precedence as Review.
+      event.stopPropagation();
+      closeLibraryBatchNewForm();
+    }
+  });
+  elements.batchAdd.addEventListener("click", () => {
+    const collectionId = elements.batchCollection.value;
+    if (!collectionId || collectionId === "new") return;
+    const ops = selectedPhotoOps("add_to_collection", { collectionId });
+    if (ops.length) {
+      runLibraryBatch(
+        ops,
+        (applied) => `Added ${applied} asset${applied === 1 ? "" : "s"} to the collection.`,
+      );
+    }
+  });
+  elements.batchClear.addEventListener("click", () => {
+    state.selectedIds.clear();
+    state.anchorId = null;
+    disarmReindex();
+    renderVideos();
+  });
+  document.addEventListener("keydown", onLibraryKeydown);
   elements.removeCancel.addEventListener("click", () => {
-    state.pendingRemoveId = null;
+    state.pendingRemoveIds = null;
     elements.removeDialog.close();
   });
   elements.removeConfirm.addEventListener("click", removeConfirmed);
   elements.removeDialog.addEventListener("click", (event) => {
     if (event.target === elements.removeDialog) {
-      state.pendingRemoveId = null;
+      state.pendingRemoveIds = null;
       elements.removeDialog.close();
     }
   });

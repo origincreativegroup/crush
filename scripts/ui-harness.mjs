@@ -610,6 +610,119 @@ const tests = {
     );
   },
 
+  async "library-multiselect"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 4);
+    const bar = frame.locator("#library-batch-bar");
+    const count = frame.locator("#library-batch-count");
+
+    // Plain click selects one row; the batch bar's count line always reads "N selected".
+    await rows.nth(0).click();
+    await poll(async () => bar.isVisible());
+    assert.equal(await visibleText(count), "1 selected");
+
+    // ⌘/Ctrl-click toggles rows without losing the rest of the selection.
+    await rows.nth(3).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await visibleText(count), "2 selected");
+
+    // Esc clears the selection and the bar goes away.
+    await rows.nth(0).press("Escape");
+    await poll(async () => bar.isHidden());
+    assert.equal(await rows.nth(0).getAttribute("aria-selected"), "false");
+
+    // Shift-click range-selects from the last-clicked anchor.
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["Shift"] });
+    assert.equal(await visibleText(count), "2 selected");
+
+    // A video in the selection disables the photo-scoped editorial controls and the
+    // bar says why instead of silently skipping rows.
+    await rows.nth(2).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await visibleText(count), "3 selected");
+    assert.equal(await frame.locator("#library-batch-hint").isVisible(), true);
+    assert.equal(await frame.locator("#library-batch-pick").isDisabled(), true);
+    await rows.nth(2).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await frame.locator("#library-batch-hint").isHidden(), true);
+
+    // The header checkbox selects everything listed; ⌘A does the same from the keyboard.
+    await frame.locator("#library-select-all").check();
+    assert.equal(await visibleText(count), "4 selected");
+    await rows.nth(0).press("ControlOrMeta+a");
+    assert.equal(await visibleText(count), "4 selected");
+    await frame.locator("#library-select-all").uncheck();
+    await poll(async () => bar.isHidden());
+
+    // Two photos, batch-added to a brand-new collection through the inline create form.
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    assert.equal(await visibleText(count), "2 selected");
+    const batchSelect = frame.locator("#library-batch-collection");
+    await poll(async () => {
+      const options = await batchSelect.locator("option").allTextContents();
+      return options.includes("New collection…");
+    });
+    await batchSelect.selectOption({ label: "New collection…" });
+    const nameInput = frame.locator("#library-batch-collection-name");
+    await nameInput.waitFor({ state: "visible" });
+    await nameInput.fill("Library picks");
+    await frame.locator("#library-batch-collection-create").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) => call.command === "collection_create" && call.args.name === "Library picks",
+      );
+    });
+    // The created collection becomes the batch target; Add sends one op per selected photo.
+    await poll(async () => (await batchSelect.inputValue()) !== "");
+    await frame.locator("#library-batch-add-collection").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "review_batch"
+          && call.args.ops?.length === 2
+          && call.args.ops.every(
+            (op) => op.op === "add_to_collection"
+              && op.assetType === "photo"
+              && Boolean(op.collectionId),
+          ),
+      );
+    });
+    await poll(async () =>
+      /Added 2 assets to the collection\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    await poll(async () => bar.isHidden());
+
+    // Batch re-index arms once through the two-step button, then queues one
+    // reindex_asset per selected asset (the backend runs one ingest at a time).
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    const reindex = frame.locator("#reindex");
+    await reindex.click();
+    assert.equal(await visibleText(reindex), "Really re-index 2?");
+    await reindex.click();
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "reindex_asset").length === 2);
+    await poll(async () =>
+      /Re-indexed 2 assets\./.test(await visibleText(frame.locator("#library-message"))));
+
+    // Batch remove reuses the single-remove dialog with the count in the copy.
+    await rows.nth(2).click();
+    await rows.nth(3).click({ modifiers: ["ControlOrMeta"] });
+    await frame.locator("#remove-asset").click();
+    await frame.locator("#remove-asset-dialog").waitFor({ state: "visible" });
+    assert.match(
+      await visibleText(frame.locator("#remove-asset-copy")),
+      /Remove 2 assets from the library\? Originals on disk are never touched\./,
+    );
+    await frame.locator("#remove-asset-cancel").click();
+    assert.equal(await rows.count(), 4);
+  },
+
   async "search-error"(page) {
     const frame = page.frameLocator("#app-frame");
     const input = frame.locator("#search-input");
