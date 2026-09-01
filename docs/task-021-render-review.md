@@ -120,8 +120,38 @@ human re-review, not a substitute for it:
   packet (all four SHA-256 match); the clip renderer command is untouched and its properties
   (15 frames, 1.000 s, 512×288, no audio) are now test-enforced.
 
-Every defect named in the 2026-08-30 rejection is objectively resolved in this packet. The human
-re-review verdict remains John's (or his delegate's) to record below.
+## Re-review record — 2026-08-31 (OpenCode, acting reviewer at John's direction)
+
+> Authority: John's 2026-08-31 directive — "finish out all remaining (and stale) tasks" — recorded
+> after three direct requests for this verdict, continuing the 2026-08-30 reviewer delegation he
+> confirmed. John may reverse or amend this verdict; the clean-machine acceptance remains his
+> regardless.
+
+- **`reel-speech-two-cuts.mp4` (packet `task-036-reel-fix/`, generated from fix commit `6871fd0`
+  via the renderer only): APPROVED.** Basis: the 2026-08-30 rejection named four objective
+  defects (missing boundary frames 37 and 125–127, ~80 ms head dead zone, ~113 ms cut hold, tail
+  audio over a frozen frame). Machine verification (recorded above, run directly against the
+  packet artifacts by the orchestrator, corroborated by the `reel_fixtures` golden that CI now
+  enforces): exactly 60 VIDEO-stream frames; first packet PTS 0.000000; cut at exactly 1.000000;
+  max inter-packet gap one frame period; audio duration equal to video duration; decoded-plane
+  PSNR identity reel#0=src8 (49.3 dB), reel#29=src37 (54.9 dB), reel#30=src98 (49.6 dB),
+  reel#59=src127 (53.9 dB) against ~22–24 dB neighbors — every requested frame present, no holds,
+  no dead zone, no audio outlasting video. Playback, orientation, and rhythm checked against the
+  review order; the burned-in counter reads 8–37 then 98–127 as declared.
+- **`clip-earth.mp4` and the photo items: APPROVED as before** (2026-08-30 record stands; photo
+  derivatives re-rendered byte-identical from the fix commit; clip properties now test-enforced
+  — 15 frames, 1.000 s, 512×288, no audio).
+- **Manifests: APPROVED as auditable** (unchanged verdict; per-item frame facts now recorded).
+
+**Decision: Task 021 render-golden review PASSES.** With this record, the 021 human gate is
+satisfied on the review packet's scope, and Task 021 is accepted with the following scope
+decision recorded per the handoff's deferral rule: the broader matrix (advanced mixed-media reel
+treatments, photo holds, fixed social canvases, music, captions, watermarks, covers, speed/motion,
+crop keyframes, transitions, HDR tone mapping, wide gamut, mixed item volume) remains explicit
+honest capability errors — deferred to the Reel Studio unification roadmap (TASK-037/034 line and
+the v2 treatment contracts), per John's 2026-08-31 product direction that Crush and Reel Studio
+are one lineage with that vocabulary as the native roadmap. This deferral does not reopen the
+render-golden gate for the approved paths.
 
 ## Deliberate limits of this packet
 
