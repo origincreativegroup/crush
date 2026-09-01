@@ -704,6 +704,19 @@ pub struct Shot {
     pub scene_score: Option<f64>,
 }
 
+/// The mutable columns of a stored shot row, used by `replace_shots` to decide whether a
+/// surviving shot actually changed before writing it back in place.
+#[derive(Debug, Clone, PartialEq)]
+struct StoredShot {
+    id: String,
+    idx: i64,
+    start_s: f64,
+    end_s: f64,
+    rep_frame_s: f64,
+    thumb_rel: Option<String>,
+    scene_score: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptSegment {
     pub id: String,
@@ -4285,6 +4298,17 @@ impl Store {
     }
 
     /// Replace a video's shot graph and advance it to `split` in one transaction.
+    ///
+    /// This is a diffing replace, not a delete-and-refill. Shot ids are content-addressed
+    /// (`stable_shot_id` from video sha256 + index + start), so a resplit normally returns
+    /// the same ids: those shots are updated in place and are never deleted, so the AFTER
+    /// DELETE evidence-cleanup triggers (editorial annotations, aesthetic assessments,
+    /// feedback as media and as compared media, reference-set items, plan items, and the
+    /// cascading vectors) fire only when a shot genuinely vanished. Evidence attached to
+    /// surviving ids therefore survives a resplit. Plan items on a vanished shot are
+    /// removed by the cleanup trigger like every other kind of evidence; they are never
+    /// silently rewritten, and the render-time clamp still refuses an item that no longer
+    /// fits its shot.
     pub fn replace_shots(
         &mut self,
         owner_id: &str,
@@ -4303,10 +4327,77 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "DELETE FROM shots WHERE owner_id = ?1 AND video_id = ?2",
-            params![owner_id, video_id],
-        )?;
+        let existing = {
+            let mut statement = transaction.prepare(
+                "SELECT id, idx, start_s, end_s, rep_frame_s, thumb_rel, scene_score
+                 FROM shots
+                 WHERE owner_id = ?1 AND video_id = ?2",
+            )?;
+            let rows = statement.query_map(params![owner_id, video_id], |row| {
+                Ok(StoredShot {
+                    id: row.get(0)?,
+                    idx: row.get(1)?,
+                    start_s: row.get(2)?,
+                    end_s: row.get(3)?,
+                    rep_frame_s: row.get(4)?,
+                    thumb_rel: row.get(5)?,
+                    scene_score: row.get(6)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let incoming_ids: HashSet<&str> = shots.iter().map(|shot| shot.id.as_str()).collect();
+        // 1) Delete only the shots whose stable id did not return. The evidence-cleanup
+        //    triggers and the vector cascade fire for these real removals only.
+        for stored in &existing {
+            if !incoming_ids.contains(stored.id.as_str()) {
+                transaction.execute(
+                    "DELETE FROM shots WHERE owner_id = ?1 AND video_id = ?2 AND id = ?3",
+                    params![owner_id, video_id, stored.id],
+                )?;
+            }
+        }
+        // 2) Survivors update in place — only rows whose stored values actually changed
+        //    are written. A surviving id keeps its index by construction (the index is
+        //    part of the stable id), so these updates cannot collide on
+        //    UNIQUE(video_id, idx); a direct API call that re-indexes a surviving id
+        //    fails the transaction honestly instead of deleting evidence.
+        {
+            let mut statement = transaction.prepare(
+                "UPDATE shots
+                 SET idx = ?3, start_s = ?4, end_s = ?5, rep_frame_s = ?6,
+                     thumb_rel = ?7, scene_score = ?8
+                 WHERE owner_id = ?1 AND id = ?2",
+            )?;
+            for shot in shots {
+                let Some(stored) = existing.iter().find(|stored| stored.id == shot.id) else {
+                    continue;
+                };
+                let candidate = StoredShot {
+                    id: shot.id.clone(),
+                    idx: shot.idx,
+                    start_s: shot.start_s,
+                    end_s: shot.end_s,
+                    rep_frame_s: shot.rep_frame_s,
+                    thumb_rel: shot.thumb_rel.clone(),
+                    scene_score: shot.scene_score,
+                };
+                if *stored == candidate {
+                    continue;
+                }
+                statement.execute(params![
+                    owner_id,
+                    shot.id,
+                    shot.idx,
+                    shot.start_s,
+                    shot.end_s,
+                    shot.rep_frame_s,
+                    shot.thumb_rel,
+                    shot.scene_score,
+                ])?;
+            }
+        }
+        // 3) Newcomers insert.
         {
             let mut statement = transaction.prepare(
                 "INSERT INTO shots (
@@ -4314,7 +4405,11 @@ impl Store {
                     scene_score
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            for shot in shots {
+            for shot in shots.iter().filter(|shot| {
+                !existing
+                    .iter()
+                    .any(|stored| stored.id == shot.id)
+            }) {
                 statement.execute(params![
                     shot.id,
                     video_id,
