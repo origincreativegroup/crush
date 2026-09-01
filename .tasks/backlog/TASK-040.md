@@ -11,11 +11,17 @@ small and independent; land as one PR or split if review prefers.
       the Library can show real thumbnails for videos, not a placeholder (proposal C7). Thumb
       path rules follow the existing photo thumb discipline; no thumbnail fabrication for assets
       that have none — honest placeholder stays.
-- [ ] Render progress events reach the UI (proposal B10): wire the existing ffmpeg progress
+- [x] Render progress events reach the UI (proposal B10): wire the existing ffmpeg progress
       callbacks (currently `|_| {}` in the render executors — see TASK-035's plan, which also
       covers this) to `render_job_set_progress` and a Tauri event the UI already listens to, so
       clip/reel renders show real percentages. Coordinate with TASK-035 to avoid double work —
       if 035 lands first, this item is done by it; verify and check off either way.
+      (Checked off 2026-09-01 via TASK-035: the executor callbacks now feed real, throttled,
+      monotonic ffmpeg progress into `render_job_set_progress` — the job/attempt rows carry
+      live 0.1–0.75 values — see `JobProgressWriter` in `crates/pipeline/src/render.rs`. Scope
+      note: the UI currently shows an indeterminate busy state during renders and listens to no
+      render-progress event, so no UI change was possible without inventing one; when the UX
+      track wants live percentages, read the durable progress this wiring already produces.)
 - [ ] DECISION NEEDED FROM JOHN before implementing: whole-video collection membership. Today
       collections and feedback are photo/shot-scoped (`parse_library_kind` maps video→shot), so
       the Library batch bar honestly disables those ops for video rows (TASK-039 wave 3). Options:

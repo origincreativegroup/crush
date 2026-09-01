@@ -160,3 +160,20 @@ captions, watermarks, covers, speed/motion, crop keyframes, transitions, HDR/ton
 gamut, mixed item volume, silence insertion, or the full Reel Studio grade vocabulary. Those are
 explicit capability errors today. The broader photo color/orientation and video transition/audio
 matrix described in `.tasks/backlog/TASK-021-impl-plan.md` remains before final Task 021 acceptance.
+
+## Manifest-field addendum — TASK-035 (2026-09-01)
+
+TASK-035 (render engineering follow-ups, branch `task/35-render-followups`) unifies the
+duration-tolerance rule that this packet's manifests report. Output bytes are unaffected — the
+021/036 goldens re-render with identical photo SHA-256s and identical clip/reel moov + framemd5
+hashes — but one manifest FIELD VALUE changes, recorded here so no reviewer meets it first in a
+diff:
+
+- Clip manifests: `verification.duration_tolerance_s` now reports the shared rule
+  `1/fps + 0.05` (e.g. the 15 fps `clip-earth` golden: 0.1333 → 0.1167; 60 fps sources: 0.05 →
+  0.0667). Previously the executor reported `(2/fps).max(0.05)`, which could be STRICTER than
+  the encoder check at high fps — the 60 fps AAC-priming pass-then-fail window TASK-035
+  removes. Reel manifests are unchanged in value (`0.05 + items/fps`, now derived from the
+  shared constant). Photo manifests are unchanged.
+- Truncation short-circuit: startup recovery now verifies published outputs by size before
+  hashing; the manifest's size/checksum contract is unchanged.
