@@ -5614,6 +5614,8 @@ fn relink_updates_the_row_path_only_after_verifying_the_recorded_hash() {
         .unwrap();
     assert_eq!(relinked_photo.path, "/new/place/photo-rl.jpg");
     assert_eq!(store.photos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+}
+
 /// TASK-035 item 4: `render_job_set_progress` is one guarded UPDATE per table inside a single
 /// immediate transaction — status and monotonicity guards live in the WHERE clause, so the hot
 /// path performs no row read. The precise error messages are preserved on the rejection paths.
@@ -5668,6 +5670,7 @@ fn render_progress_update_is_a_single_guarded_write() {
                     "sources": [{
                         "media_kind": "photo",
                         "media_id": "photo-progress",
+                        "source_id": "photo-progress",
                         "sha256": source_hash,
                         "path": source_photo.path,
                     }]
