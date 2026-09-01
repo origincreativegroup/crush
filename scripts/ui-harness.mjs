@@ -650,6 +650,50 @@ const tests = {
     assert.match(await visibleText(frame.locator("#photo-export-status")), /Exported and verified/);
   },
 
+  async "render-presets"(page) {
+    // Preset facts are served by list_render_presets from the preset enums; every select
+    // must render from that command and every save dialog must filter with its facts.
+    const frame = page.frameLocator("#app-frame");
+    const input = frame.locator("#search-input");
+    await input.waitFor({ state: "visible" });
+    await input.fill("rocket");
+    await input.press("Enter");
+    const cards = frame.locator(".result-card");
+    await poll(async () => (await cards.count()) === 2);
+    await cards.filter({ hasText: "select.jpg" }).click();
+    await frame.locator("#detail").waitFor({ state: "visible" });
+    await poll(async () => (await frame.locator("#photo-export-preset option").count()) === 3);
+    const drawerOptions = frame.locator("#photo-export-preset option");
+    assert.equal(await drawerOptions.nth(0).getAttribute("value"), "jpeg-srgb-v1");
+    assert.equal((await drawerOptions.nth(2).textContent()).trim(), "TIFF — lossless 8-bit copy");
+    assert.equal(
+      (await mockCalls(page)).some((call) => call.command === "list_render_presets"),
+      true,
+    );
+
+    // The Projects panel: reel select populated from the command, and the save dialog's
+    // default path + filter come from the served preset facts.
+    const plansFrame = await createPlan(page);
+    await plansFrame.locator("#plan-generate").click();
+    await poll(async () => (await plansFrame.locator("#plan-general .plans-candidate").count()) === 2);
+    await plansFrame.locator("#plan-general .plans-candidate").first().locator("button").click();
+    await poll(async () => (await plansFrame.locator("#plan-items .plans-item").count()) === 1);
+    await poll(async () => (await plansFrame.locator("#project-photo-preset option").count()) === 2);
+    const clipOptions = plansFrame.locator("#project-photo-preset option");
+    assert.equal(await clipOptions.nth(0).getAttribute("value"), "mp4-h264-sdr-v1");
+    assert.equal((await clipOptions.nth(1).textContent()).trim(), "MOV — editing-friendly H.264");
+    await poll(async () => (await plansFrame.locator("#project-reel-preset option").count()) === 2);
+    await plansFrame.locator("#project-reel-choose").click();
+    let save = (await mockCalls(page)).filter((call) => call.command === "dialog.save").at(-1);
+    assert.match(save.args.defaultPath, /\.mp4$/);
+    assert.deepEqual(save.args.filters[0].extensions, ["mp4"]);
+    await plansFrame.locator("#project-reel-preset").selectOption("mov-h264-sdr-v1");
+    await plansFrame.locator("#project-reel-choose").click();
+    save = (await mockCalls(page)).filter((call) => call.command === "dialog.save").at(-1);
+    assert.match(save.args.defaultPath, /\.mov$/);
+    assert.deepEqual(save.args.filters[0].extensions, ["mov"]);
+  },
+
   async "feedback"(page) {
     const frame = page.frameLocator("#app-frame");
     const input = frame.locator("#search-input");

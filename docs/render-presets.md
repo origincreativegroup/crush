@@ -81,3 +81,11 @@ non-cut transitions, missing-audio silence insertion, mixed/fractional item volu
 Reel Studio grade controls are capability errors. Reel Studio schema v2 is preserved and resolved
 separately but is not downgraded to this subset. Those fields require versioned asset, timing,
 layout, mix, and publication contracts before output is allowed.
+
+## UI preset facts
+
+The preset ids above are frozen contract values. The UI-facing facts — display label, output
+extension(s), media type, and muxer — are defined once on the preset enums
+(`ClipOutputPreset` in `crates/stage-split/src/ffmpeg.rs`, `PhotoOutputPreset` in
+`crates/pipeline/src/source.rs`) and served to the webview through the `list_render_presets`
+command. The UI keeps no local preset tables.

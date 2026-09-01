@@ -513,14 +513,15 @@ impl Pipeline {
             self.config.limits.threads,
             job.id.clone(),
         );
-        let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
-        let rendered = runner.render_reel_with_control(
-            &sources.request,
-            &staging.output,
-            &self.cancellation,
-            |progress| progress_writer.record(&progress),
-        )?;
-        drop(progress_writer);
+        let rendered = {
+            let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
+            runner.render_reel_with_control(
+                &sources.request,
+                &staging.output,
+                &self.cancellation,
+                |progress| progress_writer.record(&progress),
+            )?
+        };
         store.render_job_set_progress(owner_id, &job.id, 0.75)?;
         ensure!(!self.cancellation.is_cancelled(), "reel render cancelled");
 
@@ -642,11 +643,7 @@ impl Pipeline {
             "color_transfer": rendered.output_probe.color_transfer,
         });
         let created_at = Utc::now();
-        let media_type = match sources.request.output {
-            ClipOutputPreset::Mp4H264SdrV1 => "video/mp4",
-            ClipOutputPreset::MovH264SdrV1 => "video/quicktime",
-        }
-        .to_owned();
+        let media_type = sources.request.output.media_type().to_owned();
         let mut commands = rendered.item_commands.clone();
         commands.extend(rendered.video_remux_commands.iter().cloned());
         commands.push(rendered.command.clone());
@@ -743,15 +740,16 @@ impl Pipeline {
             self.config.limits.threads,
             job.id.clone(),
         );
-        let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
-        let rendered = runner.render_clip_with_control(
-            &source.path,
-            recipe,
-            &staging.output,
-            &self.cancellation,
-            |progress| progress_writer.record(&progress),
-        )?;
-        drop(progress_writer);
+        let rendered = {
+            let mut progress_writer = JobProgressWriter::new(store, owner_id, &job.id);
+            runner.render_clip_with_control(
+                &source.path,
+                recipe,
+                &staging.output,
+                &self.cancellation,
+                |progress| progress_writer.record(&progress),
+            )?
+        };
         store.render_job_set_progress(owner_id, &job.id, 0.75)?;
         ensure!(!self.cancellation.is_cancelled(), "video render cancelled");
         let source_hash_after = sha256_file(&source.path)?;
@@ -804,11 +802,7 @@ impl Pipeline {
             "color_transfer": rendered.output_probe.color_transfer,
         });
         let created_at = Utc::now();
-        let media_type = match recipe.output {
-            ClipOutputPreset::Mp4H264SdrV1 => "video/mp4",
-            ClipOutputPreset::MovH264SdrV1 => "video/quicktime",
-        }
-        .to_owned();
+        let media_type = recipe.output.media_type().to_owned();
         let manifest_destination = manifest_path(destination);
         let manifest = json!({
             "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -921,7 +915,7 @@ impl Pipeline {
             output_sha256 == rendered.derivative.sha256,
             "photo renderer checksum did not match verification checksum"
         );
-        let media_type = preset_media_type(recipe.output).to_owned();
+        let media_type = recipe.output.media_type().to_owned();
         let verification = json!({
             "source_hash_before": source_hash_before(source_snapshot),
             "source_hash_after": source_hash_after,
@@ -1124,12 +1118,8 @@ fn parse_photo_recipe(frozen: &str) -> anyhow::Result<PhotoRenderRecipe> {
         .and_then(|output| output.get("preset"))
         .and_then(Value::as_str)
         .context("photo output preset is missing")?;
-    let output = match preset {
-        "jpeg-srgb-v1" => PhotoOutputPreset::JpegSrgbV1,
-        "png-srgb-v1" => PhotoOutputPreset::PngSrgbV1,
-        "tiff-srgb-v1" => PhotoOutputPreset::TiffSrgbV1,
-        other => bail!("unsupported photo output preset {other:?}"),
-    };
+    let output = PhotoOutputPreset::parse(preset)
+        .with_context(|| format!("unsupported photo output preset {preset:?}"))?;
     Ok(PhotoRenderRecipe {
         crop,
         rotation_degrees,
@@ -1203,15 +1193,14 @@ fn parse_video_clip_recipe(frozen: &str) -> anyhow::Result<ClipRenderRequest> {
         Some(other) => bail!("unsupported video clip audio mode {other:?}"),
         None => bail!("video clip audio mode is missing"),
     };
-    let output = match schema
+    let output_preset = schema
         .get("output")
         .and_then(Value::as_object)
         .and_then(|value| value.get("preset"))
-        .and_then(Value::as_str)
-    {
-        Some("mp4-h264-sdr-v1") => ClipOutputPreset::Mp4H264SdrV1,
-        Some("mov-h264-sdr-v1") => ClipOutputPreset::MovH264SdrV1,
-        Some(other) => bail!("unsupported video clip output preset {other:?}"),
+        .and_then(Value::as_str);
+    let output = match output_preset {
+        Some(preset) => ClipOutputPreset::parse(preset)
+            .with_context(|| format!("unsupported video clip output preset {preset:?}"))?,
         None => bail!("video clip output preset is missing"),
     };
     let recipe = ClipRenderRequest {
@@ -1261,15 +1250,14 @@ fn parse_reel_v1_recipe(frozen: &str) -> anyhow::Result<ReelV1Recipe> {
         Some(other) => bail!("unsupported ordered reel audio mode {other:?}"),
         None => bail!("ordered reel audio mode is missing"),
     };
-    let output = match schema
+    let output_preset = schema
         .get("output")
         .and_then(Value::as_object)
         .and_then(|value| value.get("preset"))
-        .and_then(Value::as_str)
-    {
-        Some("mp4-h264-sdr-v1") => ClipOutputPreset::Mp4H264SdrV1,
-        Some("mov-h264-sdr-v1") => ClipOutputPreset::MovH264SdrV1,
-        Some(other) => bail!("unsupported ordered reel output preset {other:?}"),
+        .and_then(Value::as_str);
+    let output = match output_preset {
+        Some(preset) => ClipOutputPreset::parse(preset)
+            .with_context(|| format!("unsupported ordered reel output preset {preset:?}"))?,
         None => bail!("ordered reel output preset is missing"),
     };
     Ok(ReelV1Recipe { audio, output })
@@ -1678,17 +1666,11 @@ fn validate_photo_destination(path: &Path, preset: PhotoOutputPreset) -> anyhow:
         .extension()
         .and_then(|value| value.to_str())
         .context("photo render destination needs a file extension")?;
-    let valid = match preset {
-        PhotoOutputPreset::JpegSrgbV1 => {
-            extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
-        }
-        PhotoOutputPreset::PngSrgbV1 => extension.eq_ignore_ascii_case("png"),
-        PhotoOutputPreset::TiffSrgbV1 => {
-            extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
-        }
-    };
     ensure!(
-        valid,
+        preset
+            .extensions()
+            .iter()
+            .any(|allowed| extension.eq_ignore_ascii_case(allowed)),
         "destination extension does not match preset {}",
         preset.as_str()
     );
@@ -1700,24 +1682,15 @@ fn validate_video_destination(path: &Path, preset: ClipOutputPreset) -> anyhow::
         .extension()
         .and_then(|value| value.to_str())
         .context("video render destination needs a file extension")?;
-    let valid = match preset {
-        ClipOutputPreset::Mp4H264SdrV1 => extension.eq_ignore_ascii_case("mp4"),
-        ClipOutputPreset::MovH264SdrV1 => extension.eq_ignore_ascii_case("mov"),
-    };
     ensure!(
-        valid,
+        preset
+            .extensions()
+            .iter()
+            .any(|allowed| extension.eq_ignore_ascii_case(allowed)),
         "destination extension does not match preset {}",
         preset.as_str()
     );
     Ok(())
-}
-
-fn preset_media_type(preset: PhotoOutputPreset) -> &'static str {
-    match preset {
-        PhotoOutputPreset::JpegSrgbV1 => "image/jpeg",
-        PhotoOutputPreset::PngSrgbV1 => "image/png",
-        PhotoOutputPreset::TiffSrgbV1 => "image/tiff",
-    }
 }
 
 fn manifest_path(destination: &Path) -> PathBuf {

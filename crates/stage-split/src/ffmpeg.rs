@@ -230,6 +230,11 @@ pub enum ClipOutputPreset {
 }
 
 impl ClipOutputPreset {
+    /// Every preset this renderer supports, in display order. The UI preset catalog is built
+    /// from this list — preset facts have exactly one definition.
+    pub const ALL: [Self; 2] = [Self::Mp4H264SdrV1, Self::MovH264SdrV1];
+
+    /// Frozen contract value used in recipes and manifests; never renamed.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mp4H264SdrV1 => "mp4-h264-sdr-v1",
@@ -237,11 +242,48 @@ impl ClipOutputPreset {
         }
     }
 
-    const fn muxer(self) -> &'static str {
+    pub const fn muxer(self) -> &'static str {
         match self {
             Self::Mp4H264SdrV1 => "mp4",
             Self::MovH264SdrV1 => "mov",
         }
+    }
+
+    /// Canonical output extension (save dialogs, destination validation).
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4H264SdrV1 => "mp4",
+            Self::MovH264SdrV1 => "mov",
+        }
+    }
+
+    /// Every destination extension the preset verifies.
+    pub const fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Mp4H264SdrV1 => &["mp4"],
+            Self::MovH264SdrV1 => &["mov"],
+        }
+    }
+
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::Mp4H264SdrV1 => "video/mp4",
+            Self::MovH264SdrV1 => "video/quicktime",
+        }
+    }
+
+    /// Human label shown in the UI; also the saved recipe name (frozen contract).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mp4H264SdrV1 => "MP4 — compatible H.264",
+            Self::MovH264SdrV1 => "MOV — editing-friendly H.264",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|preset| preset.as_str() == value)
     }
 }
 
@@ -1036,7 +1078,7 @@ impl Runner {
                 spec.out_s, source_probe.duration_s
             )));
         }
-        let source_color_handling = validate_h264_sdr_source(&source_probe)?;
+        let source_color_handling = validate_h264_sdr_source(source_probe)?;
         if spec.audio == ClipAudio::Source && source_probe.has_audio {
             self.require_ffmpeg_component("-encoders", "aac", "audio encoder")?;
         }
@@ -1044,7 +1086,7 @@ impl Runner {
             self.require_ffmpeg_component("-filters", filter, "video filter")?;
         }
         let (filter_chain, expected_width, expected_height) =
-            clip_filter_chain(&source_probe, &spec.as_clip_request())?;
+            clip_filter_chain(source_probe, &spec.as_clip_request())?;
 
         let parent = staging_output
             .parent()
