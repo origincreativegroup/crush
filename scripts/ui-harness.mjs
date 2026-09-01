@@ -849,6 +849,64 @@ const tests = {
     assert.equal(await frame.locator("#app-shell").getAttribute("class"), "app-shell");
   },
 
+  async "library-collections"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-review").click();
+    const tiles = frame.locator("#review-grid .review-tile");
+    await poll(async () => (await tiles.count()) === 3);
+    // Select two tiles so the batch bar appears; with no collections yet the target
+    // select must say so honestly instead of offering an empty list.
+    await frame.locator("#review-grid .review-select input").nth(0).check();
+    await frame.locator("#review-grid .review-select input").nth(1).check();
+    const bar = frame.locator("#batch-bar");
+    await poll(async () => bar.isVisible());
+    const batchSelect = frame.locator("#batch-collection");
+    assert.equal(
+      (await batchSelect.locator("option").first().textContent())?.trim(),
+      "No collections yet — create one to group assets",
+    );
+    assert.equal(await frame.locator("#batch-add-collection").isDisabled(), true);
+    // "New collection…" swaps the select for an inline name field (no prompt dialog).
+    await batchSelect.selectOption({ label: "New collection…" });
+    const nameInput = frame.locator("#batch-collection-name");
+    await nameInput.waitFor({ state: "visible" });
+    await nameInput.fill("MacBook user test");
+    await frame.locator("#batch-collection-create").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) => call.command === "collection_create" && call.args.name === "MacBook user test",
+      );
+    });
+    // The created collection becomes the batch target without a second pick.
+    await poll(async () => (await batchSelect.inputValue()) !== "");
+    await frame.locator("#batch-add-collection").click();
+    await poll(async () => {
+      const calls = await mockCalls(page);
+      return calls.some(
+        (call) =>
+          call.command === "review_batch"
+          && call.args.ops?.length === 2
+          && call.args.ops.every(
+            (op) => op.op === "add_to_collection" && Boolean(op.collectionId),
+          ),
+      );
+    });
+    await poll(async () =>
+      /Added 2 assets to the collection\./.test(
+        await visibleText(frame.locator("#review-message")),
+      ));
+    // The grid refreshes with the new membership pill on the previously uncollected tile.
+    await poll(async () =>
+      (await tiles.nth(1).locator(".review-flags").textContent())?.includes("▤ 1 collection") === true);
+    // The filter select now offers the created collection too.
+    await frame.locator("#filter-more").click();
+    await poll(async () => {
+      const options = await frame.locator("#filter-collection option").allTextContents();
+      return options.includes("MacBook user test");
+    });
+  },
+
   async "library-feedback"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-review").click();

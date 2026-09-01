@@ -940,6 +940,21 @@ nav {
   font-weight: 650;
 }
 
+.batch-collection-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.batch-collection-new input {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #3a3a42;
+  border-radius: 7px;
+  color: #d5d5da;
+  background: #141416;
+}
+
 .review-content {
   height: calc(100vh - 86px);
   overflow: auto;
@@ -950,6 +965,13 @@ nav {
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 14px;
   padding: 18px 26px 40px;
+  transition: opacity 120ms ease;
+}
+
+/* Refresh cue (Task 039 B12): the grid dims while library_browse runs instead of
+   silently keeping the previous tiles on screen. */
+.review-grid.refreshing {
+  opacity: 0.55;
 }
 
 .review-tile {

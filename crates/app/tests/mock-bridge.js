@@ -462,6 +462,7 @@
     "library-grid",
     "dam-home",
     "library-bulk",
+    "library-collections",
     "library-feedback",
     "library-flags",
     "library-saved-search",
@@ -491,7 +492,9 @@
           nametagsVisible: false,
           blurRequired: false,
           tags: "warm, geometric",
-          collectionIds: ["col-one"],
+          // The collections scenario starts with no memberships so the create-and-add
+          // flow is observable end to end.
+          collectionIds: scenario === "library-collections" ? [] : ["col-one"],
           stackIds: [],
         },
         {
@@ -541,8 +544,12 @@
       ]
     : [];
 
+  // The collections scenario starts with zero collections so the batch bar's honest
+  // empty state ("No collections yet…") is asserted before anything is created.
   const reviewCollections = reviewScenario
-    ? [{ id: "col-one", name: "Launch heroes", description: "", createdAt: "2026-08-28T13:00:00Z" }]
+    ? (scenario === "library-collections"
+      ? []
+      : [{ id: "col-one", name: "Launch heroes", description: "", createdAt: "2026-08-28T13:00:00Z" }])
     : [];
   const reviewCollectionItems = [];
   const reviewStacks = reviewScenario

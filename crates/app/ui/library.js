@@ -41,6 +41,10 @@
     batchReject: $("#batch-reject"),
     batchRating: $("#batch-rating"),
     batchCollection: $("#batch-collection"),
+    batchNew: $("#batch-collection-new"),
+    batchNewName: $("#batch-collection-name"),
+    batchNewCreate: $("#batch-collection-create"),
+    batchNewCancel: $("#batch-collection-cancel"),
     batchAdd: $("#batch-add-collection"),
     batchClear: $("#batch-clear"),
     empty: $("#review-empty"),
@@ -360,11 +364,73 @@
   // ---------- batch bar ----------
   function renderBatchBar() {
     const count = state.selection.size;
+    // Leaving the inline create form behind when the selection empties keeps the bar
+    // honest: it only ever offers targets for assets that are actually selected.
+    if (count === 0 && !el.batchNew.hidden) {
+      el.batchNew.hidden = true;
+      el.batchCollection.hidden = false;
+      el.batchCollection.value = "";
+    }
+    const target = el.batchCollection.value;
     el.batchBar.hidden = count === 0;
     el.batchCount.textContent = `${count} selected`;
     el.batchPick.disabled = count === 0;
     el.batchReject.disabled = count === 0;
-    el.batchAdd.disabled = count === 0 || !el.batchCollection.value;
+    el.batchAdd.disabled = count === 0 || !target || target === "new";
+  }
+
+  // The batch "Add to collection…" select was never populated before Task 039 — the one
+  // organizational workflow the UI could not complete. It mirrors the filter select's
+  // option shape plus an inline "New collection…" path (no permanent extra dropdown: the
+  // select already existed, the create form only appears while it is used).
+  function renderBatchCollectionOptions(selectedId = null) {
+    const current = selectedId ?? el.batchCollection.value;
+    el.batchCollection.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = state.collections.length
+      ? "Add to collection…"
+      : "No collections yet — create one to group assets";
+    el.batchCollection.append(placeholder);
+    for (const collection of state.collections) {
+      const option = document.createElement("option");
+      option.value = collection.id;
+      option.textContent = collection.name;
+      el.batchCollection.append(option);
+    }
+    const create = document.createElement("option");
+    create.value = "new";
+    create.textContent = "New collection…";
+    el.batchCollection.append(create);
+    el.batchCollection.value = state.collections.some((set) => set.id === current) ? current : "";
+  }
+
+  function closeBatchNewForm() {
+    el.batchNew.hidden = true;
+    el.batchCollection.hidden = false;
+    el.batchCollection.value = "";
+    renderBatchBar();
+  }
+
+  async function createBatchCollection() {
+    const name = el.batchNewName.value.trim();
+    if (!name) return;
+    el.batchNewCreate.disabled = true;
+    try {
+      const created = await invoke("collection_create", { name });
+      el.batchNew.hidden = true;
+      el.batchCollection.hidden = false;
+      showMessage(`Created collection “${name}”.`);
+      await refreshReview();
+      // refreshReview rebuilds the selects from the fresh list; re-target the batch bar
+      // at the new collection so Add applies the pending selection to it immediately.
+      renderBatchCollectionOptions(created.id);
+      renderBatchBar();
+    } catch (error) {
+      showMessage(String(error), true);
+    } finally {
+      el.batchNewCreate.disabled = false;
+    }
   }
 
   function selectionOps(op, extra = {}) {
@@ -424,6 +490,7 @@
   function renderAll() {
     renderCounts();
     renderFilterOptions();
+    renderBatchCollectionOptions();
     renderSavedSearches();
     renderGrid();
     renderBatchBar();
@@ -697,10 +764,32 @@
       runBatch(selectionOps("rate", { rating }), (applied) => `Rated ${applied} assets.`);
     }
   });
-  el.batchCollection.addEventListener("change", renderBatchBar);
+  el.batchCollection.addEventListener("change", () => {
+    const creating = el.batchCollection.value === "new";
+    el.batchNew.hidden = !creating;
+    el.batchCollection.hidden = creating;
+    if (creating) {
+      el.batchNewName.value = "";
+      el.batchNewName.focus();
+    }
+    renderBatchBar();
+  });
+  el.batchNewCancel.addEventListener("click", closeBatchNewForm);
+  el.batchNewCreate.addEventListener("click", createBatchCollection);
+  el.batchNewName.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      createBatchCollection();
+    } else if (event.key === "Escape") {
+      // Cancel the inline form, not the drawer behind it — this stays ahead of the
+      // global Esc handler on purpose.
+      event.stopPropagation();
+      closeBatchNewForm();
+    }
+  });
   el.batchAdd.addEventListener("click", () => {
     const collectionId = el.batchCollection.value;
-    if (!collectionId || !state.selection.size) return;
+    if (!collectionId || collectionId === "new" || !state.selection.size) return;
     runBatch(
       selectionOps("add_to_collection", { collectionId }),
       (applied) => `Added ${applied} asset${applied === 1 ? "" : "s"} to the collection.`,
