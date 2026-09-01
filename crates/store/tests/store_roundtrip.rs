@@ -140,7 +140,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -151,7 +151,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 11);
+    assert_eq!(reopened.schema_version().unwrap(), 12);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -208,7 +208,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -226,7 +226,7 @@ fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
     // A first run has no database to back up: no snapshot and no backups directory.
     let fresh = TestDir::new("migration-snapshot-fresh");
     let fresh_store = Store::open(fresh.path()).unwrap();
-    assert_eq!(fresh_store.schema_version().unwrap(), 11);
+    assert_eq!(fresh_store.schema_version().unwrap(), 12);
     assert!(
         !fresh.path().join("backups").exists(),
         "a first run must not write a pre-migration snapshot"
@@ -277,7 +277,7 @@ fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
     std::mem::forget(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     let videos = store.videos(DEFAULT_OWNER_ID).unwrap();
     assert_eq!(videos.len(), 1, "the upgraded database keeps its data");
     assert_eq!(videos[0].id, "legacy-video");
@@ -320,7 +320,7 @@ fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
     // Reopening with no pending migrations must not add another snapshot.
     drop(store);
     let reopened = Store::open(directory.path()).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 11);
+    assert_eq!(reopened.schema_version().unwrap(), 12);
     let snapshots_after = std::fs::read_dir(&backups_dir).unwrap().count();
     assert_eq!(
         snapshots_after, 1,
@@ -378,7 +378,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -1808,7 +1808,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -3465,7 +3465,7 @@ fn schema_v7_upgrades_to_collections_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(
         store
@@ -4083,7 +4083,7 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
     drop(connection);
 
     let mut store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
     // The v9 plan surfaces are live on the upgraded database.
@@ -5005,9 +5005,11 @@ fn imported_spans_survive_resplit_and_carry_historical_plan_provenance() {
     let mut profiled = item.clone();
     profiled.profile_version = Some(1);
     assert!(store.plan_add_item(DEFAULT_OWNER_ID, &profiled).is_err());
-    // Outside the span is refused.
+    // Task 037: the video (12.5 s) is the clamp, not the span — only boundaries past the
+    // source duration are refused. Extension inside the video is covered in depth by
+    // span_plan_items_clamp_to_the_source_video_and_record_adjusted_provenance.
     let mut wide = item.clone();
-    wide.end_s = Some(11.0);
+    wide.end_s = Some(13.0);
     assert!(store.plan_add_item(DEFAULT_OWNER_ID, &wide).is_err());
 
     // Revisions carry the provenance through a restore.
@@ -5760,4 +5762,457 @@ fn render_progress_update_is_a_single_guarded_write() {
         .unwrap()
         .unwrap();
     assert_eq!(attempt.progress, 0.5);
+}
+
+/// Task 037: an imported span's boundaries are the plan item's default, not a physical
+/// limit. Span items clamp to the source video (0..duration), the store derives the honest
+/// `adjusted` provenance marker as boundaries move away from or back to the imported
+/// default, and the v12 SQL triggers enforce the same range against raw SQL.
+#[test]
+fn span_plan_items_clamp_to_the_source_video_and_record_adjusted_provenance() {
+    let directory = TestDir::new("span-item-clamp");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-vc", "vc-sha"))
+        .unwrap();
+    store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-vc", "video-vc", "V2-0001_S1", 2.0, 9.0),
+        )
+        .unwrap();
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-vc", "adjustable clips"))
+        .unwrap();
+
+    let mut item = plan_item("plan-vc", MediaKind::Span, "span-vc");
+    item.start_s = Some(2.0);
+    item.end_s = Some(9.0);
+    item.origin = PlanOrigin::Historical;
+    item.provenance_json = serde_json::json!({
+        "source": "reel_studio",
+        "external_id": "V2-0001_S1",
+        "import_id": "import-1",
+        "boundary_basis": "catalogue_tc",
+        "boundary_tolerance_s": 0.5,
+    })
+    .to_string();
+    // The imported default carries no marker: nothing was adjusted away from the span.
+    store.plan_add_item(DEFAULT_OWNER_ID, &item).unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[0];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert!(provenance.get("adjusted").is_none());
+
+    // Extend past the imported span but inside the video (12.5 s): accepted, and honestly
+    // marked as adjusted with the import lineage preserved.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc",
+            &PlanItemPatch {
+                start_s: Some(1.0),
+                end_s: Some(11.5),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[0];
+    assert_eq!(stored.start_s, Some(1.0));
+    assert_eq!(stored.end_s, Some(11.5));
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true);
+    assert!(provenance["adjusted_at"].is_string());
+    assert_eq!(provenance["source"], "reel_studio");
+    assert_eq!(provenance["external_id"], "V2-0001_S1");
+    assert_eq!(provenance["import_id"], "import-1");
+    assert_eq!(provenance["boundary_basis"], "catalogue_tc");
+
+    // Shrinking back inside the span still works; the marker stays while the boundaries
+    // differ from the imported default.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc",
+            &PlanItemPatch {
+                start_s: Some(3.0),
+                end_s: Some(5.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[0];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true);
+
+    // Returning to the imported default clears the marker again.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc",
+            &PlanItemPatch {
+                start_s: Some(2.0),
+                end_s: Some(9.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[0];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert!(provenance.get("adjusted").is_none());
+    assert!(provenance.get("adjusted_at").is_none());
+    assert_eq!(provenance["external_id"], "V2-0001_S1");
+
+    // Items whose provenance records their import-time boundaries (the importer writes
+    // imported_start_s/imported_end_s) derive the marker against those: a recipe's trim of
+    // the catalogue segment is the imported default, not an adjustment, even though it
+    // differs from the span row.
+    store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-vc-2", "video-vc", "V2-0001_S2", 2.0, 9.0),
+        )
+        .unwrap();
+    let mut trimmed = plan_item("plan-vc", MediaKind::Span, "span-vc-2");
+    trimmed.start_s = Some(3.0);
+    trimmed.end_s = Some(6.0);
+    trimmed.origin = PlanOrigin::Historical;
+    trimmed.provenance_json = serde_json::json!({
+        "source": "reel_studio",
+        "external_id": "V2-0001_S1",
+        "import_id": "import-1",
+        "imported_start_s": 3.0,
+        "imported_end_s": 6.0,
+    })
+    .to_string();
+    store.plan_add_item(DEFAULT_OWNER_ID, &trimmed).unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[1];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert!(
+        provenance.get("adjusted").is_none(),
+        "a fresh import is not an adjustment: {provenance}"
+    );
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc-2",
+            &PlanItemPatch {
+                start_s: Some(1.0),
+                end_s: Some(8.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[1];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true);
+    // Returning to the recorded import boundaries clears the marker again.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc-2",
+            &PlanItemPatch {
+                start_s: Some(3.0),
+                end_s: Some(6.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[1];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert!(provenance.get("adjusted").is_none(), "{provenance}");
+    store
+        .plan_remove_item(DEFAULT_OWNER_ID, "plan-vc", MediaKind::Span, "span-vc-2")
+        .unwrap();
+
+    // Boundaries past the video duration are refused by the store...
+    assert!(store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc",
+            &PlanItemPatch {
+                end_s: Some(13.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .is_err());
+    // ...and cannot be smuggled in through raw SQL (the rebuilt v12 trigger arms).
+    let audit = Connection::open(store.db_path()).unwrap();
+    assert!(audit
+        .execute(
+            "UPDATE plan_items SET end_s = 13.0
+             WHERE owner_id = 'local' AND plan_id = 'plan-vc'",
+            [],
+        )
+        .is_err());
+    assert!(audit
+        .execute(
+            "INSERT INTO plan_items (owner_id, plan_id, media_kind, media_id, position,
+                                     start_s, end_s, origin, provenance_json, added_at)
+             VALUES ('local', 'plan-vc', 'span', 'span-vc', 1, 1.0, 13.0, 'historical',
+                     '{\"source\":\"reel_studio\",\"external_id\":\"V2-0001_S1\"}',
+                     '2026-08-28T12:00:00Z')",
+            [],
+        )
+        .is_err());
+    // Raw SQL now accepts what the frozen-container trigger refused: beyond the span,
+    // inside the video.
+    audit
+        .execute(
+            "UPDATE plan_items SET end_s = 12.4
+             WHERE owner_id = 'local' AND plan_id = 'plan-vc'",
+            [],
+        )
+        .unwrap();
+    drop(audit);
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc",
+            &PlanItemPatch {
+                start_s: Some(2.0),
+                end_s: Some(9.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+
+    // A video without a known duration cannot host span item edits — refused with a clear
+    // error instead of silently re-freezing the item inside the span.
+    let mut unknown = video("video-unknown", "unknown-sha");
+    unknown.duration_s = None;
+    store.upsert_video(DEFAULT_OWNER_ID, &unknown).unwrap();
+    store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-unknown", "video-unknown", "V2-0002_S1", 1.0, 2.0),
+        )
+        .unwrap();
+    let mut unknown_item = plan_item("plan-vc", MediaKind::Span, "span-unknown");
+    unknown_item.start_s = Some(1.0);
+    unknown_item.end_s = Some(2.0);
+    unknown_item.origin = PlanOrigin::Historical;
+    unknown_item.provenance_json = serde_json::json!({
+        "source": "reel_studio",
+        "external_id": "V2-0002_S1",
+    })
+    .to_string();
+    let error = store
+        .plan_add_item(DEFAULT_OWNER_ID, &unknown_item)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("duration is unknown"),
+        "unexpected error: {error:#}"
+    );
+
+    // Shots keep their own clamp: a shot item beyond its source shot is still refused.
+    store
+        .insert_shots(DEFAULT_OWNER_ID, &[shot("shot-vc", "video-vc", 0)])
+        .unwrap();
+    let mut shot_item = plan_item("plan-vc", MediaKind::Shot, "shot-vc");
+    shot_item.end_s = Some(5.0);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &shot_item).is_err());
+
+    // Revision restore re-derives the marker against the current span row: a pre-adjustment
+    // snapshot restores without the marker, a snapshot taken while adjusted restores with it.
+    let before = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-vc", "imported default")
+        .unwrap();
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc",
+            &PlanItemPatch {
+                start_s: Some(1.0),
+                end_s: Some(11.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let adjusted = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-vc", "adjusted")
+        .unwrap();
+    store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-vc", before.revision)
+        .unwrap();
+    let restored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[0];
+    let provenance: serde_json::Value = serde_json::from_str(&restored.provenance_json).unwrap();
+    assert!(provenance.get("adjusted").is_none(), "{provenance}");
+    store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-vc", adjusted.revision)
+        .unwrap();
+    let restored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[0];
+    assert_eq!(restored.start_s, Some(1.0));
+    assert_eq!(restored.end_s, Some(11.0));
+    let provenance: serde_json::Value = serde_json::from_str(&restored.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true, "{provenance}");
+}
+
+/// Task 037 migration: v11 databases upgrade to v12 without losing rows, the frozen-span
+/// trigger arms are replaced by video-range arms, and the shot arms keep enforcing the
+/// shot clamp.
+#[test]
+fn schema_v11_spans_upgrade_to_video_range_triggers_without_losing_rows() {
+    let directory = TestDir::new("migration-v11-v12");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+        (4, include_str!("../migrations/0004_strong_shot.sql")),
+        (5, include_str!("../migrations/0005_feedback_hardening.sql")),
+        (6, include_str!("../migrations/0006_photo_jobs.sql")),
+        (7, include_str!("../migrations/0007_reference_sets.sql")),
+        (8, include_str!("../migrations/0008_collections.sql")),
+        (9, include_str!("../migrations/0009_plans.sql")),
+        (10, include_str!("../migrations/0010_rendering.sql")),
+        (
+            11,
+            include_str!("../migrations/0011_reel_studio_import.sql"),
+        ),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+
+    // v11 data: a video (12.5 s), an imported span (2..9 s), and a plan item inside the span.
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('video-mig', 'local', '/mig.mov', 'mig-sha', 12.5, 24.0, 1920, 1080,
+                       1, 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO manual_spans (id, owner_id, video_id, source, external_id, start_s,
+                                       end_s, boundary_basis, boundary_tolerance_s,
+                                       imported_at, updated_at)
+             VALUES ('span-mig', 'local', 'video-mig', 'reel_studio', 'V1-0001_S1', 2.0, 9.0,
+                     'catalogue_tc', 0.5, '2026-08-30T12:00:00Z', '2026-08-30T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO plans (id, owner_id, name, created_at, updated_at)
+             VALUES ('plan-mig', 'local', 'migrated reel', '2026-08-30T12:00:00Z',
+                     '2026-08-30T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO plan_items (owner_id, plan_id, media_kind, media_id, position,
+                                     start_s, end_s, origin, provenance_json, added_at)
+             VALUES ('local', 'plan-mig', 'span', 'span-mig', 0, 2.5, 6.0, 'historical',
+                     '{\"source\":\"reel_studio\",\"external_id\":\"V1-0001_S1\"}',
+                     '2026-08-30T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+    // On v11 the trigger enforces the frozen-container clamp: extending past the span is
+    // refused even though the video is 12.5 s long.
+    assert!(connection
+        .execute(
+            "UPDATE plan_items SET end_s = 11.0
+             WHERE owner_id = 'local' AND plan_id = 'plan-mig'",
+            [],
+        )
+        .is_err());
+    drop(connection);
+
+    // The upgrade preserves the rows and swaps the span arms to the video range.
+    let mut store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 12);
+    let items = store.plan_items(DEFAULT_OWNER_ID, "plan-mig").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].media_kind, MediaKind::Span);
+    assert_eq!(items[0].start_s, Some(2.5));
+    assert_eq!(items[0].end_s, Some(6.0));
+
+    // v12 accepts what v11 refused, through the normal store path.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-mig",
+            MediaKind::Span,
+            "span-mig",
+            &PlanItemPatch {
+                end_s: Some(11.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+
+    // The v12 trigger still refuses boundaries past the video, and the shot clamp is
+    // re-created byte-identically.
+    let audit = Connection::open(store.db_path()).unwrap();
+    assert!(audit
+        .execute(
+            "UPDATE plan_items SET end_s = 13.0
+             WHERE owner_id = 'local' AND plan_id = 'plan-mig'",
+            [],
+        )
+        .is_err());
+    connection_shots_setup(&audit);
+    assert!(
+        audit
+            .execute(
+                "INSERT INTO plan_items (owner_id, plan_id, media_kind, media_id, position,
+                                     start_s, end_s, origin, provenance_json, added_at)
+             VALUES ('local', 'plan-mig', 'shot', 'shot-mig', 1, 0.0, 5.0, 'general', '{}',
+                     '2026-08-30T12:00:00Z')",
+                [],
+            )
+            .is_err(),
+        "the shot arm must keep clamping to the source shot"
+    );
+    drop(audit);
+}
+
+/// Helper for the v11→v12 migration test: a 0..1 s shot so the shot-arm clamp can be
+/// exercised after the upgrade.
+fn connection_shots_setup(connection: &Connection) {
+    connection
+        .execute(
+            "INSERT INTO shots (id, owner_id, video_id, idx, start_s, end_s, rep_frame_s)
+             VALUES ('shot-mig', 'local', 'video-mig', 0, 0.0, 1.0, 0.4)",
+            [],
+        )
+        .unwrap();
 }

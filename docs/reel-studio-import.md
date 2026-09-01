@@ -33,6 +33,21 @@ records a **boundary basis** and tolerance on every span:
 - `catalogue_tc` — catalogue timecodes taken literally with a tolerance (default 1 s, `--keyframe-tolerance`).
   The Projects editor says so under the item, and you can nudge In/Out there.
 
+## Adjusting imported clips
+
+An imported span is a clip, not a frozen container. Its imported boundaries are the item's
+**default**, not a limit: in Projects you can extend or shrink In/Out anywhere inside the source
+video (0 to its duration). The first time an item's In/Out move away from the imported boundaries,
+Crush records `adjusted: true` (with a timestamp) in the item's provenance — derived by the store
+itself, so it always matches the saved boundaries; moving back to the imported boundaries clears
+it. `import_id`/`external_id` lineage is never lost.
+
+Re-importing never reverts an adjustment: a project whose name already exists is left untouched
+(reported as `skipped` or `unchanged`), and a refreshed span (catalogue evidence changed) does not
+invalidate items that were extended past the old span — the clamp is the video, not the span. One
+caveat: if you **delete** the project and re-import, the recipe is recreated with the catalogue's
+original boundaries; the adjustment lived on the deleted project.
+
 ## Running it
 
 Dry run first — nothing is written except an audit row:
@@ -68,7 +83,10 @@ reported as `skipped` so your edits are never overwritten.
 
 ## Limits
 
-- Originals must already be indexed in Crush (`not_indexed` tells you which folder to add).
+- Originals must already be indexed in Crush (`not_indexed` tells you which folder to add). A
+  matched source whose duration was never probed (indexing never finished) is also reported as
+  `not_indexed` per segment: span clips clamp to the source video, so a video of unknown length
+  cannot host them until it is re-indexed.
 - Catalogue descriptions are stored on spans; they are not yet part of the search index.
 - Reel v2 treatments beyond hard cuts (captions, music, motion, keyframed crops, extended grades)
   are stored faithfully but the Task 021 renderer refuses them with an explicit capability error

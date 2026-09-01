@@ -55,7 +55,9 @@ this file remains the deeper implementation history and standing engineering rul
 Task 022 (Reel Studio importer) is merged onto the Task 021 render branch as a single squash merge:
 schema v11 manual spans + import ledger, dry-run/idempotent importer, `crushctl import`, the Library
 import dialog, and span rendering at the executor level with honest Historical/Imported provenance
-pills; app-level span reel/clip export lands with TASK-037. The 2026-08-30 editor-review pass is
+pills; app-level span reel/clip export landed with TASK-037 (schema v12: span plan items clamp to
+the source video, not the span — imported spans are adjustable clips with a derived `adjusted`
+provenance marker). The 2026-08-30 editor-review pass is
 implemented and browser-harness covered:
 detail-player reopen fix, Standout control, Pick/Reject/Min-rating Review filters, photo export from
 the detail drawer, photo re-index + remove-from-library, an inline "stored intent, not yet
@@ -102,8 +104,9 @@ Every task landed as its own squash PR gated by Linux + macOS CI: #14–#19 (ori
 ops), #24+#27 (027 app robustness + integration repair), #25 (018a style learner), #29 (018b style
 UI), #30 (019a DAM organization), #31 (019b review UI), #33+#34 (020a editorial plans core).
 
-Schema is at v11 (0009 plans with boundary-safe shot clamps and selection provenance; 0010 durable
-render recipes/jobs/attempts/manifests; 0011 Reel Studio manual spans + import ledger). App command
+Schema is at v12 (0009 plans with boundary-safe shot clamps and selection provenance; 0010 durable
+render recipes/jobs/attempts/manifests; 0011 Reel Studio manual spans + import ledger; 0012 span
+plan items clamp to the source video). App command
 surface is 71 registered commands.
 
 Branching note for future agents: the app `generate_handler!` list and the big command block in

@@ -1433,48 +1433,73 @@ fn resolve_reel_v1_sources(
         );
         // Shots come from Crush's own scene detection; spans are human-decided boundaries
         // (imported from Reel Studio or set manually) that survive resplit. Both bind to one
-        // owner-scoped video and must contain the frozen in/out.
-        let (video_id, bound_start, bound_end) = if item.media_kind == "span" {
+        // owner-scoped video that must contain the frozen in/out. Span items are adjustable
+        // clips (Task 037): their frozen boundaries must sit inside the SOURCE VIDEO
+        // (0..duration) — the imported span is the item's default, not a limit — with the
+        // same +0.001 s slack as the store and the plan_item_boundaries_* SQL triggers, so
+        // every store-accepted item is renderable. A span whose video duration is unknown
+        // cannot be verified and is refused.
+        let video = if item.media_kind == "span" {
             let span = store
                 .manual_span_by_id(owner_id, &item.media_id)?
                 .with_context(|| {
                     format!("reel span {} is not owned by this owner", item.media_id)
                 })?;
-            (span.video_id, span.start_s, span.end_s)
+            let video = store
+                .video_by_id(owner_id, &span.video_id)?
+                .with_context(|| {
+                    format!("reel span {} has no owned source video", item.media_id)
+                })?;
+            ensure!(
+                span.video_id == snapshot.source_id,
+                "reel span source_id does not match its owner-scoped video"
+            );
+            let duration = video.duration_s.with_context(|| {
+                format!(
+                    "reel span {} source video {} has no known duration; re-index it \
+                     before rendering",
+                    item.media_id, span.video_id
+                )
+            })?;
+            ensure!(
+                item.start_s >= 0.0 && item.end_s <= duration + 0.001,
+                "frozen reel span boundaries must stay inside the source video \
+                 0..{duration:.3}"
+            );
+            video
         } else {
             let shot = store
                 .shot_by_id(owner_id, &item.media_id)?
                 .with_context(|| {
                     format!("reel shot {} is not owned by this owner", item.media_id)
                 })?;
-            (shot.video_id, shot.start_s, shot.end_s)
+            let video = store
+                .video_by_id(owner_id, &shot.video_id)?
+                .with_context(|| {
+                    format!("reel shot {} has no owned source video", item.media_id)
+                })?;
+            ensure!(
+                shot.video_id == snapshot.source_id,
+                "reel shot source_id does not match its owner-scoped video"
+            );
+            ensure!(
+                item.start_s >= shot.start_s && item.end_s <= shot.end_s,
+                "frozen reel boundaries must stay inside shot {}",
+                item.media_id
+            );
+            video
         };
-        ensure!(
-            video_id == snapshot.source_id,
-            "reel {} source_id does not match its owner-scoped video",
-            item.media_kind
-        );
-        ensure!(
-            item.start_s >= bound_start && item.end_s <= bound_end,
-            "frozen reel boundaries must stay inside {} {}",
-            item.media_kind,
-            item.media_id
-        );
-        let video = store.video_by_id(owner_id, &video_id)?.with_context(|| {
-            format!(
-                "reel {} {} has no owned source video",
-                item.media_kind, item.media_id
-            )
-        })?;
         ensure!(
             video.sha256.eq_ignore_ascii_case(&snapshot.sha256),
             "library video hash changed after this reel was queued"
         );
         if let Some(duration) = video.duration_s {
-            ensure!(
-                item.end_s <= duration,
-                "frozen reel boundary exceeds the source duration"
-            );
+            if item.media_kind != "span" {
+                ensure!(
+                    item.end_s <= duration,
+                    "frozen reel boundary exceeds the source duration"
+                );
+            }
         }
         if recipe.audio == ClipAudio::Source {
             ensure!(
@@ -1572,8 +1597,8 @@ fn parse_video_source_snapshot(value: &str) -> anyhow::Result<VideoSourceSnapsho
         .context("video source snapshot must be an object")?;
     let media_kind = required_string(source, "media_kind", "video source")?;
     ensure!(
-        matches!(media_kind, "video" | "shot"),
-        "video clip source must have media_kind video or shot"
+        matches!(media_kind, "video" | "shot" | "span"),
+        "video clip source must have media_kind video, shot, or span"
     );
     Ok(VideoSourceSnapshot {
         media_kind: media_kind.to_owned(),
@@ -1620,17 +1645,47 @@ fn resolve_video_source(
                 .video_by_id(owner_id, &shot.video_id)?
                 .with_context(|| format!("shot {} has no owned source video", snapshot.media_id))?
         }
-        _ => unreachable!("snapshot parser accepts video or shot"),
+        // Task 037: an imported span is an adjustable clip — its clip boundaries are
+        // validated against the source video (0..duration), not the span, mirroring the
+        // reel executor and the store.
+        "span" => {
+            let span = store
+                .manual_span_by_id(owner_id, &snapshot.media_id)?
+                .with_context(|| {
+                    format!("span {} is not owned by this owner", snapshot.media_id)
+                })?;
+            ensure!(
+                span.video_id == snapshot.source_id,
+                "span source_id does not match its owner-scoped video"
+            );
+            let video = store
+                .video_by_id(owner_id, &span.video_id)?
+                .with_context(|| format!("span {} has no owned source video", snapshot.media_id))?;
+            let duration = video.duration_s.with_context(|| {
+                format!(
+                    "span {} source video {} has no known duration; re-index it before rendering",
+                    snapshot.media_id, span.video_id
+                )
+            })?;
+            ensure!(
+                recipe.in_s >= 0.0 && recipe.out_s <= duration + 0.001,
+                "video clip boundaries must stay inside the source video 0..{duration:.3}"
+            );
+            video
+        }
+        _ => unreachable!("snapshot parser accepts video, shot, or span"),
     };
     ensure!(
         video.sha256.eq_ignore_ascii_case(&snapshot.sha256),
         "library video hash changed after this render was queued"
     );
     if let Some(duration) = video.duration_s {
-        ensure!(
-            recipe.out_s <= duration,
-            "video clip boundary exceeds the source duration"
-        );
+        if snapshot.media_kind != "span" {
+            ensure!(
+                recipe.out_s <= duration,
+                "video clip boundary exceeds the source duration"
+            );
+        }
     }
     let path = PathBuf::from(video.path);
     ensure!(path.is_absolute(), "library video path is not absolute");

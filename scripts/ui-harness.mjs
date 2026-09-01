@@ -135,16 +135,25 @@ const tests = {
     const item = frame.locator("#plan-items .plans-item").first();
     assert.equal(await visibleText(item.locator(".plans-pill")), "Historical · your earlier Reel Studio choice");
     assert.match(await item.locator(".plans-muted").allTextContents().then((t) => t.join(" ")), /Imported boundaries come from the catalogue timecodes and may be off by up to 1(\.0+)? s/);
-    // Imported spans keep In/Out editing and preview, but cannot be turned into preference examples here.
+    // Task 037: span In/Out clamp to the source video (0–43.2 s), not the imported span
+    // (3.2–5.95 s), which is only the item's default.
+    assert.equal(await item.locator('input[name="startS"]').getAttribute("min"), "0");
+    assert.equal(await item.locator('input[name="startS"]').getAttribute("max"), "43.2");
+    assert.equal(await item.locator('input[name="endS"]').getAttribute("max"), "43.2");
     assert.equal(await item.locator('input[name="startS"]').inputValue(), "3.45");
     assert.equal(await item.getByRole("button", { name: "Use as preference example", exact: true }).isDisabled(), true);
     await frame.locator("#project-preview").waitFor({ state: "visible" });
     assert.equal(Number(await frame.locator("#project-preview-scrubber").getAttribute("max")), 1);
-    // Saving an edit keeps the historical label and never claims a profile.
-    await item.locator('input[name="endS"]').fill("4.2");
+    // Extending In/Out past the imported span boundaries — inside the video — saves fine,
+    // keeps the historical label, and the tolerance note stays visible.
+    await item.locator('input[name="startS"]').fill("2.5");
+    await item.locator('input[name="endS"]').fill("6.5");
     await item.getByRole("button", { name: "Save item", exact: true }).click();
-    await poll(async () => (await mockCalls(page)).some((call) => call.command === "plan_update_item" && call.args.assetType === "span"));
+    await poll(async () => (await mockCalls(page)).some((call) => call.command === "plan_update_item" && call.args.assetType === "span" && call.args.patch.startS === 2.5));
     assert.equal(await visibleText(item.locator(".plans-pill")), "Historical · your earlier Reel Studio choice");
+    assert.match(await item.locator(".plans-muted").allTextContents().then((t) => t.join(" ")), /may be off by up to 1(\.0+)? s/);
+    // The preview follows the adjusted draft range (6.5 − 2.5 s).
+    await poll(async () => Number(await frame.locator("#project-preview-scrubber").getAttribute("max")) === 4);
   },
 
   async "plans-span-export"(page) {
@@ -152,30 +161,30 @@ const tests = {
     await frame.locator("#nav-plans").click();
     await frame.locator("#plans-list .plans-list-button", { hasText: "Reel Studio · Healthy Earth" }).click();
     await frame.locator("#plan-editor").waitFor({ state: "visible" });
-    // The imported span previews like any clip, but single-clip export must stay honestly
-    // disabled: the backend only resolves shot items, so an enabled button would fail with
-    // the false "clip … is not selected in this project" error.
+    // Task 037: imported spans are first-class clips. Single-clip export and whole-reel
+    // export are both enabled for them — the backend resolves span sources against the
+    // source video, so the buttons must not sit behind a false "not supported" state.
     await frame.locator("#project-preview").waitFor({ state: "visible" });
     await frame.locator("#project-photo-export").waitFor({ state: "visible" });
     assert.equal(await visibleText(frame.locator("#project-photo-export-step")), "Export selected clip");
-    assert.equal(await frame.locator("#project-photo-preset").isDisabled(), true);
-    assert.equal(await frame.locator("#project-photo-choose").isDisabled(), true);
-    assert.equal(await frame.locator("#project-photo-render").isDisabled(), true);
-    assert.match(
-      await visibleText(frame.locator("#project-photo-status")),
-      /Clip export for imported clips lands with the next update/,
-    );
-    // Whole-reel export is gated too, with span-specific copy — not the photo message.
-    assert.equal(await frame.locator("#project-reel-choose").isDisabled(), true);
-    assert.equal(await frame.locator("#project-reel-render").isDisabled(), true);
-    assert.match(
-      await visibleText(frame.locator("#project-reel-status")),
-      /This sequence is built from imported clips\. Whole-reel export for imported clips lands with the next update\./,
-    );
-    // The honest disabled state means no render command ever fires for the span item.
-    const calls = await mockCalls(page);
-    assert.equal(calls.some((call) => call.command === "render_project_clip"), false);
-    assert.equal(calls.some((call) => call.command === "render_project_reel"), false);
+    assert.equal(await frame.locator("#project-photo-preset").isDisabled(), false);
+    await frame.locator("#project-photo-choose").click();
+    assert.match(await frame.locator("#project-photo-destination").inputValue(), /rocket-launch_export\.mp4$/);
+    await frame.locator("#project-photo-render").click();
+    await frame.locator("#project-photo-result").waitFor({ state: "visible" });
+    assert.match(await visibleText(frame.locator("#project-photo-status")), /Rendered and verified.*original video was not changed/);
+    const clipCall = (await mockCalls(page)).find((call) => call.command === "render_project_clip");
+    assert.equal(clipCall.args.shotId, "span-hist-1");
+    assert.equal(clipCall.args.projectId, "plan-hist");
+    // Whole-reel export renders the imported sequence in order.
+    await frame.locator("#project-reel-choose").click();
+    assert.match(await frame.locator("#project-reel-destination").inputValue(), /Reel-Studio-Healthy-Earth\.mp4$/);
+    await frame.locator("#project-reel-render").click();
+    await frame.locator("#project-reel-result").waitFor({ state: "visible" });
+    assert.match(await visibleText(frame.locator("#project-reel-status")), /Reel rendered and verified/);
+    const reelCall = (await mockCalls(page)).find((call) => call.command === "render_project_reel");
+    assert.equal(reelCall.args.projectId, "plan-hist");
+    assert.match(reelCall.args.destination, /Reel-Studio-Healthy-Earth\.mp4$/);
   },
 
   async "plans-editor"(page) {

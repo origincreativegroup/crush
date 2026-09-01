@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 11;
+const CURRENT_SCHEMA_VERSION: i64 = 12;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
@@ -30,6 +30,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         11,
         include_str!("../migrations/0011_reel_studio_import.sql"),
+    ),
+    (
+        12,
+        include_str!("../migrations/0012_span_item_video_range.sql"),
     ),
 ];
 
@@ -429,7 +433,10 @@ pub struct PlanItem {
     pub rank: Option<f64>,
     pub profile_version: Option<i64>,
     /// `{}` for general/personal items. Historical/imported items carry
-    /// `{source, external_id, import_id, boundary_basis, boundary_tolerance_s}`.
+    /// `{source, external_id, import_id, boundary_basis, boundary_tolerance_s}`. Span items
+    /// whose boundaries were moved away from the imported span's gain a derived
+    /// `adjusted: true` + `adjusted_at` (Task 037); the store writes and clears the marker
+    /// itself so it cannot drift from the stored boundaries or be spoofed by a caller.
     pub provenance_json: String,
     pub added_at: DateTime<Utc>,
 }
@@ -2356,8 +2363,10 @@ impl Store {
     }
 
     /// Append an item at the end of the plan (`item.position` is ignored; the next dense
-    /// position is assigned). Shot boundaries are validated against the source shot here and
-    /// again by the 0009 triggers, so raw SQL cannot smuggle an out-of-bounds clip in.
+    /// position is assigned). Shot boundaries are validated against the source shot and span
+    /// boundaries against the source video here and again by the SQL triggers, so raw SQL
+    /// cannot smuggle an out-of-bounds clip in. Span items whose boundaries differ from the
+    /// imported span's get the derived `adjusted` provenance marker.
     pub fn plan_add_item(&mut self, owner_id: &str, item: &PlanItem) -> anyhow::Result<()> {
         ensure_owner_matches(owner_id, &item.owner_id, "plan item")?;
         ensure!(
@@ -2365,7 +2374,11 @@ impl Store {
             "plan {} does not exist for this owner",
             item.plan_id
         );
-        self.validate_plan_item_against_media(owner_id, item)?;
+        let validated = self.validate_plan_item_against_media(owner_id, item)?;
+        let mut item = item.clone();
+        if let Some(span) = &validated {
+            derive_span_adjusted_provenance(&mut item, span, Utc::now())?;
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2416,8 +2429,10 @@ impl Store {
     }
 
     /// Apply a field patch to one plan item. `None` fields are left unchanged. New shot
-    /// boundaries are validated against the source shot; the position never changes here
-    /// (use [`Store::plan_reorder_items`]).
+    /// boundaries are validated against the source shot and new span boundaries against the
+    /// source video; the position never changes here (use [`Store::plan_reorder_items`]).
+    /// Span items gain or lose the derived `adjusted` provenance marker as their boundaries
+    /// move away from or back to the imported span's.
     pub fn plan_update_item(
         &mut self,
         owner_id: &str,
@@ -2449,11 +2464,14 @@ impl Store {
         if let Some(reason) = &patch.reason {
             current.reason = reason.clone();
         }
-        self.validate_plan_item_against_media(owner_id, &current)?;
+        let validated = self.validate_plan_item_against_media(owner_id, &current)?;
+        if let Some(span) = &validated {
+            derive_span_adjusted_provenance(&mut current, span, Utc::now())?;
+        }
         self.connection
             .execute(
                 "UPDATE plan_items SET start_s = ?4, end_s = ?5, pacing = ?6, crop_x = ?7,
-                        grade_json = ?8, reason = ?9
+                        grade_json = ?8, reason = ?9, provenance_json = ?11
                  WHERE owner_id = ?1 AND plan_id = ?2 AND media_kind = ?3 AND media_id = ?10",
                 params![
                     owner_id,
@@ -2466,6 +2484,7 @@ impl Store {
                     current.grade_json,
                     current.reason,
                     media_id,
+                    current.provenance_json,
                 ],
             )
             .context("failed to update plan item")?;
@@ -2682,9 +2701,15 @@ impl Store {
             .context("plan revision snapshot has no items array")?;
         let mut restored = Vec::with_capacity(items.len());
         for (index, value) in items.iter().enumerate() {
-            let item = plan_item_from_snapshot(owner_id, plan_id, value)
+            let mut item = plan_item_from_snapshot(owner_id, plan_id, value)
                 .with_context(|| format!("snapshot item {index} is invalid"))?;
-            self.validate_plan_item_against_media(owner_id, &item)?;
+            // Re-derive the span `adjusted` marker against the current span rows so a
+            // restored item never carries a marker its boundaries no longer justify (the
+            // span may have been refreshed since the snapshot was saved).
+            let validated = self.validate_plan_item_against_media(owner_id, &item)?;
+            if let Some(span) = &validated {
+                derive_span_adjusted_provenance(&mut item, span, Utc::now())?;
+            }
             restored.push(item);
         }
         let description = snapshot
@@ -3679,13 +3704,14 @@ impl Store {
     }
 
     /// Shared validation for plan items: field shapes, treatment ranges, JSON payloads, the
-    /// provenance invariant, and — for shots — the boundary check against the source shot.
-    /// Returns the referenced shot when `item` is one, so callers can reuse the read.
+    /// provenance invariant, and — for shots and spans — the boundary check against the
+    /// source media. Returns the referenced span when `item` is one, so write paths can
+    /// derive the honest `adjusted` provenance marker without re-reading the span.
     fn validate_plan_item_against_media(
         &self,
         owner_id: &str,
         item: &PlanItem,
-    ) -> anyhow::Result<Option<Shot>> {
+    ) -> anyhow::Result<Option<ManualSpan>> {
         validate_plan_item_fields(item)?;
         match item.media_kind {
             MediaKind::Photo => Ok(None),
@@ -3705,7 +3731,7 @@ impl Store {
                     shot.start_s,
                     shot.end_s
                 );
-                Ok(Some(shot))
+                Ok(None)
             }
             MediaKind::Span => {
                 let span = self
@@ -3715,15 +3741,32 @@ impl Store {
                     })?;
                 let start_s = item.start_s.context("plan item span start is required")?;
                 let end_s = item.end_s.context("plan item span end is required")?;
+                // Span items are adjustable clips (Task 037): the imported span boundaries
+                // are the item's default, not a physical limit, so the clamp is the SOURCE
+                // VIDEO's range (0..duration). The importer only matches indexed videos, so
+                // an unknown duration is a degenerate case — refuse it instead of silently
+                // re-freezing the item inside the span. The +0.001 s slack mirrors the
+                // manual_span_bounds_* and plan_item_boundaries_* SQL triggers.
+                let video = self
+                    .video_by_id(owner_id, &span.video_id)?
+                    .with_context(|| format!("span {} has no owned source video", item.media_id))?;
+                let duration = video.duration_s.with_context(|| {
+                    format!(
+                        "span {} source video duration is unknown; re-index the video \
+                         before editing its plan items",
+                        item.media_id
+                    )
+                })?;
                 ensure!(
-                    start_s >= span.start_s && end_s <= span.end_s && end_s > start_s,
-                    "plan item boundaries {start_s}..{end_s} must stay inside imported span {} \
-                     ({:.3}..{:.3})",
-                    item.media_id,
+                    start_s >= 0.0 && end_s <= duration + 0.001,
+                    "plan item boundaries {start_s}..{end_s} must stay inside the source \
+                     video {} (0..{duration:.3}); the imported span {:.3}..{:.3} is the \
+                     default, not a limit",
+                    span.video_id,
                     span.start_s,
                     span.end_s
                 );
-                Ok(None)
+                Ok(Some(span))
             }
         }
     }
@@ -8126,6 +8169,54 @@ fn validate_plan_item_provenance(item: &PlanItem) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+/// Task 037: derive the honest `adjusted` provenance marker for span plan items. The marker
+/// is derived here — inside the store's item write paths — so it can neither drift from the
+/// stored boundaries nor be spoofed by a caller. The comparison default is the item's
+/// import-time boundaries (`imported_start_s`/`imported_end_s`, recorded by the importer,
+/// because a recipe's trim of a catalogue segment is the imported default even though it
+/// differs from the span row); items without those keys (manual spans, legacy imports)
+/// compare against the span row. When the item's In/Out differ from that default the
+/// provenance gains `adjusted: true` + `adjusted_at`; returning to the default removes
+/// both. Lineage keys (`source`, `external_id`, `import_id`, boundary basis/tolerance) are
+/// preserved. Call only after `validate_plan_item_fields`, which guarantees a JSON object.
+fn derive_span_adjusted_provenance(
+    item: &mut PlanItem,
+    span: &ManualSpan,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    if item.media_kind != MediaKind::Span {
+        return Ok(());
+    }
+    let mut provenance: serde_json::Value = serde_json::from_str(&item.provenance_json)
+        .context("plan item provenance_json must be valid JSON")?;
+    let object = provenance
+        .as_object_mut()
+        .context("plan item provenance_json must be a JSON object")?;
+    let imported_start = object
+        .get("imported_start_s")
+        .and_then(serde_json::Value::as_f64);
+    let imported_end = object
+        .get("imported_end_s")
+        .and_then(serde_json::Value::as_f64);
+    let (default_start, default_end) = match (imported_start, imported_end) {
+        (Some(start), Some(end)) => (start, end),
+        // No recorded import boundaries: the span row is the only honest default.
+        _ => (span.start_s, span.end_s),
+    };
+    let matches_default = item.start_s == Some(default_start) && item.end_s == Some(default_end);
+    if matches_default {
+        object.remove("adjusted");
+        object.remove("adjusted_at");
+    } else {
+        object.insert("adjusted".to_owned(), serde_json::Value::Bool(true));
+        object.insert(
+            "adjusted_at".to_owned(),
+            serde_json::Value::String(now.to_rfc3339()),
+        );
+    }
+    item.provenance_json = provenance.to_string();
+    Ok(())
 }
 
 fn validate_manual_span(span: &ManualSpan) -> anyhow::Result<()> {

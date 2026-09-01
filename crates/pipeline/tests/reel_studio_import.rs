@@ -8,7 +8,8 @@ use crush_core::DEFAULT_OWNER_ID;
 use crush_pipeline::reel_studio_import::{import_reel_studio, ImportOptions};
 use crush_pipeline::sha256_file;
 use crush_store::{
-    MediaKind, PlanOrigin, RenderRecipeKind, Shot, SpanBoundaryBasis, Store, Video, VideoStatus,
+    MediaKind, PlanItemPatch, PlanOrigin, RenderRecipeKind, Shot, SpanBoundaryBasis, Store, Video,
+    VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -117,7 +118,9 @@ fn dry_run_reports_mappings_then_apply_is_idempotent_and_honest() {
     store
         .upsert_video(
             DEFAULT_OWNER_ID,
-            &indexed_video("video-earth", &earth, None),
+            // A real duration is required: Task 037 clamps span items to the source video,
+            // so the importer skips sources whose duration was never probed.
+            &indexed_video("video-earth", &earth, Some(6.0)),
         )
         .unwrap();
     store
@@ -559,6 +562,340 @@ fn imported_span_project_renders_through_the_reel_executor() {
     assert!(
         (duration - 2.0).abs() < 0.2,
         "two one-second cuts, got {duration}"
+    );
+    assert_eq!(
+        sha256_file(&speech).unwrap(),
+        source_hash,
+        "source untouched"
+    );
+}
+
+/// Task 037: imported span items are adjustable clips. An item extended past its imported
+/// span (inside the video) renders through the reel executor, and re-importing never
+/// reverts the adjustment — neither for an identical catalogue nor when the catalogue's
+/// segment boundaries change and the span refreshes (the old span clamp would have made
+/// the refreshed span invalidate the adjusted item).
+#[test]
+fn adjusted_span_items_survive_re_import_and_span_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let mut store = Store::open(&data_dir).unwrap();
+    let speech = fixture("synthetic-speech.mp4");
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &indexed_video("video-speech", &speech, Some(5.0)),
+        )
+        .unwrap();
+    let catalogue = temp.path().join("clips.db");
+    write_catalogue(
+        &catalogue,
+        &[
+            (
+                "V1-0002_S1",
+                "V1-0002",
+                0.0,
+                2.0,
+                "opening",
+                4,
+                1,
+                "reel-01",
+                None,
+            ),
+            (
+                "V1-0002_S2",
+                "V1-0002",
+                3.0,
+                5.0,
+                "closing",
+                4,
+                0,
+                "reel-01",
+                None,
+            ),
+        ],
+    );
+    let recipes_dir = temp.path().join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+    let recipe_path = recipe_json(
+        &recipes_dir,
+        "two-cuts.json",
+        r#"{"reel": {"theme": "Two cuts", "sequence": [
+            {"id": "V1-0002_S1", "in": 0.25, "out": 1.25},
+            {"id": "V1-0002_S2", "in": 0.25, "out": 1.25}
+        ]}}"#,
+    );
+    let mut options = ImportOptions::dry_run(&catalogue);
+    options.originals = vec![speech.parent().unwrap().to_path_buf()];
+    options.recipes = vec![recipe_path.clone()];
+    options.apply = true;
+    let _report = import_reel_studio(&mut store, &options).unwrap();
+    let plan = store.plan_list(DEFAULT_OWNER_ID).unwrap().remove(0);
+    let items = store.plan_items(DEFAULT_OWNER_ID, &plan.id).unwrap();
+    assert_eq!(items.len(), 2);
+    let span_id = items[0].media_id.clone();
+    // A recipe's trim of the catalogue segment is the imported default, not an adjustment:
+    // the importer records the import-time boundaries and no marker is derived at import.
+    for item in &items {
+        let provenance: serde_json::Value = serde_json::from_str(&item.provenance_json).unwrap();
+        assert!(
+            provenance.get("adjusted").is_none(),
+            "fresh import must not be marked adjusted: {provenance}"
+        );
+        assert_eq!(provenance["imported_start_s"], item.start_s.unwrap());
+        assert_eq!(provenance["imported_end_s"], item.end_s.unwrap());
+    }
+
+    // Extend item 1 past its imported span (0..2) but inside the video (5 s): accepted and
+    // honestly marked as adjusted.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            &plan.id,
+            MediaKind::Span,
+            &span_id,
+            &PlanItemPatch {
+                start_s: Some(0.5),
+                end_s: Some(4.5),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let adjusted = &store.plan_items(DEFAULT_OWNER_ID, &plan.id).unwrap()[0];
+    assert_eq!((adjusted.start_s, adjusted.end_s), (Some(0.5), Some(4.5)));
+    let provenance: serde_json::Value = serde_json::from_str(&adjusted.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true);
+    assert_eq!(provenance["external_id"], "V1-0002_S1");
+
+    // Re-apply the identical catalogue: nothing rewrites the plan, the adjusted boundaries
+    // and their marker survive untouched.
+    let again = import_reel_studio(&mut store, &options).unwrap();
+    assert!(again
+        .segments
+        .iter()
+        .filter(|s| s.video_id.is_some())
+        .all(|s| s.outcome == "unchanged"));
+    assert_eq!(
+        again
+            .recipes
+            .iter()
+            .find(|r| r.file.ends_with("two-cuts.json"))
+            .unwrap()
+            .outcome,
+        "unchanged",
+        "the recipe content matches and the project exists, so nothing is rewritten"
+    );
+    let after = &store.plan_items(DEFAULT_OWNER_ID, &plan.id).unwrap()[0];
+    assert_eq!((after.start_s, after.end_s), (Some(0.5), Some(4.5)));
+    let provenance: serde_json::Value = serde_json::from_str(&after.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true);
+
+    // The catalogue changed the segment's boundaries and the recipe file changed: the span
+    // refreshes, the recipe is reported as skipped (the project already exists), and the
+    // adjusted item keeps its boundaries and still validates. Under the old span clamp the
+    // refreshed span would have made this item unrenderable.
+    fs::write(
+        &recipe_path,
+        r#"{"reel": {"theme": "Two cuts", "sequence": [
+            {"id": "V1-0002_S1", "in": 0.5, "out": 1.25},
+            {"id": "V1-0002_S2", "in": 0.25, "out": 1.25}
+        ]}}"#,
+    )
+    .unwrap();
+    Connection::open(&catalogue)
+        .unwrap()
+        .execute(
+            "UPDATE segments SET tc_out = 2.5 WHERE segment_id = 'V1-0002_S1'",
+            [],
+        )
+        .unwrap();
+    let refreshed = import_reel_studio(&mut store, &options).unwrap();
+    assert_eq!(
+        refreshed
+            .segments
+            .iter()
+            .find(|s| s.segment_id == "V1-0002_S1")
+            .unwrap()
+            .outcome,
+        "updated"
+    );
+    assert_eq!(
+        refreshed
+            .recipes
+            .iter()
+            .find(|r| r.file.ends_with("two-cuts.json"))
+            .unwrap()
+            .outcome,
+        "skipped",
+        "the project already exists; edits are never overwritten"
+    );
+    let span = store
+        .manual_span_by_external_id(DEFAULT_OWNER_ID, "reel_studio", "V1-0002_S1")
+        .unwrap()
+        .unwrap();
+    assert_eq!((span.start_s, span.end_s), (0.0, 2.5), "span refreshed");
+    let after = &store.plan_items(DEFAULT_OWNER_ID, &plan.id).unwrap()[0];
+    assert_eq!((after.start_s, after.end_s), (Some(0.5), Some(4.5)));
+    let provenance: serde_json::Value = serde_json::from_str(&after.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true);
+    // A store round trip over the unchanged item still validates against the video range.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            &plan.id,
+            MediaKind::Span,
+            &span_id,
+            &PlanItemPatch {
+                reason: Some("kept".to_owned()),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+}
+
+/// Task 037: an adjusted span item (past the imported span, inside the video) renders
+/// through the durable ordered-reel path. Uses the bundled FFmpeg, so it runs on macOS only.
+#[cfg(target_os = "macos")]
+#[test]
+fn adjusted_span_item_renders_through_the_reel_executor() {
+    use crush_core::{cancellation::CancellationToken, paths::AppPaths, Config};
+    use crush_pipeline::Pipeline;
+    use crush_store::{NewRenderJob, RenderRecipe};
+
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let mut store = Store::open(&data_dir).unwrap();
+    let speech = fixture("synthetic-speech.mp4");
+    let source_hash = sha256_file(&speech).unwrap();
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &indexed_video("video-speech", &speech, Some(5.0)),
+        )
+        .unwrap();
+    let catalogue = temp.path().join("clips.db");
+    write_catalogue(
+        &catalogue,
+        &[(
+            "V1-0002_S1",
+            "V1-0002",
+            0.0,
+            2.0,
+            "opening",
+            4,
+            1,
+            "reel-01",
+            None,
+        )],
+    );
+    let recipes_dir = temp.path().join("recipes");
+    fs::create_dir_all(&recipes_dir).unwrap();
+    let recipe = recipe_json(
+        &recipes_dir,
+        "one-cut.json",
+        r#"{"reel": {"theme": "One cut", "sequence": [
+            {"id": "V1-0002_S1", "in": 0.25, "out": 1.25}
+        ]}}"#,
+    );
+    let mut options = ImportOptions::dry_run(&catalogue);
+    options.originals = vec![speech.parent().unwrap().to_path_buf()];
+    options.recipes = vec![recipe];
+    options.apply = true;
+    let _report = import_reel_studio(&mut store, &options).unwrap();
+    let plan = store.plan_list(DEFAULT_OWNER_ID).unwrap().remove(0);
+    let items = store.plan_items(DEFAULT_OWNER_ID, &plan.id).unwrap();
+
+    // Extend the item to 0.5..4.5: past the imported span (0..2), inside the video (5 s).
+    // Exporting freezes the project like the app does, so save the adjusted state as a new
+    // revision and queue the render against it.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            &plan.id,
+            MediaKind::Span,
+            &items[0].media_id,
+            &PlanItemPatch {
+                start_s: Some(0.5),
+                end_s: Some(4.5),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let revision = store
+        .plan_save_revision(DEFAULT_OWNER_ID, &plan.id, "adjusted export")
+        .unwrap()
+        .revision;
+
+    let now = chrono::Utc::now();
+    store
+        .render_recipe_create(
+            DEFAULT_OWNER_ID,
+            &RenderRecipe {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                id: "adjusted-reel-mp4".to_owned(),
+                version: 1,
+                kind: RenderRecipeKind::Reel,
+                name: "Adjusted reel MP4".to_owned(),
+                schema_json: serde_json::json!({
+                    "schema_version": 1, "kind": "reel",
+                    "transition": {"kind": "cut"}, "audio": {"mode": "source"},
+                    "output": {"preset": "mp4-h264-sdr-v1"}
+                })
+                .to_string(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    let destination = temp.path().join("adjusted-reel.mp4");
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-adjusted-reel".to_owned(),
+                recipe_id: "adjusted-reel-mp4".to_owned(),
+                recipe_version: 1,
+                plan_id: Some(plan.id.clone()),
+                plan_revision: Some(revision),
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": plan.context_key,
+                    "selection_provenance": {"origin": "historical"},
+                    "sources": [{
+                        "media_kind": "span",
+                        "media_id": items[0].media_id,
+                        "source_id": "video-speech",
+                        "sha256": source_hash,
+                        "path": speech.to_string_lossy(),
+                    }]
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {"clip": "not_used", "aesthetic": "not_used", "personal_style": "not_used"}
+                })
+                .to_string(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    drop(store);
+    let config = Config {
+        data_dir: Some(data_dir.clone()),
+        ..Config::default()
+    };
+    let paths = AppPaths::resolve(config.data_dir.as_ref()).unwrap();
+    let output = Pipeline::new(config, paths, CancellationToken::default())
+        .execute_render_job(DEFAULT_OWNER_ID, "render-adjusted-reel")
+        .unwrap();
+    assert!(Path::new(&output.output_path).is_file());
+    assert!(Path::new(&output.manifest_path).is_file());
+    let duration = output.duration_s.expect("reel duration");
+    assert!(
+        (duration - 4.0).abs() < 0.2,
+        "one four-second adjusted cut, got {duration}"
     );
     assert_eq!(
         sha256_file(&speech).unwrap(),
