@@ -452,18 +452,49 @@ pub fn import_reel_studio(
             });
             continue;
         }
-        if let Some(duration) = source.video.duration_s {
-            if segment.tc_out_s > duration + 0.001 {
-                issues.push(ImportIssue {
-                    kind: "out_of_range".to_owned(),
-                    subject: segment.segment_id.clone(),
-                    detail: format!(
-                        "tc_out {:.3} exceeds the indexed source duration {:.3}",
-                        segment.tc_out_s, duration
+        // Task 037: span items clamp to the source video, so a source without an indexed
+        // duration cannot host spans — its clips could never be edited or rendered honestly.
+        // Treat it like an unfinished index and tell the user what to do, instead of writing
+        // a span that the store would refuse on every later edit.
+        let Some(duration) = source.video.duration_s else {
+            derived.push(DerivedSpan {
+                mapping: SegmentMapping {
+                    segment_id: segment.segment_id.clone(),
+                    clip_id: segment.clip_id.clone(),
+                    video_id: Some(source.video.id.clone()),
+                    start_s: segment.tc_in_s,
+                    end_s: segment.tc_out_s,
+                    boundary_basis: "catalogue_tc".to_owned(),
+                    boundary_tolerance_s: 0.0,
+                    outcome: "skipped".to_owned(),
+                    reason: Some(
+                        "matched video has no indexed duration; re-index it before importing"
+                            .to_owned(),
                     ),
-                });
-                continue;
-            }
+                },
+                span: placeholder_span(segment, now),
+            });
+            issues.push(ImportIssue {
+                kind: "not_indexed".to_owned(),
+                subject: segment.segment_id.clone(),
+                detail: format!(
+                    "matched video {} has no indexed duration; re-index it before importing \
+                     this segment",
+                    source.video.id
+                ),
+            });
+            continue;
+        };
+        if segment.tc_out_s > duration + 0.001 {
+            issues.push(ImportIssue {
+                kind: "out_of_range".to_owned(),
+                subject: segment.segment_id.clone(),
+                detail: format!(
+                    "tc_out {:.3} exceeds the indexed source duration {:.3}",
+                    segment.tc_out_s, duration
+                ),
+            });
+            continue;
         }
         let (basis, tolerance, basis_note) =
             boundary_basis(options, runner.as_ref(), segment, &source.video);

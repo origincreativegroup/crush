@@ -117,7 +117,9 @@ fn dry_run_reports_mappings_then_apply_is_idempotent_and_honest() {
     store
         .upsert_video(
             DEFAULT_OWNER_ID,
-            &indexed_video("video-earth", &earth, None),
+            // A real duration is required: Task 037 clamps span items to the source video,
+            // so the importer skips sources whose duration was never probed.
+            &indexed_video("video-earth", &earth, Some(6.0)),
         )
         .unwrap();
     store
