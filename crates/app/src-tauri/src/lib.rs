@@ -3778,17 +3778,23 @@ mod macos {
                 let paths = AppPaths::resolve(config.data_dir.as_ref())?;
                 // Recovery touches user-chosen export volumes; a read-only or unmounted volume
                 // must not brick every subsequent launch, so failures are logged, not fatal.
-                match recover_interrupted_renders(&config, &paths) {
-                    Ok(render_recovery) => eprintln!(
-                        "startup render recovery: finalized={} failed={} staging_removed={}",
-                        render_recovery.finalized,
-                        render_recovery.failed,
-                        render_recovery.staging_removed
-                    ),
-                    Err(error) => eprintln!(
-                        "startup render recovery could not complete; interrupted renders stay recoverable: {error:#}"
-                    ),
-                }
+                // It also full-hashes published outputs, so it leaves this setup thread: launch
+                // proceeds while the blocking work runs, and the result is logged when done.
+                let recovery_config = config.clone();
+                let recovery_paths = paths.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    match recover_interrupted_renders(&recovery_config, &recovery_paths) {
+                        Ok(render_recovery) => eprintln!(
+                            "startup render recovery: finalized={} failed={} staging_removed={}",
+                            render_recovery.finalized,
+                            render_recovery.failed,
+                            render_recovery.staging_removed
+                        ),
+                        Err(error) => eprintln!(
+                            "startup render recovery could not complete; interrupted renders stay recoverable: {error:#}"
+                        ),
+                    }
+                });
                 let store = Store::open(&paths.root)?;
                 store.fail_running_jobs_as_interrupted(DEFAULT_OWNER_ID)?;
                 let scope = app.asset_protocol_scope();

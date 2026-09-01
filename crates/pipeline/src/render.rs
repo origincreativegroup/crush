@@ -1753,14 +1753,26 @@ fn optional_f64(object: &Map<String, Value>, key: &str) -> anyhow::Result<Option
 fn verified_publication_matches(output: &RenderOutput) -> anyhow::Result<bool> {
     let output_path = Path::new(&output.output_path);
     let manifest_path = Path::new(&output.manifest_path);
-    if !output_path.is_file() || !manifest_path.is_file() {
+    // Cheap short-circuit before any SHA-256: recovery must never pay a full hash for a file
+    // whose size already disagrees with the checksummed evidence. Size equality is verified
+    // first and the hashes remain the contract; mtime is deliberately never consulted.
+    let expected_size = u64::try_from(output.size_bytes).unwrap_or(u64::MAX);
+    match fs::metadata(output_path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == expected_size => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect published output {}", output_path.display())
+            })
+        }
+    }
+    if !manifest_path.is_file() {
         return Ok(false);
     }
     Ok(
         sha256_file(output_path)?.eq_ignore_ascii_case(&output.output_sha256)
-            && sha256_file(manifest_path)?.eq_ignore_ascii_case(&output.manifest_sha256)
-            && fs::metadata(output_path)?.len()
-                == u64::try_from(output.size_bytes).unwrap_or(u64::MAX),
+            && sha256_file(manifest_path)?.eq_ignore_ascii_case(&output.manifest_sha256),
     )
 }
 
@@ -1944,6 +1956,61 @@ mod tests {
             PhotoOutputPreset::JpegSrgbV1
         )
         .is_err());
+    }
+
+    /// Startup recovery verifies a publication by size first: a truncated or missing output
+    /// fails without ever paying a full SHA-256, and only a size-matching file is hashed.
+    #[test]
+    fn verified_publication_checks_size_before_any_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_path = directory.path().join("published.png");
+        let manifest_path = directory.path().join("published.png.crush-manifest.json");
+        let content = b"published output bytes".to_vec();
+        fs::write(&output_path, &content).unwrap();
+        fs::write(&manifest_path, b"published manifest").unwrap();
+        let output = RenderOutput {
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            id: "out".to_owned(),
+            job_id: "job".to_owned(),
+            attempt: 1,
+            output_path: output_path.to_string_lossy().into_owned(),
+            output_sha256: sha256_file(&output_path).unwrap(),
+            size_bytes: content.len() as i64,
+            media_type: "image/png".to_owned(),
+            width: None,
+            height: None,
+            duration_s: None,
+            verification_json: "{}".to_owned(),
+            manifest_path: manifest_path.to_string_lossy().into_owned(),
+            manifest_json: "published manifest".to_owned(),
+            manifest_sha256: sha256_file(&manifest_path).unwrap(),
+            created_at: Utc::now(),
+        };
+        assert!(verified_publication_matches(&output).unwrap());
+
+        // Truncated output: the size mismatch short-circuits. The claimed hash is deliberately
+        // unreachable ("not the content hash"), so returning false here cannot have hashed the
+        // file — the cheap stat decided it.
+        let truncated = RenderOutput {
+            size_bytes: 999_999,
+            output_sha256: "f".repeat(64),
+            ..output.clone()
+        };
+        assert!(!verified_publication_matches(&truncated).unwrap());
+
+        let missing = RenderOutput {
+            output_path: directory.path().join("gone.png").to_string_lossy().into_owned(),
+            ..output.clone()
+        };
+        assert!(!verified_publication_matches(&missing).unwrap());
+
+        // Intact size but tampered bytes still verifies false on the hash; and a missing
+        // manifest never finalizes.
+        fs::write(&output_path, b"tampered").unwrap();
+        assert!(!verified_publication_matches(&output).unwrap());
+        fs::write(&output_path, &content).unwrap();
+        fs::remove_file(&manifest_path).unwrap();
+        assert!(!verified_publication_matches(&output).unwrap());
     }
 
     #[test]

@@ -839,6 +839,114 @@ fn recovery_finishes_a_fully_published_verifying_attempt() {
     );
 }
 
+/// TASK-035 item 2: a verifying publication whose output no longer matches the checksummed
+/// size short-circuits before any full SHA-256 — recovery fails the job and never finalizes
+/// or deletes the mismatching files. (The intact counterpart is
+/// `recovery_finishes_a_fully_published_verifying_attempt`.)
+#[test]
+fn recovery_rejects_a_truncated_publication_by_size_without_finalizing() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("exports/truncated-after-crash.png");
+    let (pipeline, _) = setup_photo_job(
+        directory.path(),
+        "png-srgb-v1",
+        &destination,
+        "render-photo-truncated",
+    );
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    let staging_dir = destination
+        .parent()
+        .unwrap()
+        .join(".crush-render-published");
+    fs::create_dir_all(&staging_dir).unwrap();
+    let staging_output = staging_dir.join("truncated-after-crash.png");
+    let mut store = Store::open(directory.path()).unwrap();
+    let attempt = store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-photo-truncated",
+            &staging_output.to_string_lossy(),
+            Utc::now(),
+        )
+        .unwrap();
+    fs::write(
+        staging_dir.join("marker.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "owner_id": DEFAULT_OWNER_ID,
+            "job_id": "render-photo-truncated",
+            "attempt": attempt.attempt,
+            "destination": destination,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // The published output is truncated relative to the checksummed evidence (10 bytes on
+    // disk, 4096 claimed), so the size short-circuit decides without hashing.
+    fs::write(&destination, b"truncated!").unwrap();
+    let manifest_path = PathBuf::from(format!(
+        "{}.crush-manifest.json",
+        destination.to_string_lossy()
+    ));
+    let manifest_json = serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "job": {"id": "render-photo-truncated", "attempt": attempt.attempt}
+    }))
+    .unwrap();
+    fs::write(&manifest_path, &manifest_json).unwrap();
+    let command = serde_json::json!([{
+        "executor": "crush-photo-cpu-v1",
+        "phase": "verified_staging",
+        "staging_manifest": staging_dir.join("manifest.partial.json"),
+        "output": {
+            "owner_id": DEFAULT_OWNER_ID,
+            "id": "render-output-truncated",
+            "job_id": "render-photo-truncated",
+            "attempt": attempt.attempt,
+            "output_path": destination,
+            "output_sha256": "f".repeat(64),
+            "size_bytes": 4096,
+            "media_type": "image/png",
+            "width": 12,
+            "height": 8,
+            "duration_s": null,
+            "verification_json": "{}",
+            "manifest_path": manifest_path,
+            "manifest_json": manifest_json,
+            "manifest_sha256": sha256_file(&manifest_path).unwrap(),
+            "created_at": Utc::now(),
+        }
+    }]);
+    store
+        .render_attempt_set_commands(
+            DEFAULT_OWNER_ID,
+            "render-photo-truncated",
+            attempt.attempt,
+            &command.to_string(),
+        )
+        .unwrap();
+    store
+        .render_job_mark_verifying(DEFAULT_OWNER_ID, "render-photo-truncated")
+        .unwrap();
+    drop(store);
+
+    let recovery = pipeline
+        .recover_interrupted_render_jobs(DEFAULT_OWNER_ID)
+        .unwrap();
+
+    assert_eq!(recovery.finalized, 0);
+    assert_eq!(recovery.failed, 1);
+    let job = Store::open(directory.path())
+        .unwrap()
+        .render_job_by_id(DEFAULT_OWNER_ID, "render-photo-truncated")
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, RenderJobStatus::Failed);
+    // A size-mismatched publication is unverified, never finalized — but it is also not
+    // owned-managed staging, so the on-disk bytes stay for human inspection.
+    assert_eq!(fs::read(&destination).unwrap(), b"truncated!");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn frozen_video_clip_job_encodes_and_publishes_measured_manifest() {
