@@ -41,6 +41,10 @@
     batchReject: $("#batch-reject"),
     batchRating: $("#batch-rating"),
     batchCollection: $("#batch-collection"),
+    batchNew: $("#batch-collection-new"),
+    batchNewName: $("#batch-collection-name"),
+    batchNewCreate: $("#batch-collection-create"),
+    batchNewCancel: $("#batch-collection-cancel"),
     batchAdd: $("#batch-add-collection"),
     batchClear: $("#batch-clear"),
     empty: $("#review-empty"),
@@ -109,6 +113,16 @@
     state.messageTimer = setTimeout(() => {
       el.message.hidden = true;
     }, 5000);
+  }
+
+  // Task 039 B8 — surfaced backend errors go through the shared editor-language
+  // mapping (app.js); when the headline was translated, the untouched backend text
+  // stays reachable through a "Copy details" button in the message row.
+  function showError(error) {
+    const raw = String(error);
+    const mapped = window.crushErrorText ? window.crushErrorText(error) : raw;
+    showMessage(mapped, true);
+    if (mapped !== raw) el.message.append(window.crushCopyDetailsButton(raw));
   }
 
   // ---------- filters ----------
@@ -317,6 +331,12 @@
     tile.dataset.key = key;
     if (state.selection.has(key)) tile.classList.add("selected");
 
+    const openAsset = () => {
+      document.dispatchEvent(new CustomEvent("crush:open-asset", {
+        detail: { asset_type: assetType(asset.mediaKind), asset_id: asset.mediaId },
+      }));
+    };
+
     const selectLabel = document.createElement("label");
     selectLabel.className = "review-select";
     const checkbox = document.createElement("input");
@@ -343,9 +363,28 @@
     tile.addEventListener("click", (event) => {
       // The select checkbox (or its label) must not open the drawer.
       if (event.target.closest(".review-select")) return;
-      document.dispatchEvent(new CustomEvent("crush:open-asset", {
-        detail: { asset_type: assetType(asset.mediaKind), asset_id: asset.mediaId },
-      }));
+      setRovingTile(tile);
+      openAsset();
+    });
+    // Task 039 B4 — the grid was mouse-only; tiles are now roving tab stops with the
+    // same keyboard posture as the search results grid: Enter/Space opens the drawer,
+    // arrows move focus by cell and row (column count from the computed grid).
+    tile.addEventListener("keydown", (event) => {
+      if (event.target instanceof HTMLInputElement) return;
+      const moves = {
+        ArrowDown: reviewGridColumns(),
+        ArrowUp: -reviewGridColumns(),
+        ArrowRight: 1,
+        ArrowLeft: -1,
+      };
+      if (event.key in moves) {
+        event.preventDefault();
+        moveTileFocus(tile, moves[event.key]);
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        setRovingTile(tile);
+        openAsset();
+      }
     });
     return tile;
   }
@@ -355,16 +394,112 @@
     el.empty.hidden = state.assets.length > 0;
     el.grid.hidden = state.assets.length === 0;
     for (const asset of state.assets) el.grid.append(tile(asset));
+    // Roving tabindex: one tab stop for the whole grid, arrows take over from there.
+    [...el.grid.children].forEach((candidate, index) => {
+      candidate.tabIndex = index === 0 ? 0 : -1;
+    });
+  }
+
+  // The review grid is auto-fill, so the real column count follows the window width —
+  // read the computed template the same way the search grid does.
+  function reviewGridColumns() {
+    const template = getComputedStyle(el.grid).gridTemplateColumns;
+    const count = template && template !== "none" ? template.trim().split(/\s+/).length : 0;
+    return count > 0 ? count : 4;
+  }
+
+  function setRovingTile(target) {
+    for (const candidate of el.grid.children) {
+      candidate.tabIndex = candidate === target ? 0 : -1;
+    }
+  }
+
+  function moveTileFocus(fromTile, delta) {
+    const tiles = [...el.grid.children];
+    const index = tiles.indexOf(fromTile) + delta;
+    const next = tiles[Math.max(0, Math.min(index, tiles.length - 1))];
+    if (!next) return;
+    setRovingTile(next);
+    next.focus();
+    next.scrollIntoView({ block: "nearest" });
   }
 
   // ---------- batch bar ----------
   function renderBatchBar() {
     const count = state.selection.size;
+    // Leaving the inline create form behind when the selection empties keeps the bar
+    // honest: it only ever offers targets for assets that are actually selected.
+    if (count === 0 && !el.batchNew.hidden) {
+      el.batchNew.hidden = true;
+      el.batchCollection.hidden = false;
+      el.batchCollection.value = "";
+    }
+    const target = el.batchCollection.value;
     el.batchBar.hidden = count === 0;
     el.batchCount.textContent = `${count} selected`;
     el.batchPick.disabled = count === 0;
     el.batchReject.disabled = count === 0;
-    el.batchAdd.disabled = count === 0 || !el.batchCollection.value;
+    el.batchAdd.disabled = count === 0 || !target || target === "new";
+  }
+
+  // The batch "Add to collection…" select was never populated before Task 039 — the one
+  // organizational workflow the UI could not complete. It mirrors the filter select's
+  // option shape plus an inline "New collection…" path (no permanent extra dropdown: the
+  // select already existed, the create form only appears while it is used).
+  function renderBatchCollectionOptions(selectedId = null) {
+    const current = selectedId ?? el.batchCollection.value;
+    el.batchCollection.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = state.collections.length
+      ? "Add to collection…"
+      : "No collections yet — create one to group assets";
+    el.batchCollection.append(placeholder);
+    for (const collection of state.collections) {
+      const option = document.createElement("option");
+      option.value = collection.id;
+      option.textContent = collection.name;
+      el.batchCollection.append(option);
+    }
+    const create = document.createElement("option");
+    create.value = "new";
+    create.textContent = "New collection…";
+    el.batchCollection.append(create);
+    el.batchCollection.value = state.collections.some((set) => set.id === current) ? current : "";
+  }
+
+  function closeBatchNewForm() {
+    el.batchNew.hidden = true;
+    el.batchCollection.hidden = false;
+    el.batchCollection.value = "";
+    renderBatchBar();
+  }
+
+  async function createBatchCollection() {
+    const name = el.batchNewName.value.trim();
+    if (!name) return;
+    // Guard the in-flight create: the Enter path calls this directly, so a second
+    // Enter while the first invoke is pending would create a duplicate.
+    if (el.batchNewCreate.disabled) return;
+    el.batchNewCreate.disabled = true;
+    try {
+      const created = await invoke("collection_create", { name });
+      el.batchNew.hidden = true;
+      el.batchCollection.hidden = false;
+      showMessage(`Created collection “${name}”.`);
+      await refreshReview();
+      // refreshReview rebuilds the selects from the fresh list; re-target the batch bar
+      // at the new collection so Add applies the pending selection to it immediately.
+      renderBatchCollectionOptions(created.id);
+      renderBatchBar();
+      // The focused Create button just left the DOM with its form; keep keyboard
+      // focus on the batch bar instead of dropping it to <body>.
+      el.batchCollection.focus();
+    } catch (error) {
+      showMessage(String(error), true);
+    } finally {
+      el.batchNewCreate.disabled = false;
+    }
   }
 
   function selectionOps(op, extra = {}) {
@@ -387,7 +522,7 @@
       state.selection.clear();
       await refreshReview();
     } catch (error) {
-      showMessage(String(error), true);
+      showError(error);
     }
   }
 
@@ -424,6 +559,7 @@
   function renderAll() {
     renderCounts();
     renderFilterOptions();
+    renderBatchCollectionOptions();
     renderSavedSearches();
     renderGrid();
     renderBatchBar();
@@ -432,6 +568,10 @@
 
   async function refreshReview() {
     const filters = filterArgs();
+    // Refresh cue (Task 039 B12): dim the grid and mark it busy while library_browse
+    // runs, so a slow refresh never silently leaves the previous tiles looking current.
+    el.grid.setAttribute("aria-busy", "true");
+    el.grid.classList.add("refreshing");
     try {
       const [counts, collections, stacks, saved, assets] = await Promise.all([
         invoke("library_counts"),
@@ -456,7 +596,10 @@
         }
       }
     } catch (error) {
-      showMessage(String(error), true);
+      showError(error);
+    } finally {
+      el.grid.removeAttribute("aria-busy");
+      el.grid.classList.remove("refreshing");
     }
     renderAll();
   }
@@ -614,6 +757,21 @@
     event.preventDefault();
     refreshReview();
   });
+  // Filters apply as they change (Task 039 B6) — every tweak no longer demands a
+  // "Show results" click. The button stays as the explicit fallback (and the only path
+  // for Enter in the name field), so nothing about the existing flow breaks. Selects
+  // apply immediately; free-text fields debounce so mid-word keystrokes don't churn
+  // the grid.
+  for (const select of [el.kind, el.status, el.usable, el.blur, el.feedback, el.minRating, el.collection, el.stack]) {
+    select.addEventListener("change", () => refreshReview());
+  }
+  let textFilterTimer = null;
+  for (const input of [el.context, el.search]) {
+    input.addEventListener("input", () => {
+      clearTimeout(textFilterTimer);
+      textFilterTimer = setTimeout(refreshReview, 250);
+    });
+  }
   el.reset.addEventListener("click", () => {
     applyFilterArgs({});
     refreshReview();
@@ -697,10 +855,32 @@
       runBatch(selectionOps("rate", { rating }), (applied) => `Rated ${applied} assets.`);
     }
   });
-  el.batchCollection.addEventListener("change", renderBatchBar);
+  el.batchCollection.addEventListener("change", () => {
+    const creating = el.batchCollection.value === "new";
+    el.batchNew.hidden = !creating;
+    el.batchCollection.hidden = creating;
+    if (creating) {
+      el.batchNewName.value = "";
+      el.batchNewName.focus();
+    }
+    renderBatchBar();
+  });
+  el.batchNewCancel.addEventListener("click", closeBatchNewForm);
+  el.batchNewCreate.addEventListener("click", createBatchCollection);
+  el.batchNewName.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      createBatchCollection();
+    } else if (event.key === "Escape") {
+      // Cancel the inline form, not the drawer behind it — this stays ahead of the
+      // global Esc handler on purpose.
+      event.stopPropagation();
+      closeBatchNewForm();
+    }
+  });
   el.batchAdd.addEventListener("click", () => {
     const collectionId = el.batchCollection.value;
-    if (!collectionId || !state.selection.size) return;
+    if (!collectionId || collectionId === "new" || !state.selection.size) return;
     runBatch(
       selectionOps("add_to_collection", { collectionId }),
       (applied) => `Added ${applied} asset${applied === 1 ? "" : "s"} to the collection.`,

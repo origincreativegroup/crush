@@ -28,6 +28,7 @@
     nothingIndexed: $("#search-nothing-indexed"),
     idle: $("#search-idle"),
     busy: $("#search-busy"),
+    warmup: $("#search-warmup"),
     noMatches: $("#search-no-matches"),
     error: $("#search-error"),
     grid: $("#results-grid"),
@@ -82,6 +83,9 @@
     searched: false,
     pendingQuery: null,
     debounce: null,
+    searchCueTimer: null,
+    warmupTimer: null,
+    everSearched: false,
     messageTimer: null,
     detail: null,
     loop: false,
@@ -195,12 +199,40 @@
     const nothing = state.hasIndexedShots === false;
     el.nothingIndexed.hidden = !nothing;
     el.idle.hidden = nothing || hasResults || state.query.length > 0 || !state.browsing;
-    el.busy.hidden = !state.searching || state.query.length === 0;
+    // Re-search replaces in place (spec: "results replace in place; no spinner under
+    // 500 ms"). While stale results are on screen the full-height busy panel stays
+    // hidden — it used to shove the old grid down on every re-search — and the count
+    // line carries the searching cue instead (delayed, see scheduleSearchCue). The
+    // panel only appears when there are no results to replace.
+    el.busy.hidden = !state.searching || state.query.length === 0 || hasResults;
     el.noMatches.hidden = nothing || hasResults || !state.query || !state.searched;
     el.grid.hidden = !hasResults;
     el.damHead.hidden = nothing || (!hasResults && !state.query);
     el.topControl.hidden = state.mode !== "search";
     if (!hasResults && !state.query && !state.browsing) el.count.textContent = "";
+  }
+
+  // Inline searching cue for in-place re-searches. It waits 500 ms — the spec's own
+  // threshold — so searches that land fast never flash it, and it only overwrites the
+  // count while a search is genuinely in flight.
+  function scheduleSearchCue() {
+    clearTimeout(state.searchCueTimer);
+    state.searchCueTimer = setTimeout(() => {
+      if (state.searching && state.query) el.count.textContent = "Searching…";
+    }, 500);
+  }
+
+  // Task 039 B8 — search errors speak editor language (the shared mapping in app.js);
+  // the untouched backend text stays one "Copy details" click away.
+  function showSearchError(error) {
+    const raw = String(error);
+    const mapped = window.crushErrorText ? window.crushErrorText(error) : raw;
+    el.error.replaceChildren();
+    const text = document.createElement("span");
+    text.textContent = mapped;
+    el.error.append(text);
+    if (mapped !== raw) el.error.append(window.crushCopyDetailsButton(raw));
+    el.error.hidden = false;
   }
 
   // ---------- search ----------
@@ -222,6 +254,18 @@
     }
     state.searching = true;
     el.error.hidden = true;
+    scheduleSearchCue();
+    // First-search warmup honesty (Task 039 B7): the test route documents that the
+    // first search can stall while the local encoder initializes. If that first
+    // search is still running after ~1.5 s, the busy panel says so instead of
+    // reading as a hang. Later searches never show the line, and errors render
+    // immediately — this timer never delays or masks them.
+    if (!state.everSearched) {
+      clearTimeout(state.warmupTimer);
+      state.warmupTimer = setTimeout(() => {
+        if (state.searching) el.warmup.hidden = false;
+      }, 1500);
+    }
     renderStates();
     const started = performance.now();
     try {
@@ -239,10 +283,13 @@
           : "";
       }
     } catch (error) {
-      el.error.textContent = String(error);
-      el.error.hidden = false;
+      showSearchError(error);
     } finally {
       state.searching = false;
+      clearTimeout(state.searchCueTimer);
+      clearTimeout(state.warmupTimer);
+      el.warmup.hidden = true;
+      state.everSearched = true;
       renderStates();
       if (state.pendingQuery && state.pendingQuery !== query) {
         state.pendingQuery = null;
@@ -291,6 +338,7 @@
     state.mode = "browse";
     state.searched = false;
     el.error.hidden = true;
+    clearTimeout(state.searchCueTimer);
     if (state.browseLoaded && !force) {
       state.results = filterByKind(state.browseResults);
       state.selected = state.results.length ? Math.min(Math.max(state.selected, 0), state.results.length - 1) : -1;
@@ -313,8 +361,7 @@
       renderResults();
       el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
     } catch (error) {
-      el.error.textContent = String(error);
-      el.error.hidden = false;
+      showSearchError(error);
     } finally {
       state.browsing = false;
       renderStates();
@@ -451,6 +498,15 @@
       card.setAttribute("aria-selected", String(active));
       if (active && scroll) card.scrollIntoView({ block: "nearest" });
     }
+  }
+
+  // The results grid is auto-fill, so the real column count follows the window width.
+  // Reading the computed template (one entry per track) keeps ↑↓ moving a full row at
+  // any width; 4 is only the fallback for a grid that is hidden or not yet laid out.
+  function resultGridColumns() {
+    const template = getComputedStyle(el.grid).gridTemplateColumns;
+    const count = template && template !== "none" ? template.trim().split(/\s+/).length : 0;
+    return count > 0 ? count : 4;
   }
 
   // ---------- detail ----------
@@ -828,11 +884,25 @@
       || event.target instanceof HTMLSelectElement;
     const detailOpen = !el.detail.hidden;
 
+    // Esc closes the shared detail drawer from every view (spec: "Esc clears/closes
+    // detail"). Scoped addition placed ahead of the Search-view guard on purpose:
+    // clear-search stays Search-only (that guard was deliberately restored once — see
+    // docs/HANDOFF.md, Task 022 history). An open modal dialog owns Esc entirely:
+    // the early return below keeps its native cancel path AND stops the key from
+    // reaching the search-clear branch, which would otherwise wipe the query behind
+    // the dialog (review finding on the wave-1 PR).
+    if (event.key === "Escape" && document.querySelector("dialog[open]")) {
+      return;
+    }
+    if (event.key === "Escape" && detailOpen) {
+      event.preventDefault();
+      closeDetail();
+      return;
+    }
     if (state.view !== "search") return;
     if (event.key === "Escape") {
       event.preventDefault();
-      if (detailOpen) closeDetail();
-      else if (el.input.value) {
+      if (el.input.value) {
         el.input.value = "";
         runSearch();
       }
@@ -852,7 +922,7 @@
       return;
     }
     if (!state.results.length) return;
-    const columns = 4;
+    const columns = resultGridColumns();
     const moves = { ArrowDown: columns, ArrowUp: -columns, ArrowRight: 1, ArrowLeft: -1 };
     if (event.key in moves) {
       if (inInput && (event.key === "ArrowLeft" || event.key === "ArrowRight") && el.input.value) return;

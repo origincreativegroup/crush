@@ -60,6 +60,18 @@
     lastError: null,
     sourceMissing: false,
   };
+  const photoTwo = {
+    ...photo,
+    id: "photo-two",
+    path: "/Volumes/Photos/Campaign/alt.jpg",
+    indexedAt: "2026-08-28T12:03:00Z",
+  };
+  const photoThree = {
+    ...photo,
+    id: "photo-three",
+    path: "/Volumes/Photos/Campaign/third.jpg",
+    indexedAt: "2026-08-28T12:04:00Z",
+  };
 
   const library = {
     empty: () => [],
@@ -76,6 +88,19 @@
     // authoritative state even if a list refresh arrives out of order.
     "recovered-row": () => [{ ...video, lastError: "Older failure" }],
     "photo-row": () => [{ ...video }, { ...photo }],
+    // Four rows so click / ⌘-click / Shift-click ranges and the all-photo boundary all
+    // have room: two photos, one video, one more photo (Task 039 C5). The background
+    // snapshot also pre-seeds a STALE cancelled ingest task (below) so the batch
+    // re-index here proves cancel detection matches its own job id.
+    "library-multiselect": () => [{ ...photo }, { ...photoTwo }, { ...video }, { ...photoThree }],
+    // Two photos for the batch re-index queue scenarios: a real mid-batch cancel
+    // (the mock surfaces the job as a running background ingest) and a stale asset
+    // id that must be skipped, not abort the queue.
+    "reindex-cancel": () => [{ ...photo }, { ...photoTwo }],
+    "reindex-stale-asset": () => [{ ...photo }, { ...photoTwo }],
+    // Two photos where the second remove fails (disk full): the partial-failure
+    // message path, its B8 mapping, and the Copy-details clipboard fallback.
+    "library-remove-partial": () => [{ ...photo }, { ...photoTwo }],
     "search-error": () => [{ ...video }],
     "dam-home": () => [{ ...video }, { ...photo }],
     feedback: () => [{ ...video }],
@@ -168,6 +193,20 @@
       moved: 1,
       renamed: 0,
       duplicated: 0,
+    });
+  }
+  if (scenario === "library-multiselect") {
+    // A stale ingest task from earlier in the session (review HIGH-1): the backend
+    // keeps every background task forever, keyed by job id, so old cancelled tasks
+    // sit beside fresh ones in every job_status snapshot. Batch re-index cancel
+    // detection must match the job id it started — this stale task must not abort
+    // the fresh batch the scenario runs below.
+    background.push({
+      jobId: "background-stale-cancelled",
+      kind: "ingest",
+      status: "cancelled",
+      detail: "ingest cancelled",
+      error: null,
     });
   }
 
@@ -462,8 +501,10 @@
     "library-grid",
     "dam-home",
     "library-bulk",
+    "library-collections",
     "library-feedback",
     "library-flags",
+    "library-multiselect",
     "library-saved-search",
     "compare-view",
     "compare-advance",
@@ -491,7 +532,9 @@
           nametagsVisible: false,
           blurRequired: false,
           tags: "warm, geometric",
-          collectionIds: ["col-one"],
+          // The collections scenario starts with no memberships so the create-and-add
+          // flow is observable end to end.
+          collectionIds: scenario === "library-collections" ? [] : ["col-one"],
           stackIds: [],
         },
         {
@@ -541,8 +584,12 @@
       ]
     : [];
 
+  // The collections scenario starts with zero collections so the batch bar's honest
+  // empty state ("No collections yet…") is asserted before anything is created.
   const reviewCollections = reviewScenario
-    ? [{ id: "col-one", name: "Launch heroes", description: "", createdAt: "2026-08-28T13:00:00Z" }]
+    ? (scenario === "library-collections"
+      ? []
+      : [{ id: "col-one", name: "Launch heroes", description: "", createdAt: "2026-08-28T13:00:00Z" }])
     : [];
   const reviewCollectionItems = [];
   const reviewStacks = reviewScenario
@@ -898,6 +945,12 @@
       case "list_videos":
         return libraryList.map((asset) => ({ ...asset }));
       case "remove_asset": {
+        if (scenario === "library-remove-partial" && args.id === "photo-two") {
+          // The second remove fails with a mappable backend error: the partial
+          // message must surface the mapped headline, with the raw text only
+          // reachable through Copy details.
+          throw "Disk full — no space left on the device";
+        }
         const index = libraryList.findIndex((asset) => asset.id === args.id);
         if (index === -1) throw `No asset ${args.id}`;
         const [removed] = libraryList.splice(index, 1);
@@ -957,8 +1010,26 @@
       }
       case "add_folder":
       case "reindex_video":
-      case "reindex_asset":
+      case "reindex_asset": {
+        if (scenario === "reindex-stale-asset" && args.id === "photo-two") {
+          // Simulates the asset being removed mid-batch (the backend answers
+          // "asset … was not found"): the queue must skip it and finish the rest.
+          throw "asset photo-two was not found";
+        }
+        if (scenario === "reindex-cancel") {
+          // The job really runs: surface it as a running background ingest so the
+          // queue waits for it and Cancel is reachable mid-batch.
+          background.push({
+            jobId: "background-test",
+            kind: "ingest",
+            status: "running",
+            detail: `re-indexing ${args.id}`,
+            error: null,
+          });
+          emit("ingest-progress", snapshot());
+        }
         return { jobId: "background-test" };
+      }
       case "search": {
         const q = String(args.q || "");
         if (scenario === "search-error" && q === "boom") {
@@ -1222,7 +1293,14 @@
       },
     },
     clipboardManager: {
-      async writeText() {},
+      async writeText(text) {
+        calls.push({ command: "clipboard.writeText", args: { text } });
+        if (scenario === "library-remove-partial") {
+          // Clipboard writes can fail for real (WKWebView permission/focus); the
+          // UI must say so instead of failing silently.
+          throw "clipboard unavailable";
+        }
+      },
     },
   };
 

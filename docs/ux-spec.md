@@ -42,4 +42,4 @@ Prev/Next shot in the same video (←/→).
 | Export done | Detail | toast + Reveal |
 
 ## Not in Phase 1
-Multi-select, tagging, editing shot boundaries, timeline view, settings screen (config file only), light theme.
+Tagging, editing shot boundaries, timeline view, settings screen (config file only), light theme. Library multi-select and batch operations shipped 2026-08-31 (TASK-039, John's full-pass approval); the remaining Not-in-Phase-1 items stand.

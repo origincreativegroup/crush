@@ -86,7 +86,7 @@
           </div>
 <div class="toolbar-actions">
             <button id="reindex" class="button secondary" type="button" disabled>Re-index selected</button>
-            <button id="locate-asset" class="button secondary" type="button" disabled title="Only enabled when the selected asset's file is missing on disk">Locate moved file…</button>
+            <button id="locate-asset" class="button secondary" type="button" disabled title="Only enabled when exactly one asset is selected and its file is missing on disk">Locate moved file…</button>
             <button id="remove-asset" class="button danger" type="button" disabled>Remove from library…</button>
             <button id="cancel" class="button danger" type="button" hidden>Cancel</button>
             <button id="import-reel-studio" class="button secondary" type="button">Import Reel Studio…</button>
@@ -95,6 +95,35 @@
         </header>
 
         <div id="library-message" class="library-message" role="status" hidden></div>
+
+        <!-- Batch bar (Task 039 C5): mirrors the Review batch bar. Appears with a
+             selection; editorial actions are photo-scoped because collections and
+             pick/reject/rating are defined for photos and shots, never whole videos. -->
+        <div id="library-batch-bar" class="batch-bar" hidden>
+          <span id="library-batch-count" class="batch-count" aria-live="polite"></span>
+          <button id="library-batch-pick" class="button secondary small" type="button">Pick</button>
+          <button id="library-batch-reject" class="button secondary small" type="button">Reject</button>
+          <label class="filter-control"><span class="sr-only">Rate selected photos</span>
+            <select id="library-batch-rating" aria-label="Rate selected photos">
+              <option value="">Rate…</option><option value="1">★ 1</option><option value="2">★ 2</option>
+              <option value="3">★ 3</option><option value="4">★ 4</option><option value="5">★ 5</option>
+            </select>
+          </label>
+          <label class="filter-control"><span class="sr-only">Add selected photos to collection</span>
+            <select id="library-batch-collection" aria-label="Add selected photos to collection">
+              <option value="">Add to collection…</option>
+            </select>
+          </label>
+          <span id="library-batch-collection-new" class="batch-collection-new" hidden>
+            <input id="library-batch-collection-name" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Name the collection" aria-label="New collection name" />
+            <button id="library-batch-collection-create" class="button primary small" type="button">Create</button>
+            <button id="library-batch-collection-cancel" class="button secondary small" type="button">Cancel</button>
+          </span>
+          <button id="library-batch-add-collection" class="button secondary small" type="button" disabled>Add</button>
+          <span id="library-batch-hint" class="batch-hint" hidden>Pick, reject, rating and collections apply to photos here — video shots are reviewed in Review.</span>
+          <button id="library-batch-clear" class="button secondary small" type="button">Clear selection</button>
+        </div>
 
         <section id="library-content" class="library-content" aria-live="polite">
           <div id="empty-library" class="empty-state" hidden>
@@ -108,7 +137,7 @@
             <table class="video-table">
               <thead>
                 <tr>
-                  <th class="select-column"><span class="sr-only">Select</span></th>
+                  <th class="select-column"><input id="library-select-all" type="checkbox" aria-label="Select all assets" /></th>
                   <th>File</th>
                   <th>Duration</th>
                   <th>Resolution</th>
@@ -317,13 +346,16 @@
           <summary>Keyboard shortcuts</summary>
           <dl>
             <div><dt>⌘F</dt><dd>Focus search</dd></div>
-            <div><dt>Esc</dt><dd>Clear search / close detail</dd></div>
+            <div><dt>Esc</dt><dd>Clear search / close detail / clear Library selection</dd></div>
             <div><dt>↑ ↓ ← →</dt><dd>Move through results</dd></div>
             <div><dt>Enter</dt><dd>Open detail</dd></div>
             <div><dt>Space</dt><dd>Play / pause clip</dd></div>
             <div><dt>L</dt><dd>Loop clip</dd></div>
             <div><dt>← → (detail)</dt><dd>Previous / next shot</dd></div>
             <div><dt>p / x / 1–5 (compare)</dt><dd>Pick / reject / rate the focused side</dd></div>
+            <div><dt>⌘A</dt><dd>Select all assets (Library)</dd></div>
+            <div><dt>⌘-click · Shift-click</dt><dd>Toggle / range-select (Library)</dd></div>
+            <div><dt>← → ↑ ↓ (Review)</dt><dd>Move between tiles · Enter opens</dd></div>
           </dl>
         </details>
         <section id="search-content" class="search-content">
@@ -338,6 +370,7 @@
           </div>
           <div id="search-busy" class="empty-state muted" hidden>
             <p>Searching your library…</p>
+            <p id="search-warmup" class="search-warmup" hidden>Loading the local encoder — later searches are faster.</p>
           </div>
           <div id="search-no-matches" class="empty-state muted" hidden>
             <h2>No matches</h2>
@@ -526,6 +559,12 @@
               <option value="">Add to collection…</option>
             </select>
           </label>
+          <span id="batch-collection-new" class="batch-collection-new" hidden>
+            <input id="batch-collection-name" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Name the collection" aria-label="New collection name" />
+            <button id="batch-collection-create" class="button primary small" type="button">Create</button>
+            <button id="batch-collection-cancel" class="button secondary small" type="button">Cancel</button>
+          </span>
           <button id="batch-add-collection" class="button secondary small" type="button" disabled>Add</button>
           <button id="batch-clear" class="button secondary small" type="button">Clear selection</button>
         </div>
