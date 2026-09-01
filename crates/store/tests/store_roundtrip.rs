@@ -5081,3 +5081,537 @@ fn imported_spans_survive_resplit_and_carry_historical_plan_provenance() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn resplit_preserves_shot_evidence_and_cleans_only_vanished_shots() {
+    let directory = TestDir::new("resplit-evidence");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-ev", "ev-sha"))
+        .unwrap();
+
+    let original = vec![
+        shot("shot-ev-0", "video-ev", 0),
+        shot("shot-ev-1", "video-ev", 1),
+    ];
+    store.insert_shots(DEFAULT_OWNER_ID, &original).unwrap();
+
+    // Evidence on both shots, in every shot-keyed table: feedback as media and as
+    // compared media, editorial annotations, aesthetic assessments, vectors, plan items,
+    // and reference-set items.
+    store
+        .append_feedback(
+            DEFAULT_OWNER_ID,
+            &feedback(
+                "fb-ev-0",
+                MediaKind::Shot,
+                "shot-ev-0",
+                FeedbackSignal::Pick,
+            ),
+        )
+        .unwrap();
+    let mut preference = feedback(
+        "fb-ev-1",
+        MediaKind::Shot,
+        "shot-ev-0",
+        FeedbackSignal::Prefer,
+    );
+    preference.value = Some(1.0);
+    preference.compared_media_kind = Some(MediaKind::Shot);
+    preference.compared_media_id = Some("shot-ev-1".to_owned());
+    store
+        .append_feedback(DEFAULT_OWNER_ID, &preference)
+        .unwrap();
+    store
+        .append_feedback(
+            DEFAULT_OWNER_ID,
+            &feedback(
+                "fb-ev-2",
+                MediaKind::Shot,
+                "shot-ev-1",
+                FeedbackSignal::Pick,
+            ),
+        )
+        .unwrap();
+
+    let annotation = |media_id: &str| EditorialAnnotation {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind: MediaKind::Shot,
+        media_id: media_id.to_owned(),
+        description: "strong moment".to_owned(),
+        subjects: "child".to_owned(),
+        action: "laughing".to_owned(),
+        tags: "water".to_owned(),
+        quality: Some(4),
+        standout: true,
+        usable: true,
+        faces_visible: true,
+        nametags_visible: false,
+        blur_required: false,
+        crop_x: None,
+        grade_json: None,
+        notes: String::new(),
+        updated_at: now,
+    };
+    store
+        .upsert_editorial_annotation(DEFAULT_OWNER_ID, &annotation("shot-ev-0"))
+        .unwrap();
+    store
+        .upsert_editorial_annotation(DEFAULT_OWNER_ID, &annotation("shot-ev-1"))
+        .unwrap();
+
+    let assessment = |media_id: &str, overall: f64| AestheticAssessment {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        media_kind: MediaKind::Shot,
+        media_id: media_id.to_owned(),
+        sharpness: 0.9,
+        exposure: 0.8,
+        contrast: 0.7,
+        color_harmony: 0.6,
+        balance: 0.5,
+        subject_placement: 0.4,
+        negative_space: 0.3,
+        visual_clarity: 0.2,
+        technical_quality: 0.9,
+        blur_control: 0.8,
+        clipping_control: 0.7,
+        noise_control: 0.6,
+        compression_quality: 0.5,
+        resolution_quality: 0.4,
+        motion_stability: 0.3,
+        duplicate_confidence: 0.0,
+        composition_quality: 0.2,
+        hierarchy: 0.1,
+        leading_lines: 0.0,
+        symmetry: 0.1,
+        crop_potential: 0.2,
+        moment_story: 0.3,
+        expression: 0.4,
+        gesture: 0.5,
+        action: 0.6,
+        novelty: 0.7,
+        pacing: 0.8,
+        repetition_risk: 0.0,
+        overall,
+        confidence: 0.5,
+        explanation_json: "{}".to_owned(),
+        model_version: "strong-shot-v1".to_owned(),
+        assessed_at: now,
+    };
+    store
+        .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &assessment("shot-ev-0", 0.9))
+        .unwrap();
+    store
+        .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &assessment("shot-ev-1", 0.8))
+        .unwrap();
+
+    store
+        .put_vector(DEFAULT_OWNER_ID, "shot-ev-0", &[0.1_f32; 512])
+        .unwrap();
+    store
+        .put_vector(DEFAULT_OWNER_ID, "shot-ev-1", &[0.2_f32; 512])
+        .unwrap();
+
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-ev", "evidence"))
+        .unwrap();
+    let mut item_on_first = plan_item("plan-ev", MediaKind::Shot, "shot-ev-0");
+    item_on_first.start_s = Some(0.1);
+    item_on_first.end_s = Some(0.9);
+    store
+        .plan_add_item(DEFAULT_OWNER_ID, &item_on_first)
+        .unwrap();
+    let mut item_on_second = plan_item("plan-ev", MediaKind::Shot, "shot-ev-1");
+    item_on_second.start_s = Some(1.1);
+    item_on_second.end_s = Some(1.9);
+    store
+        .plan_add_item(DEFAULT_OWNER_ID, &item_on_second)
+        .unwrap();
+
+    store
+        .reference_set_create(
+            DEFAULT_OWNER_ID,
+            &reference_set("set-ev", "previous work", ReferenceSetStatus::Unconfirmed),
+        )
+        .unwrap();
+    let reference_item = |media_id: &str| ReferenceSetItem {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        set_id: "set-ev".to_owned(),
+        media_kind: MediaKind::Shot,
+        media_id: media_id.to_owned(),
+        role: ReferenceItemRole::Positive,
+        added_at: now,
+    };
+    store
+        .reference_set_add_item(DEFAULT_OWNER_ID, &reference_item("shot-ev-0"))
+        .unwrap();
+    store
+        .reference_set_add_item(DEFAULT_OWNER_ID, &reference_item("shot-ev-1"))
+        .unwrap();
+
+    // 1) Resplit with identical boundaries: the same deterministic ids return, so every
+    //    kind of shot-keyed evidence must survive with its linkage intact. This is the
+    //    exact case the old delete-and-refill `replace_shots` destroyed.
+    store
+        .replace_shots(DEFAULT_OWNER_ID, "video-ev", &original)
+        .unwrap();
+    assert_eq!(
+        store.shots_for_video(DEFAULT_OWNER_ID, "video-ev").unwrap(),
+        original,
+        "an identical resplit must not change the shot rows"
+    );
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 3);
+    assert!(store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-1")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-1")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-1")
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        store.plan_items(DEFAULT_OWNER_ID, "plan-ev").unwrap().len(),
+        2
+    );
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-ev")
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // 2) Resplit with a changed cut list: the second shot is re-cut at a different start,
+    //    so its stable id vanishes and a new shot appears — while the first shot survives
+    //    with its id and boundaries unchanged. Evidence on the vanished id is cleaned up
+    //    (including its plan item, which is never silently rewritten), and the survivor
+    //    keeps everything.
+    let mut re_cut_second = shot("shot-ev-1b", "video-ev", 1);
+    re_cut_second.start_s = 1.25;
+    re_cut_second.end_s = 2.0;
+    re_cut_second.rep_frame_s = 1.6;
+    let survivor = shot("shot-ev-0", "video-ev", 0);
+    store
+        .replace_shots(DEFAULT_OWNER_ID, "video-ev", &[survivor, re_cut_second])
+        .unwrap();
+
+    assert_eq!(
+        store
+            .shots_for_video(DEFAULT_OWNER_ID, "video-ev")
+            .unwrap()
+            .iter()
+            .map(|shot| shot.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-ev-0", "shot-ev-1b"]
+    );
+    let events = store.feedback_events(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fb-ev-0"],
+        "feedback on the survivor stays; feedback as media and as compared media of the \
+         vanished shot is cleaned up — a preference against a shot that no longer exists \
+         is meaningless"
+    );
+    assert!(store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-1")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-1")
+        .unwrap()
+        .is_none());
+    assert!(store
+        .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(store
+        .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-1")
+        .unwrap()
+        .is_none());
+    let items = store.plan_items(DEFAULT_OWNER_ID, "plan-ev").unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-ev-0"],
+        "the plan item on the vanished shot is cleaned up, not rewritten"
+    );
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-ev")
+            .unwrap()
+            .iter()
+            .map(|item| item.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-ev-0"]
+    );
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, "video-ev")
+            .unwrap()
+            .unwrap()
+            .status,
+        VideoStatus::Split
+    );
+
+    // 3) A survivor whose END boundary moved but whose stable id returned. The stable id
+    //    covers the index and start but not end_s or rep_frame_s, so the id survives, the
+    //    row is updated in place — and the stored vector now describes the pre-recut rep
+    //    frame. replace_shots deletes that vector row in the same transaction, so the
+    //    next embed pass re-embeds this shot (embed_missing_shots skips shots that
+    //    already have a vector). Every other kind of evidence survives, exactly like the
+    //    vanished-shot discipline promises.
+    //
+    //    Honest knock-on limit, verified against `video_assessments_current`
+    //    (pipeline lib.rs): the aesthetic assessment describes the pre-recut rep frame
+    //    too, but that staleness check keys only on the assessment's presence and model
+    //    version — NOT on vectors. So the stale assessment still reads as "current" and
+    //    the analyze-staleness machinery will NOT refresh it on its own; a re-analyze
+    //    (or a model-version bump) is the manual path. The vector is the only
+    //    automatically invalidated artifact here, and the deletion is only same-
+    //    transaction-atomic by construction (it rides the replace_shots transaction).
+    let mut re_cut_survivor = shot("shot-ev-0", "video-ev", 0);
+    re_cut_survivor.end_s = 1.5;
+    // Rebuild the second shot with the exact values it got in step 2 so only the
+    // survivor's boundary changes in this step.
+    let mut kept_second = shot("shot-ev-1b", "video-ev", 1);
+    kept_second.start_s = 1.25;
+    kept_second.end_s = 2.0;
+    kept_second.rep_frame_s = 1.6;
+    store
+        .replace_shots(
+            DEFAULT_OWNER_ID,
+            "video-ev",
+            &[re_cut_survivor, kept_second],
+        )
+        .unwrap();
+
+    let survivor_row = store
+        .shot_by_id(DEFAULT_OWNER_ID, "shot-ev-0")
+        .unwrap()
+        .expect("the surviving id must still resolve");
+    assert_eq!(survivor_row.end_s, 1.5, "the new boundary lands on the row");
+    assert_eq!(
+        survivor_row.rep_frame_s, 0.4,
+        "only the fields that changed are rewritten"
+    );
+    assert_eq!(
+        store
+            .feedback_events(DEFAULT_OWNER_ID)
+            .unwrap()
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fb-ev-0"],
+        "feedback on the changed survivor stays"
+    );
+    assert!(store
+        .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+        .unwrap()
+        .is_some());
+    assert!(
+        store
+            .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, "shot-ev-0")
+            .unwrap()
+            .is_some(),
+        "the (stale, per the comment above) assessment row survives — it is not \
+         auto-refreshed, only the vector is invalidated"
+    );
+    assert!(
+        store
+            .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-0")
+            .unwrap()
+            .is_none(),
+        "the vector described the pre-recut rep frame; it must be gone so the next \
+         embed pass re-embeds the survivor"
+    );
+    assert!(
+        store
+            .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-1b")
+            .unwrap()
+            .is_none(),
+        "the re-cut newcomer never had a vector"
+    );
+    assert_eq!(
+        store
+            .plan_items(DEFAULT_OWNER_ID, "plan-ev")
+            .unwrap()
+            .iter()
+            .map(|item| item.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-ev-0"],
+        "the plan item on the changed survivor stays (its in/out still fit the shot)"
+    );
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-ev")
+            .unwrap()
+            .iter()
+            .map(|item| item.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-ev-0"]
+    );
+
+    // Owner isolation is unchanged: another owner can neither see nor replace these shots.
+    assert!(store
+        .shot_by_id("someone-else", "shot-ev-0")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn relink_updates_the_row_path_only_after_verifying_the_recorded_hash() {
+    let directory = TestDir::new("relink");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-rl", "sha-rl"))
+        .unwrap();
+    store
+        .insert_shots(DEFAULT_OWNER_ID, &[shot("shot-rl-0", "video-rl", 0)])
+        .unwrap();
+    store
+        .append_feedback(
+            DEFAULT_OWNER_ID,
+            &feedback("fb-rl", MediaKind::Shot, "shot-rl-0", FeedbackSignal::Pick),
+        )
+        .unwrap();
+
+    // A hash mismatch refuses honestly and changes nothing.
+    let mismatch = store
+        .relink_video(
+            DEFAULT_OWNER_ID,
+            "video-rl",
+            "/new/place/video-rl.mov",
+            "a-different-file",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{mismatch:#}").contains("SHA-256 mismatch"),
+        "mismatch must be refused with the honest reason: {mismatch:#}"
+    );
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, "video-rl")
+            .unwrap()
+            .unwrap()
+            .path,
+        "/footage/video-rl.mov"
+    );
+    // An unknown id, an empty verified hash (fail closed), and a foreign owner refuse too.
+    assert!(store
+        .relink_video(DEFAULT_OWNER_ID, "video-missing", "/x", "sha-rl")
+        .is_err());
+    assert!(store
+        .relink_video(DEFAULT_OWNER_ID, "video-rl", "/x", "")
+        .is_err());
+    assert!(store
+        .relink_video("someone-else", "video-rl", "/x", "sha-rl")
+        .is_err());
+
+    // The empty-STORED-hash branch (fail closed from the other side): even a verified
+    // caller hash cannot relink a row that has no recorded sha256 to compare against.
+    {
+        let connection = Connection::open(store.db_path()).unwrap();
+        connection
+            .execute(
+                "UPDATE videos SET sha256 = '' WHERE owner_id = ?1 AND id = ?2",
+                rusqlite::params![DEFAULT_OWNER_ID, "video-rl"],
+            )
+            .unwrap();
+    }
+    let empty_stored = store
+        .relink_video(DEFAULT_OWNER_ID, "video-rl", "/x", "sha-rl")
+        .unwrap_err();
+    assert!(
+        format!("{empty_stored:#}").contains("no recorded sha256"),
+        "an empty stored hash must refuse with the honest fail-closed reason: {empty_stored:#}"
+    );
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, "video-rl")
+            .unwrap()
+            .unwrap()
+            .path,
+        "/footage/video-rl.mov",
+        "the refused relink leaves the row untouched"
+    );
+    {
+        let connection = Connection::open(store.db_path()).unwrap();
+        connection
+            .execute(
+                "UPDATE videos SET sha256 = 'sha-rl' WHERE owner_id = ?1 AND id = ?2",
+                rusqlite::params![DEFAULT_OWNER_ID, "video-rl"],
+            )
+            .unwrap();
+    }
+
+    // A verified relink updates only the path on the existing identity row.
+    let relinked = store
+        .relink_video(
+            DEFAULT_OWNER_ID,
+            "video-rl",
+            "/new/place/video-rl.mov",
+            "sha-rl",
+        )
+        .unwrap();
+    assert_eq!(relinked.path, "/new/place/video-rl.mov");
+    assert_eq!(relinked.sha256, "sha-rl");
+    assert_eq!(
+        store
+            .shots_for_video(DEFAULT_OWNER_ID, "video-rl")
+            .unwrap()
+            .iter()
+            .map(|shot| shot.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["shot-rl-0"]
+    );
+    assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+
+    // The photo flow behaves identically.
+    store
+        .upsert_photo(DEFAULT_OWNER_ID, &photo("photo-rl", "sha-photo-rl"))
+        .unwrap();
+    assert!(store
+        .relink_photo(DEFAULT_OWNER_ID, "photo-rl", "/x", "not-the-hash")
+        .is_err());
+    let relinked_photo = store
+        .relink_photo(
+            DEFAULT_OWNER_ID,
+            "photo-rl",
+            "/new/place/photo-rl.jpg",
+            "sha-photo-rl",
+        )
+        .unwrap();
+    assert_eq!(relinked_photo.path, "/new/place/photo-rl.jpg");
+    assert_eq!(store.photos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+}

@@ -40,7 +40,9 @@ checkout present: Y/N. Artifact label: signed-notarized / ad-hoc. DMG SHA-256 ve
       and playback in a system app.
 - [ ] Repeat a render to the occupied destination and confirm Crush refuses to overwrite it.
 - [ ] Quit during a render, relaunch, and confirm recovery never marks a partial output verified.
-- [ ] Move one fixture temporarily, confirm the missing source is honest, then exercise relink.
+- [ ] Move one fixture temporarily, confirm the missing source is honest and the Library shows
+      "Locate moved file…", then exercise relink (verify the SHA-256 refusal for a different file,
+      the verified relink, and the `moved`/`renamed` report when the folder is re-added).
 - [ ] Confirm originals hash identically before and after the full run.
 - [ ] Follow backup/restore and uninstall documentation; verify originals and chosen outputs remain.
 

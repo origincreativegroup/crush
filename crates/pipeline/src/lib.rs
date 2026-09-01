@@ -48,9 +48,78 @@ pub struct IngestSummary {
     pub failed: usize,
     pub discovered_photos: usize,
     pub indexed_photos: usize,
+    /// Files whose (owner, sha256) identity was already indexed at a different path and
+    /// were re-pointed to the existing row during this ingest ("moved/renamed/duplicate →
+    /// relinked"). Additive: `indexed`/`skipped` keep their exact meaning, and `moved` /
+    /// `renamed` only ever count files whose old copy is really gone — a same-content
+    /// file whose old path still exists is a duplicate copy, counted in `duplicated`.
+    pub moved: usize,
+    pub renamed: usize,
+    /// Same content found at a new path while the old file still exists on disk: the
+    /// catalog was re-pointed to the new copy, but nothing moved — the old copy is still
+    /// where it was.
+    pub duplicated: usize,
     pub recovered_jobs: usize,
     pub search_vectors: usize,
     pub errors: Vec<(PathBuf, String)>,
+    /// Per-file detail for every counted moved/renamed outcome.
+    pub relinked: Vec<RelinkedAsset>,
+}
+
+/// One media file that ingest found at a new path: the existing identity row was
+/// re-pointed, never duplicated. `Moved` means the directory changed; `Renamed` means
+/// only the file name changed; `DuplicateCopy` means the old file still exists on disk —
+/// the same content lives in two places and the catalog now points at the new copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelinkedAsset {
+    pub media_kind: &'static str,
+    pub id: String,
+    pub from_path: PathBuf,
+    pub to_path: PathBuf,
+    pub kind: RelinkKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelinkKind {
+    Moved,
+    Renamed,
+    DuplicateCopy,
+}
+
+impl RelinkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelinkKind::Moved => "moved",
+            RelinkKind::Renamed => "renamed",
+            RelinkKind::DuplicateCopy => "duplicate copy",
+        }
+    }
+}
+
+/// Classify a same-content path change found during ingest. If the old file still exists
+/// on disk, nothing was moved or renamed — the same content exists at two locations and
+/// the catalog now points at the new copy, so report it honestly as a duplicate copy
+/// (the path update semantics are unchanged). Otherwise a new parent directory is a
+/// move, and a new file name in the same directory is a rename.
+fn relink_kind(old_path: &str, new_path: &Path) -> RelinkKind {
+    if Path::new(old_path).exists() {
+        return RelinkKind::DuplicateCopy;
+    }
+    let old = Path::new(old_path);
+    match (old.parent(), new_path.parent()) {
+        (Some(old_parent), Some(new_parent)) if old_parent == new_parent => RelinkKind::Renamed,
+        _ => RelinkKind::Moved,
+    }
+}
+
+/// The result of the explicit relink flow (`crushctl relink`, the app's "Locate moved
+/// file…" action): the catalog row was re-pointed after SHA-256 verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelinkOutcome {
+    pub media_kind: &'static str,
+    pub id: String,
+    pub old_path: String,
+    pub new_path: String,
 }
 
 pub struct Pipeline {
@@ -101,8 +170,13 @@ impl Pipeline {
                 anyhow::bail!("ingest cancelled");
             }
             match self.ingest_one(&mut store, &path, debug) {
-                Ok(IngestOne::Indexed) => summary.indexed += 1,
-                Ok(IngestOne::Skipped) => summary.skipped += 1,
+                Ok(outcome) => {
+                    match outcome.result {
+                        IngestOne::Indexed => summary.indexed += 1,
+                        IngestOne::Skipped => summary.skipped += 1,
+                    }
+                    record_relink(&mut summary, outcome.relink);
+                }
                 Err(error) if self.cancellation.is_cancelled() => {
                     return Err(error).context("ingest cancelled");
                 }
@@ -123,11 +197,16 @@ impl Pipeline {
                     anyhow::bail!("ingest cancelled");
                 }
                 match self.ingest_photo_one(&store, &path, &mut embedder) {
-                    Ok(IngestOne::Indexed) => {
-                        summary.indexed += 1;
-                        summary.indexed_photos += 1;
+                    Ok(outcome) => {
+                        match outcome.result {
+                            IngestOne::Indexed => {
+                                summary.indexed += 1;
+                                summary.indexed_photos += 1;
+                            }
+                            IngestOne::Skipped => summary.skipped += 1,
+                        }
+                        record_relink(&mut summary, outcome.relink);
                     }
-                    Ok(IngestOne::Skipped) => summary.skipped += 1,
                     Err(error) if self.cancellation.is_cancelled() => {
                         return Err(error).context("ingest cancelled");
                     }
@@ -154,21 +233,38 @@ impl Pipeline {
         store: &Store,
         path: &Path,
         embedder: &mut Embedder,
-    ) -> anyhow::Result<IngestOne> {
+    ) -> anyhow::Result<IngestOutcome> {
         let sha256 = sha256_file(path)?;
         let existing = store.photo_by_sha(DEFAULT_OWNER_ID, &sha256)?;
-        if let Some(existing) = &existing {
+        // Same (owner, sha256) identity at a different path: moved, renamed, or a
+        // duplicate copy (old file still on disk). The path update below rides on the
+        // same-row upsert, and the outcome is reported honestly instead of looking like
+        // an ordinary skip.
+        let mut relink = None;
+        if let Some(existing_photo) = &existing {
+            if existing_photo.path != path.to_string_lossy() {
+                relink = Some(RelinkedAsset {
+                    media_kind: "photo",
+                    id: existing_photo.id.clone(),
+                    from_path: PathBuf::from(&existing_photo.path),
+                    to_path: path.to_path_buf(),
+                    kind: relink_kind(&existing_photo.path, path),
+                });
+            }
             let fidelity_complete = store
-                .photo_source_metadata(DEFAULT_OWNER_ID, &existing.id)?
-                .is_some_and(|metadata| photo_fidelity_complete(store, existing, &metadata));
-            if existing.status == PhotoStatus::Done && fidelity_complete {
-                if existing.path != path.to_string_lossy() {
-                    let mut updated = existing.clone();
+                .photo_source_metadata(DEFAULT_OWNER_ID, &existing_photo.id)?
+                .is_some_and(|metadata| photo_fidelity_complete(store, existing_photo, &metadata));
+            if existing_photo.status == PhotoStatus::Done && fidelity_complete {
+                if relink.is_some() {
+                    let mut updated = existing_photo.clone();
                     updated.path = path.to_string_lossy().into_owned();
                     store.upsert_photo(DEFAULT_OWNER_ID, &updated)?;
                 }
                 tracing::info!(path = %path.display(), "skip: photo already indexed");
-                return Ok(IngestOne::Skipped);
+                return Ok(IngestOutcome {
+                    result: IngestOne::Skipped,
+                    relink,
+                });
             }
         }
         let photo_id = existing
@@ -178,7 +274,10 @@ impl Pipeline {
         // before its job starts. Failures before that point leave nothing to resume: the
         // next ingest retries the deterministic photo id from scratch.
         self.index_photo(store, path, &photo_id, &sha256, embedder)?;
-        Ok(IngestOne::Indexed)
+        Ok(IngestOutcome {
+            result: IngestOne::Indexed,
+            relink,
+        })
     }
 
     fn index_photo(
@@ -321,6 +420,60 @@ impl Pipeline {
                 Err(error)
             }
         }
+    }
+
+    /// First-class relink for a moved or renamed file. Resolve the target by asset id or
+    /// stale stored path across both media kinds, hash the bytes at the new path, and let
+    /// the store update the existing identity row only when that hash matches the recorded
+    /// sha256. A mismatch refuses without writing anything; a missing new path refuses;
+    /// no duplicate row is ever created and the original file is never modified.
+    pub fn relink(&self, target: &str, new_path: &Path) -> anyhow::Result<RelinkOutcome> {
+        let mut store = Store::open(&self.paths.root)?;
+        ensure!(
+            new_path.is_file(),
+            "the new path does not exist or is not a file: {}",
+            new_path.display()
+        );
+        // Ingest stores canonicalized paths, so relink records the same form.
+        let canonical = new_path
+            .canonicalize()
+            .unwrap_or_else(|_| new_path.to_path_buf());
+        let new_path_string = canonical.to_string_lossy().into_owned();
+        let resolved = if let Some(video) = store.video_by_id(DEFAULT_OWNER_ID, target)? {
+            Some(("video", video.id, video.path))
+        } else if let Some(photo) = store.photo_by_id(DEFAULT_OWNER_ID, target)? {
+            Some(("photo", photo.id, photo.path))
+        } else if let Some(video) = store.video_by_path(DEFAULT_OWNER_ID, target)? {
+            Some(("video", video.id, video.path))
+        } else if let Some(photo) = store.photo_by_path(DEFAULT_OWNER_ID, target)? {
+            Some(("photo", photo.id, photo.path))
+        } else {
+            None
+        }
+        .with_context(|| format!("no indexed photo or video matches {target:?}"))?;
+        let (media_kind, id, old_path) = resolved;
+        let verified_sha256 = sha256_file(&canonical)?;
+        match media_kind {
+            "video" => {
+                store.relink_video(DEFAULT_OWNER_ID, &id, &new_path_string, &verified_sha256)?;
+            }
+            _ => {
+                store.relink_photo(DEFAULT_OWNER_ID, &id, &new_path_string, &verified_sha256)?;
+            }
+        }
+        tracing::info!(
+            media_kind,
+            media_id = %id,
+            from = %old_path,
+            to = %new_path_string,
+            "relinked moved media after sha256 verification"
+        );
+        Ok(RelinkOutcome {
+            media_kind,
+            id,
+            old_path,
+            new_path: new_path_string,
+        })
     }
 
     /// Backfill aesthetic analysis for photos that are Done but have no current-model
@@ -530,28 +683,54 @@ impl Pipeline {
             .map_err(Into::into)
     }
 
-    fn ingest_one(&self, store: &mut Store, path: &Path, debug: bool) -> anyhow::Result<IngestOne> {
+    fn ingest_one(
+        &self,
+        store: &mut Store,
+        path: &Path,
+        debug: bool,
+    ) -> anyhow::Result<IngestOutcome> {
         let sha256 = sha256_file(path)?;
         if let Some(existing) = store.video_by_sha(DEFAULT_OWNER_ID, &sha256)? {
             let fidelity_complete = video_fidelity_complete(store, &existing.id)?;
             let mut existing = existing;
+            // The (owner, sha256) identity already exists at a different path: same
+            // content, new location. Keep the same-row path update and report it
+            // honestly — moved or renamed when the old copy is gone, duplicate copy
+            // when the old file still exists on disk — instead of a silent relink.
+            let mut relink = None;
             if existing.path != path.to_string_lossy() {
+                relink = Some(RelinkedAsset {
+                    media_kind: "video",
+                    id: existing.id.clone(),
+                    from_path: PathBuf::from(&existing.path),
+                    to_path: path.to_path_buf(),
+                    kind: relink_kind(&existing.path, path),
+                });
                 existing.path = path.to_string_lossy().into_owned();
                 store.upsert_video(DEFAULT_OWNER_ID, &existing)?;
             }
             if existing.status == VideoStatus::Done && fidelity_complete {
                 if !video_assessments_current(store, &existing.id)? {
                     self.run_analyze(store, &existing, debug)?;
-                    return Ok(IngestOne::Indexed);
+                    return Ok(IngestOutcome {
+                        result: IngestOne::Indexed,
+                        relink,
+                    });
                 }
                 tracing::info!(path = %path.display(), "skip: already indexed");
-                return Ok(IngestOne::Skipped);
+                return Ok(IngestOutcome {
+                    result: IngestOne::Skipped,
+                    relink,
+                });
             }
             if existing.status == VideoStatus::Done {
                 store.set_video_status(DEFAULT_OWNER_ID, &existing.id, VideoStatus::Pending)?;
             }
             self.process_video(store, &existing.id, debug)?;
-            return Ok(IngestOne::Indexed);
+            return Ok(IngestOutcome {
+                result: IngestOne::Indexed,
+                relink,
+            });
         }
         if let Some(old) = store.video_by_path(DEFAULT_OWNER_ID, &path.to_string_lossy())? {
             tracing::info!(
@@ -579,7 +758,10 @@ impl Pipeline {
             },
         )?;
         self.process_video(store, &video_id, debug)?;
-        Ok(IngestOne::Indexed)
+        Ok(IngestOutcome {
+            result: IngestOne::Indexed,
+            relink: None,
+        })
     }
 
     fn process_video(&self, store: &mut Store, video_id: &str, debug: bool) -> anyhow::Result<()> {
@@ -1155,6 +1337,37 @@ fn persisted_assessment(
 enum IngestOne {
     Indexed,
     Skipped,
+}
+
+/// What one discovered file did during ingest. `relink` is set when the file's
+/// (owner, sha256) identity was already indexed at a different path, so the outcome can
+/// be reported as moved/renamed in addition to the ordinary indexed/skipped result.
+struct IngestOutcome {
+    result: IngestOne,
+    relink: Option<RelinkedAsset>,
+}
+
+/// Count and log a moved/renamed/duplicate outcome. Additive by contract: `indexed`/
+/// `skipped` keep their exact meaning (the UI progress copy keys on them), and `moved`/
+/// `renamed` count only files whose old copy is really gone.
+fn record_relink(summary: &mut IngestSummary, relink: Option<RelinkedAsset>) {
+    let Some(relinked) = relink else {
+        return;
+    };
+    match relinked.kind {
+        RelinkKind::Moved => summary.moved += 1,
+        RelinkKind::Renamed => summary.renamed += 1,
+        RelinkKind::DuplicateCopy => summary.duplicated += 1,
+    }
+    tracing::info!(
+        media_kind = relinked.media_kind,
+        media_id = %relinked.id,
+        from = %relinked.from_path.display(),
+        to = %relinked.to_path.display(),
+        outcome = relinked.kind.as_str(),
+        "ingest re-pointed media to the existing identity row"
+    );
+    summary.relinked.push(relinked);
 }
 
 struct ActiveJob {

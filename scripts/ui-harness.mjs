@@ -41,6 +41,13 @@ async function mockCalls(page) {
   return frame.evaluate(() => window.__crushMock.calls);
 }
 
+/// Evaluate inside the app iframe (FrameLocator has no evaluate).
+async function inAppFrame(page, fn) {
+  const frame = page.frames().find((candidate) => candidate.url().includes("ui/index.html"));
+  if (!frame) throw new Error("app iframe was not found");
+  return frame.evaluate(fn);
+}
+
 async function createPlan(page, name = "Launch selects") {
   const frame = page.frameLocator("#app-frame");
   await frame.locator("#nav-plans").click();
@@ -522,6 +529,85 @@ const tests = {
       ),
     );
     await poll(async () => (await frame.locator("#video-rows tr.video-row").count()) === 1);
+  },
+
+  async "relocate-moved-file"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const row = frame.locator("#video-rows tr.video-row");
+    await row.waitFor({ state: "visible" });
+    const locate = frame.locator("#locate-asset");
+    // The affordance is inert until the selected row's source is really missing.
+    assert.equal(await locate.isDisabled(), true);
+    await row.click();
+    await poll(() => locate.isEnabled());
+    // A missing source is not a green Done row: the row carries a plain-language
+    // "Source missing" pill in the failed tone while the Locate action is available.
+    assert.equal(await visibleText(row.locator(".status-pill.done")), "Done");
+    assert.equal(await visibleText(row.locator(".status-pill.failed")), "Source missing");
+    // First attempt picks a different file: refused honestly, nothing changes.
+    await locate.click();
+    await poll(async () =>
+      (await visibleText(frame.locator("#library-message"))).includes("SHA-256 mismatch"));
+    assert.match(
+      await visibleText(frame.locator("#library-message")),
+      /not the same media Crush indexed.*Nothing was changed/s,
+    );
+    assert.equal(await locate.isDisabled(), false);
+    assert.equal(await visibleText(row.locator(".file-path")), "/Volumes/Footage/Launch Day");
+    // Second attempt picks the real moved copy: verified identical and relinked.
+    await locate.click();
+    await poll(async () =>
+      (await visibleText(frame.locator("#library-message")))
+        .includes("The file moved. Crush verified the new copy is identical before relinking"));
+    const relink = (await mockCalls(page))
+      .filter((call) => call.command === "relink_asset")
+      .at(-1);
+    assert.equal(relink.args.id, "video-one");
+    assert.equal(relink.args.newPath, "/Volumes/Footage/moved/rocket-launch.mov");
+    await poll(async () => await locate.isDisabled());
+    // The relinked row shows the new location; its source is no longer missing, so the
+    // pill is gone with it.
+    assert.equal(await visibleText(row.locator(".file-path")), "/Volumes/Footage/moved");
+    assert.equal(
+      await row.locator(".status-pill.failed").count(),
+      0,
+      "a verified relink clears the Source missing pill",
+    );
+  },
+
+  async "ingest-relinked"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    // A finished ingest recognized moved content and re-pointed the existing row; the
+    // Library reports that honestly instead of hiding it inside "skipped".
+    await poll(async () =>
+      (await visibleText(frame.locator("#library-message")))
+        .includes("1 file moved or renamed — relinked to the original index by content"));
+    // The backend keeps finished tasks forever and re-carries them on every progress
+    // event (every job_status call re-fires this finished job in the mock), so the
+    // summary must be announced once per job id. Count relink announcements from here on
+    // (counting, not visibility: the 5 s auto-hide timer makes visibility flaky) and
+    // drive the same refresh path the app itself uses — a second event for the same job
+    // must stay silent.
+    await inAppFrame(page, () => {
+      const original = window.showMessage;
+      window.__relinkAnnouncements = 0;
+      window.showMessage = (...args) => {
+        if (String(args[0]).includes("relinked to the original index by content")) {
+          window.__relinkAnnouncements += 1;
+        }
+        return original(...args);
+      };
+    });
+    await inAppFrame(page, () => window.refreshLibrary());
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "job_status").length >= 2);
+    assert.equal(
+      await inAppFrame(page, () => window.__relinkAnnouncements),
+      0,
+      "the moved/renamed summary must be announced once per job id; a later event for an already-announced job must not re-show it",
+    );
   },
 
   async "search-error"(page) {

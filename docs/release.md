@@ -74,12 +74,20 @@ touches originals.
 ## Relink a moved drive
 
 Crush records the original absolute path; if a drive is remounted at a different path (or a file
-moves), the asset is reported honestly as missing rather than silently re-linked. To re-add media
-after a move:
+moves), the asset is reported honestly as missing rather than silently re-linked. Two first-class
+ways to repair it — both verify the file's bytes (SHA-256) against the recorded hash before
+changing anything, both re-point the existing catalog row (never a duplicate), and neither ever
+modifies an original:
 
-1. Add the folder again (Library → **Add Folder…**). Matching content hashes are detected and the
-   catalog points at the new path without duplicating; deliberately the app never rewrites an
-   original to "fix" a path.
+1. **Locate moved file…** (Library → select the missing asset → **Locate moved file…**): pick the
+   file at its new location. Crush refuses a different file with an honest error and changes
+   nothing.
+2. **`crushctl relink <asset-id-or-old-path> <new-path>`** — the same verification from the
+   command line.
+
+Renaming (not moving) a file inside the same folder, or re-adding a moved folder
+(Library → **Add Folder…**), is detected during ingest and reported as `moved`/`renamed →
+relinked` in the ingest summary instead of hiding inside "skipped".
 
 ## Uninstall
 

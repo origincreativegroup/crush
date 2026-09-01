@@ -21,6 +21,7 @@
   const calls = [];
   let modelsPresent = !scenario.startsWith("first-run");
   let downloadAttempts = 0;
+  let relocateAttempts = 0;
 
   const modelFiles = [
     ["clip-image.onnx", 351000000],
@@ -42,6 +43,7 @@
     indexedAt: "2026-08-28T12:00:00Z",
     shots: 12,
     lastError: null,
+    sourceMissing: false,
   };
   const photo = {
     assetType: "photo",
@@ -56,6 +58,7 @@
     indexedAt: "2026-08-28T12:02:00Z",
     shots: 0,
     lastError: null,
+    sourceMissing: false,
   };
 
   const library = {
@@ -78,6 +81,10 @@
     feedback: () => [{ ...video }],
     "style-panel": () => [{ ...video }, { ...photo }],
     "style-add-item": () => [{ ...video }],
+    // The selected video's file is gone from disk (drive remounted elsewhere): the
+    // "Locate moved file…" affordance must be the way back in.
+    "relocate-moved-file": () => [{ ...video, sourceMissing: true }],
+    "ingest-relinked": () => [{ ...video }],
   }[scenario]?.() ?? [];
   let libraryList = library;
 
@@ -146,6 +153,21 @@
       status: "running",
       detail: "indexing fixtures",
       error: null,
+    });
+  }
+  if (scenario === "ingest-relinked") {
+    // A finished ingest that recognized moved content: the backend keeps the counts as
+    // structured fields so the Library can report "relinked by content" without parsing.
+    background.push({
+      jobId: "background-relinked",
+      kind: "ingest",
+      status: "done",
+      detail:
+        "discovered=1 photos=0 indexed=0 indexed_photos=0 skipped=1 failed=0 moved=1 renamed=0 duplicated=0 recovered=0 vectors=12",
+      error: null,
+      moved: 1,
+      renamed: 0,
+      duplicated: 0,
     });
   }
 
@@ -869,8 +891,28 @@
         emit("ingest-progress", snapshot());
         return { removed: true, kind: removed.assetType };
       }
-      case "job_status":
-        return snapshot();
+      case "job_status": {
+        const snap = snapshot();
+        // The real backend emits ingest-progress from job_status; mirror that so the
+        // ingest-relinked scenario drives the Library's relinked-files message. The real
+        // backend also never prunes finished tasks, so it re-fires the same finished job
+        // on every event — which is exactly what the scenario's once-per-job assertion
+        // exercises.
+        if (scenario === "ingest-relinked") emit("ingest-progress", snap);
+        return snap;
+      }
+      case "relink_asset": {
+        const asset = libraryList.find((candidate) => candidate.id === args.id);
+        if (!asset) throw `No asset ${args.id}`;
+        // Mirrors the backend: a different file is refused honestly and nothing changes.
+        if (String(args.newPath).includes("DIFFERENT")) {
+          throw `relink refused: the file at ${args.newPath} is not the same media Crush indexed (SHA-256 mismatch). Nothing was changed.`;
+        }
+        asset.path = String(args.newPath);
+        asset.sourceMissing = false;
+        emit("ingest-progress", snapshot());
+        return { mediaKind: asset.assetType, id: asset.id, fromPath: "old", newPath: asset.path };
+      }
       case "doctor":
         return "Crush doctor\nffmpeg source=Bundled\nmodels=4/4 present";
       case "cancel_ingest":
@@ -1148,6 +1190,14 @@
     dialog: {
       async open(options = {}) {
         calls.push({ command: "dialog.open", args: options });
+        if (scenario === "relocate-moved-file") {
+          // First attempt: the user picks a different file (refused). Second attempt:
+          // the actual moved copy (verified and relinked).
+          relocateAttempts += 1;
+          return relocateAttempts === 1
+            ? "/Volumes/Footage/moved/rocket-launch-DIFFERENT.mov"
+            : "/Volumes/Footage/moved/rocket-launch.mov";
+        }
         if (scenario !== "import-reel-studio") return null;
         if (options.directory) return options.multiple ? ["/Volumes/Footage/2026"] : "/Volumes/Video Production";
         if (options.filters?.[0]?.extensions?.includes("json")) return ["/Users/john/Desktop/healthy-earth.json"];

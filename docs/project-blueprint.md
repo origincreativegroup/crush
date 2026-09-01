@@ -204,6 +204,12 @@ Golden outputs are generated once, committed under `fixtures/golden/`, and regen
 - `crushctl jobs` — list/filter the job log; `--failed` shows error text.
 - `crushctl doctor` — checks bundled ffmpeg resolves and runs, models present with expected sha256, ort's active execution provider (CoreML vs CPU), whisper Metal enabled, available RAM, SQLite migrations applied, embedding_meta matches models. Run this first on any "it doesn't work".
 - `crushctl reembed --all` and `crushctl resplit <video>` — re-run one stage without reingesting.
+  Resplit is evidence-neutral for shots whose content-addressed ids return: `replace_shots`
+  deletes only the shots that genuinely vanished and updates the survivors in place, so shot-keyed
+  feedback, annotations, assessments, vectors, and reference items survive. Plan items on vanished
+  shots are cleaned up (never silently rewritten); stored plan items keep their previously
+  validated boundaries, and the render-time clamp still refuses honestly at render time if an item
+  no longer fits its shot.
 
 ### 11.4 Testing layers
 

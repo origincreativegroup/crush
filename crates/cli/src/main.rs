@@ -97,6 +97,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Relink a moved or renamed file after verifying its bytes are identical (SHA-256).
+    /// The catalog row is re-pointed in place; a different file is refused and the
+    /// original file is never modified.
+    Relink {
+        /// Asset id (video-… or photo-…) or the stale stored path of the moved file.
+        target: String,
+        /// Where the file lives now. Crush verifies it is the same media before relinking.
+        new_path: PathBuf,
+    },
     /// Inspect raw intermediate values from one pipeline stage.
     Debug {
         #[command(subcommand)]
@@ -278,6 +287,16 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Cmd::Relink { target, new_path } => {
+            let outcome = Pipeline::new(cfg, paths, cancellation).relink(&target, &new_path)?;
+            println!(
+                "Relinked {} {} (SHA-256 verified; the original file was not modified)",
+                outcome.media_kind, outcome.id
+            );
+            println!("  was {}", outcome.old_path);
+            println!("  now {}", outcome.new_path);
+            Ok(())
+        }
         Cmd::Debug {
             command: DebugCommand::Scenes { video },
         } => debug_scenes(&cfg, &paths, &video),
@@ -445,16 +464,29 @@ fn ingest(
     let summary =
         Pipeline::new(cfg.clone(), paths.clone(), cancellation.clone()).ingest(input, debug)?;
     println!(
-        "Ingest complete: discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} recovered_jobs={} search_vectors={}",
+        "Ingest complete: discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} moved={} renamed={} duplicated={} recovered_jobs={} search_vectors={}",
         summary.discovered,
         summary.discovered_photos,
         summary.indexed,
         summary.indexed_photos,
         summary.skipped,
         summary.failed,
+        summary.moved,
+        summary.renamed,
+        summary.duplicated,
         summary.recovered_jobs,
         summary.search_vectors
     );
+    for relinked in &summary.relinked {
+        println!(
+            "{} {}: {} → {} (id {})",
+            relinked.kind.as_str(),
+            relinked.media_kind,
+            relinked.from_path.display(),
+            relinked.to_path.display(),
+            relinked.id
+        );
+    }
     for (path, error) in &summary.errors {
         eprintln!("failed {}: {error}", path.display());
     }
@@ -1536,6 +1568,30 @@ mod tests {
             clip.cmd,
             Cmd::Clip { shot_id, out }
                 if shot_id == "shot-1" && out == Path::new("export.mp4")
+        ));
+    }
+
+    #[test]
+    fn relink_cli_shape_is_stable() {
+        let by_id = Cli::try_parse_from([
+            "crushctl",
+            "relink",
+            "video-abc123",
+            "/Volumes/Footage/renamed.mov",
+        ])
+        .unwrap();
+        assert!(matches!(
+            by_id.cmd,
+            Cmd::Relink { target, new_path }
+                if target == "video-abc123" && new_path == Path::new("/Volumes/Footage/renamed.mov")
+        ));
+        let by_stale_path =
+            Cli::try_parse_from(["crushctl", "relink", "/old/drive/clip.mov", "/new/clip.mov"])
+                .unwrap();
+        assert!(matches!(
+            by_stale_path.cmd,
+            Cmd::Relink { target, new_path }
+                if target == "/old/drive/clip.mov" && new_path == Path::new("/new/clip.mov")
         ));
     }
 }

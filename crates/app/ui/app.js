@@ -12,6 +12,7 @@ const elements = {
   addFolder: document.querySelector("#add-folder"),
   emptyAddFolder: document.querySelector("#empty-add-folder"),
   reindex: document.querySelector("#reindex"),
+  locateAsset: document.querySelector("#locate-asset"),
   removeAsset: document.querySelector("#remove-asset"),
   removeDialog: document.querySelector("#remove-asset-dialog"),
   removeCancel: document.querySelector("#remove-asset-cancel"),
@@ -43,6 +44,10 @@ const state = {
   pendingRemoveId: null,
   poll: null,
   messageTimer: null,
+  // Job ids whose finished-ingest relink summary has already been announced. Backend
+  // tasks are never pruned and every progress event re-carries them, so this is what
+  // keeps the "moved or renamed" message from re-firing forever.
+  announcedIngestJobs: new Set(),
 };
 
 function humanBytes(bytes) {
@@ -236,6 +241,7 @@ function renderVideos() {
   const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
   elements.reindex.disabled = !selectedAsset || isIngestActive();
   elements.removeAsset.disabled = !selectedAsset || isIngestActive();
+  elements.locateAsset.disabled = !selectedAsset || isIngestActive() || !selectedAsset.sourceMissing;
 
   for (const video of state.videos) {
     const presentation = videoPresentation(video);
@@ -281,6 +287,15 @@ function renderVideos() {
     pill.className = `status-pill ${presentation.tone}`;
     pill.textContent = presentation.label;
     statusBox.append(pill);
+    if (video.sourceMissing) {
+      // The row's recorded file is not on disk right now. A bare green Done would hide
+      // that, so the row carries the same failed tone as a Failed row, in plain
+      // language; the "Locate moved file…" action stays gated on exactly this state.
+      const missing = document.createElement("span");
+      missing.className = "status-pill failed";
+      missing.textContent = "Source missing";
+      statusBox.append(missing);
+    }
     if (presentation.active) {
       const progress = document.createElement("div");
       progress.className = "progress-track row-progress";
@@ -374,6 +389,7 @@ function renderIndexingStatus() {
   const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
   elements.reindex.disabled = !selectedAsset || active;
   elements.removeAsset.disabled = !selectedAsset || active;
+  elements.locateAsset.disabled = !selectedAsset || active || !selectedAsset.sourceMissing;
   const dot = document.createElement("span");
   dot.className = `status-dot${active ? "" : " idle"}`;
   dot.setAttribute("aria-hidden", "true");
@@ -413,6 +429,16 @@ function managePolling() {
 
 async function onIngestProgress(event) {
   state.jobs = event.payload;
+  // Ingest reports moved/renamed outcomes honestly: the file was re-pointed to the
+  // existing identity row after the same content was recognized at the new path. Each
+  // finished job announces its summary exactly once — the backend keeps finished tasks
+  // forever and re-emits them on every event, so without the guard the message would
+  // re-fire on every poll for the rest of the session.
+  for (const task of state.jobs.background) {
+    if (task.kind === "ingest" && (task.status === "done" || task.status === "cancelled")) {
+      announceIngestRelinks(task);
+    }
+  }
   try {
     state.videos = await invoke("list_videos");
   } catch {
@@ -420,6 +446,27 @@ async function onIngestProgress(event) {
   }
   renderVideos();
   managePolling();
+}
+
+function announceIngestRelinks(task) {
+  // moved/renamed count only files whose old copy is really gone; a same-content file
+  // whose old path still exists is a duplicate copy.
+  const moved = (task.moved ?? 0) + (task.renamed ?? 0);
+  const duplicated = task.duplicated ?? 0;
+  if (moved === 0 && duplicated === 0) return;
+  if (state.announcedIngestJobs.has(task.jobId)) return;
+  // Bounded FIFO: only recent job ids matter for repeat suppression, and the set grows
+  // by one per ingest, so evicting the oldest id at 200 keeps it negligible.
+  if (state.announcedIngestJobs.size >= 200) {
+    state.announcedIngestJobs.delete(state.announcedIngestJobs.values().next().value);
+  }
+  state.announcedIngestJobs.add(task.jobId);
+  const parts = [];
+  if (moved > 0) parts.push(`${moved} file${moved === 1 ? "" : "s"} moved or renamed`);
+  if (duplicated > 0) {
+    parts.push(`${duplicated} duplicate cop${duplicated === 1 ? "y" : "ies"} found`);
+  }
+  showMessage(`${parts.join(" and ")} — relinked to the original index by content.`);
 }
 
 async function addPath(path) {
@@ -461,6 +508,26 @@ async function reindexSelected() {
   try {
     const started = await invoke("reindex_asset", { id: state.selectedVideoId });
     showMessage(`Re-index started · job ${started.jobId.slice(0, 8)}`);
+    await refreshLibrary();
+  } catch (error) {
+    showMessage(String(error), true);
+  }
+}
+
+async function locateMovedFile() {
+  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
+  if (!selectedAsset || isIngestActive() || !selectedAsset.sourceMissing) return;
+  try {
+    const picked = await bridge.dialog.open({
+      directory: false,
+      multiple: false,
+      title: "Locate the moved file",
+    });
+    if (typeof picked !== "string" || !picked) return;
+    const outcome = await invoke("relink_asset", { id: selectedAsset.id, newPath: picked });
+    showMessage(
+      `The file moved. Crush verified the new copy is identical before relinking · ${outcome.newPath}`,
+    );
     await refreshLibrary();
   } catch (error) {
     showMessage(String(error), true);
@@ -551,6 +618,7 @@ function bindActions() {
   elements.emptyAddFolder.addEventListener("click", chooseFolder);
   elements.cancel.addEventListener("click", cancelIngest);
   elements.reindex.addEventListener("click", reindexSelected);
+  elements.locateAsset.addEventListener("click", locateMovedFile);
   elements.removeAsset.addEventListener("click", confirmRemove);
   elements.removeCancel.addEventListener("click", () => {
     state.pendingRemoveId = null;
