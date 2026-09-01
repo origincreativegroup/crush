@@ -12,7 +12,8 @@ use crush_search::SearchEngine;
 use crush_stage_embed::embedder::{Embedder, ProviderPreference};
 use crush_stage_split::ffmpeg;
 use crush_store::{
-    JobFilter, MediaKind, NewJob, PhotoProxyProvenance, PhotoStatus, Store, VideoStatus,
+    EditorialAnnotation, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, PhotoProxyProvenance,
+    PhotoStatus, Plan, PlanItem, PlanOrigin, Store, VideoStatus,
 };
 use image::{Rgb, RgbImage};
 
@@ -204,6 +205,288 @@ fn photo_ingest_is_idempotent_and_searchable() {
         .photo_source_metadata(DEFAULT_OWNER_ID, &photo_id)
         .unwrap()
         .is_some());
+}
+
+/// The full rename-survival posture (TASK-038): the same bytes at a new path keep the same
+/// identity and every piece of shot-keyed evidence, whether the file returns via ingest
+/// (reported honestly as moved/renamed) or through the explicit verified relink flow.
+#[test]
+fn renamed_and_moved_files_keep_identity_and_evidence() {
+    if ffmpeg::resolve().is_err() {
+        eprintln!("skipping pipeline fixture test: FFmpeg sidecars are not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    if !install_model_links(temp.path()) {
+        return;
+    }
+    let paths = AppPaths {
+        root: temp.path().to_path_buf(),
+    };
+    let config = fixture_config(temp.path());
+    let pipeline = Pipeline::new(config.clone(), paths.clone(), CancellationToken::default());
+
+    let media = temp.path().join("media");
+    std::fs::create_dir(&media).unwrap();
+    let original = media.join("launch-day.mp4");
+    std::fs::copy(
+        repo_root().join("fixtures/clips/earth-timelapse-silent.mp4"),
+        &original,
+    )
+    .unwrap();
+
+    let first = pipeline.ingest(&media, false).unwrap();
+    assert_eq!(first.indexed, 1, "ingest errors: {:#?}", first.errors);
+    assert_eq!(first.moved, 0);
+    assert_eq!(first.renamed, 0);
+
+    let store = Store::open(temp.path()).unwrap();
+    let video = store.videos(DEFAULT_OWNER_ID).unwrap().pop().unwrap();
+    assert_eq!(video.status, VideoStatus::Done);
+    let shots = store.shots_for_video(DEFAULT_OWNER_ID, &video.id).unwrap();
+    assert!(!shots.is_empty());
+    let shot_ids = shots.iter().map(|shot| shot.id.clone()).collect::<Vec<_>>();
+    let shot_id = shot_ids[0].clone();
+    drop(store);
+
+    // Shot-keyed evidence on a Done video, exactly as a user leaves it before a move.
+    let mut store = Store::open(temp.path()).unwrap();
+    store
+        .append_feedback(
+            DEFAULT_OWNER_ID,
+            &FeedbackEvent {
+                id: "ev-pick".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                media_kind: MediaKind::Shot,
+                media_id: shot_id.clone(),
+                signal: FeedbackSignal::Pick,
+                value: None,
+                compared_media_kind: None,
+                compared_media_id: None,
+                context_json: "{}".to_owned(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    store
+        .upsert_editorial_annotation(
+            DEFAULT_OWNER_ID,
+            &EditorialAnnotation {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                media_kind: MediaKind::Shot,
+                media_id: shot_id.clone(),
+                description: "the decisive moment".to_owned(),
+                subjects: String::new(),
+                action: String::new(),
+                tags: "hero".to_owned(),
+                quality: Some(5),
+                standout: true,
+                usable: true,
+                faces_visible: true,
+                nametags_visible: false,
+                blur_required: false,
+                crop_x: None,
+                grade_json: None,
+                notes: String::new(),
+                updated_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    store
+        .plan_create(
+            DEFAULT_OWNER_ID,
+            &Plan {
+                id: "plan-ev".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                name: "Rename survival".to_owned(),
+                description: String::new(),
+                context_key: "default".to_owned(),
+                brief: String::new(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &PlanItem {
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                plan_id: "plan-ev".to_owned(),
+                media_kind: MediaKind::Shot,
+                media_id: shot_id.clone(),
+                position: 0,
+                start_s: Some(shots[0].start_s),
+                end_s: Some(shots[0].end_s),
+                pacing: None,
+                crop_x: None,
+                grade_json: None,
+                reason: String::new(),
+                signals_json: "{}".to_owned(),
+                origin: PlanOrigin::General,
+                rank: None,
+                profile_version: None,
+                provenance_json: "{}".to_owned(),
+                added_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    assert!(store
+        .vector_for_shot(DEFAULT_OWNER_ID, &shot_id)
+        .unwrap()
+        .is_some());
+    assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    drop(store);
+
+    let evidence_intact = |context: &str| {
+        let store = Store::open(temp.path()).unwrap();
+        assert_eq!(
+            store.videos(DEFAULT_OWNER_ID).unwrap().len(),
+            1,
+            "{context}: a relink never duplicates rows"
+        );
+        let video = store.videos(DEFAULT_OWNER_ID).unwrap().pop().unwrap();
+        let ids = store
+            .shots_for_video(DEFAULT_OWNER_ID, &video.id)
+            .unwrap()
+            .iter()
+            .map(|shot| shot.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, shot_ids, "{context}: stable shot ids must not change");
+        assert_eq!(
+            store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(),
+            1,
+            "{context}: feedback survives"
+        );
+        assert!(
+            store
+                .editorial_annotation(DEFAULT_OWNER_ID, MediaKind::Shot, &shot_id)
+                .unwrap()
+                .is_some(),
+            "{context}: annotation survives"
+        );
+        assert!(
+            store
+                .aesthetic_assessment(DEFAULT_OWNER_ID, MediaKind::Shot, &shot_id)
+                .unwrap()
+                .is_some(),
+            "{context}: assessment survives"
+        );
+        assert!(
+            store
+                .vector_for_shot(DEFAULT_OWNER_ID, &shot_id)
+                .unwrap()
+                .is_some(),
+            "{context}: vector survives"
+        );
+        assert_eq!(
+            store.plan_items(DEFAULT_OWNER_ID, "plan-ev").unwrap().len(),
+            1,
+            "{context}: plan item survives"
+        );
+    };
+
+    // 1) Rename in place: same directory, new file name → reported as renamed.
+    let renamed = media
+        .canonicalize()
+        .unwrap()
+        .join("launch-day-renamed.mp4");
+    std::fs::rename(&original, &renamed).unwrap();
+    let summary = pipeline.ingest(&media, false).unwrap();
+    assert_eq!(summary.renamed, 1, "a same-directory rename is a rename");
+    assert_eq!(summary.moved, 0);
+    assert_eq!(summary.indexed, 0, "a moved file is relinked, not re-indexed");
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.relinked.len(), 1);
+    assert_eq!(summary.relinked[0].media_kind, "video");
+    assert_eq!(summary.relinked[0].id, video.id);
+    assert_eq!(summary.relinked[0].kind, crush_pipeline::RelinkKind::Renamed);
+    assert_eq!(summary.relinked[0].to_path, renamed);
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, &video.id)
+            .unwrap()
+            .unwrap()
+            .path,
+        renamed.to_string_lossy()
+    );
+    drop(store);
+    evidence_intact("after a rename");
+
+    // 2) Move to a different directory: reported as moved.
+    let moved_dir = temp.path().join("remounted-drive");
+    std::fs::create_dir(&moved_dir).unwrap();
+    let moved = moved_dir
+        .canonicalize()
+        .unwrap()
+        .join("launch-day-renamed.mp4");
+    std::fs::rename(&renamed, &moved).unwrap();
+    let summary = pipeline.ingest(&moved_dir, false).unwrap();
+    assert_eq!(summary.moved, 1, "a new directory is a move");
+    assert_eq!(summary.renamed, 0);
+    assert_eq!(summary.relinked[0].kind, crush_pipeline::RelinkKind::Moved);
+    assert_eq!(summary.relinked[0].from_path, renamed);
+    assert_eq!(summary.relinked[0].to_path, moved);
+    evidence_intact("after a move");
+
+    // 3) Explicit relink without re-adding any folder: hash verified, row re-pointed.
+    let relocated_dir = temp.path().join("relocated");
+    std::fs::create_dir(&relocated_dir).unwrap();
+    let relocated = relocated_dir
+        .canonicalize()
+        .unwrap()
+        .join("launch-day-renamed.mp4");
+    std::fs::rename(&moved, &relocated).unwrap();
+    let outcome = pipeline.relink(&video.id, &relocated).unwrap();
+    assert_eq!(outcome.id, video.id);
+    assert_eq!(outcome.media_kind, "video");
+    assert_eq!(outcome.old_path, moved.to_string_lossy());
+    assert_eq!(outcome.new_path, relocated.to_string_lossy());
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, &video.id)
+            .unwrap()
+            .unwrap()
+            .path,
+        relocated.to_string_lossy()
+    );
+    drop(store);
+    evidence_intact("after an explicit relink");
+
+    // 4) A different file at the new path is refused honestly and changes nothing.
+    let tampered = relocated_dir.join("tampered.mp4");
+    std::fs::copy(&relocated, &tampered).unwrap();
+    let mut handle = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&tampered)
+        .unwrap();
+    std::io::Write::write_all(&mut handle, b"not-the-same-bytes").unwrap();
+    drop(handle);
+    let error = pipeline.relink(&video.id, &tampered).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("SHA-256 mismatch"),
+        "a different file must be refused with the honest reason: {error:#}"
+    );
+    assert!(
+        pipeline.relink("video-missing", &relocated).is_err(),
+        "an unknown target refuses too"
+    );
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, &video.id)
+            .unwrap()
+            .unwrap()
+            .path,
+        relocated.to_string_lossy(),
+        "a refused relink leaves the row untouched"
+    );
+    drop(store);
+    evidence_intact("after a refused relink");
+    // The original bytes were never modified anywhere along the way.
+    assert_eq!(sha256_file(&relocated).unwrap(), video.sha256);
 }
 
 #[test]
