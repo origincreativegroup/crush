@@ -140,7 +140,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -151,7 +151,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 12);
+    assert_eq!(reopened.schema_version().unwrap(), 13);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -208,7 +208,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -226,7 +226,7 @@ fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
     // A first run has no database to back up: no snapshot and no backups directory.
     let fresh = TestDir::new("migration-snapshot-fresh");
     let fresh_store = Store::open(fresh.path()).unwrap();
-    assert_eq!(fresh_store.schema_version().unwrap(), 12);
+    assert_eq!(fresh_store.schema_version().unwrap(), 13);
     assert!(
         !fresh.path().join("backups").exists(),
         "a first run must not write a pre-migration snapshot"
@@ -277,7 +277,7 @@ fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
     std::mem::forget(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     let videos = store.videos(DEFAULT_OWNER_ID).unwrap();
     assert_eq!(videos.len(), 1, "the upgraded database keeps its data");
     assert_eq!(videos[0].id, "legacy-video");
@@ -320,7 +320,7 @@ fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
     // Reopening with no pending migrations must not add another snapshot.
     drop(store);
     let reopened = Store::open(directory.path()).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 12);
+    assert_eq!(reopened.schema_version().unwrap(), 13);
     let snapshots_after = std::fs::read_dir(&backups_dir).unwrap().count();
     assert_eq!(
         snapshots_after, 1,
@@ -378,7 +378,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -1808,7 +1808,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -3465,7 +3465,7 @@ fn schema_v7_upgrades_to_collections_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(
         store
@@ -4083,7 +4083,7 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
     drop(connection);
 
     let mut store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
     // The v9 plan surfaces are live on the upgraded database.
@@ -6158,7 +6158,7 @@ fn schema_v11_spans_upgrade_to_video_range_triggers_without_losing_rows() {
 
     // The upgrade preserves the rows and swaps the span arms to the video range.
     let mut store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     let items = store.plan_items(DEFAULT_OWNER_ID, "plan-mig").unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].media_kind, MediaKind::Span);
@@ -6215,4 +6215,612 @@ fn connection_shots_setup(connection: &Connection) {
             [],
         )
         .unwrap();
+}
+
+// ---- Task 034: catalogue unification — span text in search, Review, and the
+// explicit imported-evidence confirmation flow (schema v13). ----
+
+fn span_reference_item(
+    owner_id: &str,
+    set_id: &str,
+    span_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> ReferenceSetItem {
+    ReferenceSetItem {
+        owner_id: owner_id.to_owned(),
+        set_id: set_id.to_owned(),
+        media_kind: MediaKind::Span,
+        media_id: span_id.to_owned(),
+        role: ReferenceItemRole::Positive,
+        added_at: now,
+    }
+}
+
+/// The v13 decision: span confirmation enters as span-keyed reference_set_items so the
+/// existing reversible confirm/disable/delete machinery covers withdrawal, and span
+/// catalogue text joins search through a triggers-synced FTS index. A v12 database
+/// upgrades with all rows intact and the backfilled FTS finds the imported description.
+#[test]
+fn schema_v12_spans_upgrade_to_span_reference_and_fts_evidence() {
+    let directory = TestDir::new("migration-v12-v13");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+        (4, include_str!("../migrations/0004_strong_shot.sql")),
+        (5, include_str!("../migrations/0005_feedback_hardening.sql")),
+        (6, include_str!("../migrations/0006_photo_jobs.sql")),
+        (7, include_str!("../migrations/0007_reference_sets.sql")),
+        (8, include_str!("../migrations/0008_collections.sql")),
+        (9, include_str!("../migrations/0009_plans.sql")),
+        (10, include_str!("../migrations/0010_rendering.sql")),
+        (
+            11,
+            include_str!("../migrations/0011_reel_studio_import.sql"),
+        ),
+        (
+            12,
+            include_str!("../migrations/0012_span_item_video_range.sql"),
+        ),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+
+    // v12 data: a video, an imported span with catalogue text, and a confirmed reference
+    // set holding a photo item (span items are impossible on v12's CHECK).
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('video-mig', 'local', '/mig.mov', 'mig-sha', 12.5, 24.0, 1920, 1080,
+                       1, 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO photos (id, owner_id, path, sha256, width, height, format, status)
+             VALUES ('photo-mig', 'local', '/mig.jpg', 'photo-sha', 100, 100, 'jpeg', 'done')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO manual_spans (id, owner_id, video_id, source, external_id, start_s,
+                                       end_s, boundary_basis, boundary_tolerance_s, description,
+                                       imported_at, updated_at)
+             VALUES ('span-mig', 'local', 'video-mig', 'reel_studio', 'V1-0001_S1', 2.0, 9.0,
+                     'catalogue_tc', 0.5, 'zeppelin over the harbor',
+                     '2026-08-30T12:00:00Z', '2026-08-30T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO reference_sets (id, owner_id, name, context_key, description, scope,
+                                        status, created_at)
+             VALUES ('set-mig', 'local', 'previous work', 'default', 'finished selects',
+                     'whole_set', 'confirmed', '2026-08-30T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO reference_set_items (owner_id, set_id, media_kind, media_id, role, added_at)
+             VALUES ('local', 'set-mig', 'photo', 'photo-mig', 'positive',
+                     '2026-08-30T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 13);
+    // The span and its catalogue text survived; the backfilled FTS finds the description.
+    let hits = store
+        .span_text_hits(DEFAULT_OWNER_ID, "\"zeppelin\"", 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].span_id, "span-mig");
+    assert_eq!(hits[0].external_id, "V1-0001_S1");
+    // The pre-existing photo item survived the table rebuild, and the widened CHECK now
+    // admits span items through the normal store path.
+    let items = store
+        .reference_set_items(DEFAULT_OWNER_ID, "set-mig")
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].media_kind, MediaKind::Photo);
+    let now = Utc.with_ymd_and_hms(2026, 8, 30, 12, 5, 0).unwrap();
+    store
+        .reference_set_add_item(
+            DEFAULT_OWNER_ID,
+            &span_reference_item(DEFAULT_OWNER_ID, "set-mig", "span-mig", now),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-mig")
+            .unwrap()
+            .len(),
+        2
+    );
+    // Confirmed-evidence reads see the span beside the photo.
+    let confirmed = store
+        .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+        .unwrap();
+    assert!(confirmed.contains(&(MediaKind::Photo, "photo-mig".to_owned())));
+    assert!(confirmed.contains(&(MediaKind::Span, "span-mig".to_owned())));
+}
+
+/// Span reference items are real first-class evidence rows: the target-existence trigger
+/// refuses missing spans, span deletion cleans its reference items (mirroring photo/shot),
+/// and the confirmed-status + items survive a span RE-IMPORT upsert (the importer's
+/// idempotence keys keep span ids stable, and the upsert never cascades confirmation away).
+#[test]
+fn span_reference_evidence_admits_spans_survives_upsert_and_cleans_on_delete() {
+    let directory = TestDir::new("span-reference-evidence");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-ev", "ev-sha"))
+        .unwrap();
+    store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-ev", "video-ev", "V1-0001_S1", 1.0, 4.0),
+        )
+        .unwrap();
+
+    store
+        .reference_set_create(
+            DEFAULT_OWNER_ID,
+            &reference_set(
+                "set-span",
+                "imported evidence",
+                ReferenceSetStatus::Unconfirmed,
+            ),
+        )
+        .unwrap();
+    // The target-existence trigger refuses spans that do not exist for the owner.
+    assert!(store
+        .reference_set_add_item(
+            DEFAULT_OWNER_ID,
+            &span_reference_item(DEFAULT_OWNER_ID, "set-span", "span-missing", now),
+        )
+        .is_err());
+    store
+        .reference_set_add_item(
+            DEFAULT_OWNER_ID,
+            &span_reference_item(DEFAULT_OWNER_ID, "set-span", "span-ev", now),
+        )
+        .unwrap();
+    store
+        .reference_set_confirm(DEFAULT_OWNER_ID, "set-span")
+        .unwrap();
+
+    // Re-import the same catalogue segment (same external id, refreshed text): the span id
+    // is stable, and the confirmed reference item + set status are untouched — confirmation
+    // never evaporates because the catalogue was re-applied.
+    let refreshed = manual_span("span-ignored", "video-ev", "V1-0001_S1", 1.0, 4.5);
+    let stored = store
+        .manual_span_upsert(DEFAULT_OWNER_ID, &refreshed)
+        .unwrap();
+    assert_eq!(stored.id, "span-ev");
+    assert_eq!(
+        store
+            .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+            .unwrap(),
+        vec![(MediaKind::Span, "span-ev".to_owned())]
+    );
+    assert_eq!(
+        store
+            .reference_set_get(DEFAULT_OWNER_ID, "set-span")
+            .unwrap()
+            .unwrap()
+            .status,
+        ReferenceSetStatus::Confirmed
+    );
+
+    // Withdrawal is the existing machinery: disable mutes the set.
+    store
+        .reference_set_disable(DEFAULT_OWNER_ID, "set-span")
+        .unwrap();
+    assert!(store
+        .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+        .unwrap()
+        .is_empty());
+    store
+        .reference_set_confirm(DEFAULT_OWNER_ID, "set-span")
+        .unwrap();
+
+    // Deleting the span (manual cleanup, never the importer) cleans its reference item.
+    assert!(store
+        .manual_span_delete(DEFAULT_OWNER_ID, "span-ev")
+        .unwrap());
+    assert!(store
+        .reference_set_items(DEFAULT_OWNER_ID, "set-span")
+        .unwrap()
+        .is_empty());
+
+    // Owner isolation: another owner sees neither the span nor the set.
+    assert!(store
+        .imported_evidence_spans("someone-else")
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .reference_set_by_name("someone-else", "imported evidence")
+        .unwrap()
+        .is_none());
+}
+
+/// The FTS triggers keep span catalogue text in sync with every span write — upsert,
+/// evidence refresh, manual delete, and the videos → manual_spans ON DELETE CASCADE that
+/// no Rust code observes.
+#[test]
+fn manual_span_fts_stays_in_sync_with_span_writes() {
+    let directory = TestDir::new("span-fts-sync");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-ftx", "ftx-sha"))
+        .unwrap();
+
+    let mut span = manual_span("span-fts", "video-ftx", "V1-0001_S1", 1.0, 4.0);
+    span.description = "harbor at dusk".to_owned();
+    store.manual_span_upsert(DEFAULT_OWNER_ID, &span).unwrap();
+    let hits = store
+        .span_text_hits(DEFAULT_OWNER_ID, "\"harbor\"", 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].span_id, "span-fts");
+    assert!(hits[0].matched_text.starts_with("harbor at dusk"));
+    assert!(hits[0].matched_text.contains("child"));
+
+    // Re-import with changed catalogue text: the refreshed description replaces the old
+    // words in the index (the update trigger re-syncs), and the other columns match too.
+    let mut updated = span.clone();
+    updated.description = "zeppelin over the harbor".to_owned();
+    updated.subjects = "child".to_owned();
+    store
+        .manual_span_upsert(DEFAULT_OWNER_ID, &updated)
+        .unwrap();
+    assert!(store
+        .span_text_hits(DEFAULT_OWNER_ID, "\"dusk\"", 10)
+        .unwrap()
+        .is_empty());
+    let hits = store
+        .span_text_hits(DEFAULT_OWNER_ID, "\"zeppelin\"", 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].matched_text.contains("child"));
+    assert_eq!(hits[0].source, "reel_studio");
+    assert_eq!(hits[0].import_id, Some("import-1".to_owned()));
+    assert!(hits[0].rank < 0.0, "bm25 ranks arrive, lower is better");
+
+    // The cascade path (deleting the video deletes the span with no Rust code involved)
+    // must leave no stale FTS rows behind.
+    store
+        .delete_video_cascade(DEFAULT_OWNER_ID, "video-ftx")
+        .unwrap();
+    assert!(store
+        .span_text_hits(DEFAULT_OWNER_ID, "\"zeppelin\" OR \"harbor\"", 10)
+        .unwrap()
+        .is_empty());
+
+    // Owner isolation on the read path.
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-ftx2", "ftx2-sha"))
+        .unwrap();
+    let mut other = updated.clone();
+    other.video_id = "video-ftx2".to_owned();
+    other.external_id = "V1-0002_S2".to_owned();
+    store.manual_span_upsert(DEFAULT_OWNER_ID, &other).unwrap();
+    assert!(store
+        .span_text_hits("someone-else", "\"zeppelin\"", 10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .span_text_hits(DEFAULT_OWNER_ID, "\"zeppelin\"", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// The third browse branch: imported clips appear in the library browse with their
+/// catalogue columns, the shared filters map onto span columns, provenance travels with
+/// the row, and the clauses that cannot apply to spans (collections/stacks) never match —
+/// while the feedback filter maps to confirmed reference-set membership per the v13
+/// schema decision.
+#[test]
+fn browse_assets_returns_imported_spans_with_catalogue_filters() {
+    let directory = TestDir::new("browse-spans");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-br", "br-sha"))
+        .unwrap();
+    store
+        .insert_shots(DEFAULT_OWNER_ID, &[shot("shot-br", "video-br", 0)])
+        .unwrap();
+
+    let mut strong = manual_span("span-strong", "video-br", "V1-0001_S1", 0.5, 3.0);
+    strong.quality = Some(5);
+    strong.standout = true;
+    strong.used_in = "reel-01".to_owned();
+    let mut unusable = manual_span("span-unusable", "video-br", "V1-0002_S1", 3.5, 6.0);
+    unusable.external_id = "V1-0002_S1".to_owned();
+    unusable.quality = Some(2);
+    unusable.standout = false;
+    unusable.usable = false;
+    store.manual_span_upsert(DEFAULT_OWNER_ID, &strong).unwrap();
+    store
+        .manual_span_upsert(DEFAULT_OWNER_ID, &unusable)
+        .unwrap();
+
+    // kind=span returns only spans, with the span's own evidence columns and provenance.
+    let spans = store
+        .browse_assets(
+            DEFAULT_OWNER_ID,
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(spans.len(), 2);
+    let strong_row = spans
+        .iter()
+        .find(|row| row.media_id == "span-strong")
+        .unwrap();
+    assert_eq!(strong_row.source.as_deref(), Some("reel_studio"));
+    assert_eq!(strong_row.external_id.as_deref(), Some("V1-0001_S1"));
+    assert_eq!(strong_row.import_id.as_deref(), Some("import-1"));
+    assert!(strong_row.imported_at.is_some());
+    assert_eq!(strong_row.quality, Some(5));
+    assert!(strong_row.standout);
+    assert_eq!(strong_row.video_id.as_deref(), Some("video-br"));
+    assert_eq!(
+        strong_row.collection_ids,
+        Vec::<String>::new(),
+        "spans cannot join collections yet — the clause can never match"
+    );
+
+    // The all-assets browse includes spans beside photos and shots.
+    let everything = store
+        .browse_assets(DEFAULT_OWNER_ID, &AssetFilter::default())
+        .unwrap();
+    assert_eq!(everything.len(), 3);
+
+    // Catalogue filters map onto span columns.
+    let quality_five = store
+        .browse_assets(
+            DEFAULT_OWNER_ID,
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                quality_min: Some(4),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        quality_five
+            .iter()
+            .map(|row| row.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["span-strong"]
+    );
+    let flagged = store
+        .browse_assets(
+            DEFAULT_OWNER_ID,
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                usable: Some(false),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        flagged
+            .iter()
+            .map(|row| row.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["span-unusable"]
+    );
+    // The path substring matches the parent video's path.
+    let by_name = store
+        .browse_assets(
+            DEFAULT_OWNER_ID,
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                search: Some("video-br.mov".to_owned()),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(by_name.len(), 2);
+
+    // Feedback has no span rows; the honest mapping is confirmed reference-set membership.
+    store
+        .reference_set_create(
+            DEFAULT_OWNER_ID,
+            &reference_set(
+                "set-br",
+                "confirmed evidence",
+                ReferenceSetStatus::Unconfirmed,
+            ),
+        )
+        .unwrap();
+    store
+        .reference_set_add_item(
+            DEFAULT_OWNER_ID,
+            &span_reference_item(
+                DEFAULT_OWNER_ID,
+                "set-br",
+                "span-strong",
+                Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+            ),
+        )
+        .unwrap();
+    let evidence = store
+        .browse_assets(
+            DEFAULT_OWNER_ID,
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                feedback: Some("pick".to_owned()),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap();
+    assert!(evidence.is_empty(), "unconfirmed sets are inert");
+    store
+        .reference_set_confirm(DEFAULT_OWNER_ID, "set-br")
+        .unwrap();
+    let evidence = store
+        .browse_assets(
+            DEFAULT_OWNER_ID,
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                feedback: Some("pick".to_owned()),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|row| row.media_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["span-strong"],
+        "the editorial filter maps to confirmed evidence membership for spans"
+    );
+
+    // Collections and stacks never admit spans, so those filters exclude every span.
+    let collection_filtered = store
+        .browse_assets(
+            DEFAULT_OWNER_ID,
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                collection_id: Some("col-x".to_owned()),
+                stack_id: Some("stk-x".to_owned()),
+                context_key: Some("web".to_owned()),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap();
+    assert!(collection_filtered.is_empty());
+
+    // Owner isolation.
+    assert!(store
+        .browse_assets(
+            "someone-else",
+            &AssetFilter {
+                kind: Some(MediaKind::Span),
+                ..AssetFilter::default()
+            },
+        )
+        .unwrap()
+        .is_empty());
+}
+
+/// The Preferences population: spans with import lineage or catalogue evidence, each with
+/// the reference sets that hold it and whether any of them is confirmed. Derived from the
+/// span rows themselves, never from a stored dry-run report.
+#[test]
+fn imported_evidence_spans_lists_evidence_and_confirmation_state() {
+    let directory = TestDir::new("imported-evidence");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-ie", "ie-sha"))
+        .unwrap();
+
+    // No evidence and no import lineage: not a candidate.
+    let mut bare = manual_span("span-bare", "video-ie", "V1-0009_S1", 0.5, 2.0);
+    bare.quality = None;
+    bare.standout = false;
+    bare.used_in = String::new();
+    bare.import_id = None;
+    store.manual_span_upsert(DEFAULT_OWNER_ID, &bare).unwrap();
+
+    // Evidence-bearing spans are candidates.
+    store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-strong", "video-ie", "V1-0001_S1", 2.0, 5.0),
+        )
+        .unwrap();
+    let mut used = manual_span("span-used", "video-ie", "V1-0002_S1", 5.5, 8.0);
+    used.quality = None;
+    used.standout = false;
+    used.used_in = "reel-07".to_owned();
+    store.manual_span_upsert(DEFAULT_OWNER_ID, &used).unwrap();
+
+    let evidence = store.imported_evidence_spans(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|item| item.span_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["span-strong", "span-used"]
+    );
+    assert!(evidence.iter().all(|item| !item.confirmed));
+    assert!(evidence.iter().all(|item| item.sets.is_empty()));
+
+    // Confirmation state comes from real reference-set membership.
+    store
+        .reference_set_create(
+            DEFAULT_OWNER_ID,
+            &reference_set(
+                "set-ie",
+                "Reel Studio · imported evidence",
+                ReferenceSetStatus::Unconfirmed,
+            ),
+        )
+        .unwrap();
+    store
+        .reference_set_add_item(
+            DEFAULT_OWNER_ID,
+            &span_reference_item(
+                DEFAULT_OWNER_ID,
+                "set-ie",
+                "span-strong",
+                Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+            ),
+        )
+        .unwrap();
+    store
+        .reference_set_confirm(DEFAULT_OWNER_ID, "set-ie")
+        .unwrap();
+    let evidence = store.imported_evidence_spans(DEFAULT_OWNER_ID).unwrap();
+    let strong = evidence
+        .iter()
+        .find(|item| item.span_id == "span-strong")
+        .unwrap();
+    assert!(strong.confirmed);
+    assert_eq!(
+        strong.sets,
+        vec!["Reel Studio · imported evidence".to_owned()]
+    );
+    let used = evidence
+        .iter()
+        .find(|item| item.span_id == "span-used")
+        .unwrap();
+    assert!(!used.confirmed);
 }

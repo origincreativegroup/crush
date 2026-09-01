@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use crush_core::{job::JobRecord, job::JobStatus, job::Stage};
 use rusqlite::{params, types::Type, Connection, OptionalExtension, Row, TransactionBehavior};
 
-const CURRENT_SCHEMA_VERSION: i64 = 12;
+const CURRENT_SCHEMA_VERSION: i64 = 13;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_dam_feedback.sql")),
@@ -34,6 +34,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         12,
         include_str!("../migrations/0012_span_item_video_range.sql"),
+    ),
+    (
+        13,
+        include_str!("../migrations/0013_span_reference_evidence.sql"),
     ),
 ];
 
@@ -654,6 +658,13 @@ pub struct LibraryAsset {
     pub tags: String,
     pub collection_ids: Vec<String>,
     pub stack_ids: Vec<String>,
+    /// Catalogue provenance for imported spans (Task 034); `None` for photos and shots.
+    /// `source` is `reel_studio` or `manual`; `import_id` links the span to its import
+    /// ledger row so Review pills can say where the evidence came from.
+    pub source: Option<String>,
+    pub external_id: Option<String>,
+    pub import_id: Option<String>,
+    pub imported_at: Option<DateTime<Utc>>,
 }
 
 /// Dashboard counters for the library view.
@@ -751,6 +762,34 @@ pub struct SearchShotContext {
 pub struct TranscriptShotHit {
     pub shot_id: String,
     pub text: String,
+}
+
+/// One text-match hit from the span catalogue FTS index (Task 034). Spans have no embedding
+/// vectors, so these hits are always TEXT-MATCH-ONLY results beside the semantic ranking —
+/// never a cosine score. The matched catalogue text and the full provenance travel with the
+/// hit so no consumer can mistake it for an embedded asset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpanTextHit {
+    pub span_id: String,
+    pub video_id: String,
+    pub video_path: String,
+    pub start_s: f64,
+    pub end_s: f64,
+    pub description: String,
+    pub subjects: String,
+    pub action: String,
+    pub tags: String,
+    pub shot_type: String,
+    pub camera_move: String,
+    /// `reel_studio` or `manual` — the catalogue provenance, exported verbatim.
+    pub source: String,
+    pub external_id: String,
+    pub import_id: Option<String>,
+    pub imported_at: DateTime<Utc>,
+    /// The catalogue text that matched, for an honest snippet without fabricating content.
+    pub matched_text: String,
+    /// FTS5 bm25 rank: lower (more negative) is a better text match.
+    pub rank: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1558,6 +1597,25 @@ impl Store {
             )
             .optional()
             .context("failed to read reference set")
+    }
+
+    /// Look a set up by its (owner-unique) name — used by the imported-evidence confirmation
+    /// flow so re-confirming extends the existing set instead of failing the unique name.
+    pub fn reference_set_by_name(
+        &self,
+        owner_id: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<ReferenceSet>> {
+        self.connection
+            .query_row(
+                "SELECT id, owner_id, name, context_key, description, scope, status,
+                        source_collection_id, created_at, confirmed_at
+                 FROM reference_sets WHERE owner_id = ?1 AND name = ?2",
+                params![owner_id, name],
+                reference_set_from_row,
+            )
+            .optional()
+            .context("failed to read reference set by name")
     }
 
     /// Flip a set to `confirmed`; confirmed sets are the only ones the trainer reads.
@@ -3953,16 +4011,43 @@ impl Store {
         owner_id: &str,
         filter: &AssetFilter,
     ) -> anyhow::Result<Vec<LibraryAsset>> {
-        // Both branches bind the same ten parameters in the same order, so the clause set is
-        // rendered once per branch with branch-specific columns. The stack clause in the shot
-        // branch can never match because stack_items CHECK-constrains media_kind to
-        // photo/video, which keeps the parameter list aligned across branches.
+        // All three branches bind the same eleven parameters in the same order, so the
+        // clause set is rendered once per branch with branch-specific columns. The stack
+        // clause in the shot branch can never match because stack_items CHECK-constrains
+        // media_kind to photo/video, and the collection/context clauses in the span branch
+        // can never match because collection_items CHECK-constrains media_kind to
+        // photo/shot — which keeps the parameter list aligned across branches.
+        //
+        // Task 034: the span branch aliases manual_spans as `a` so the evidence clauses
+        // (quality/usable/faces/blur) read the span row's own catalogue columns, and the
+        // feedback arm maps to confirmed reference-set membership instead of feedback
+        // events — per the v13 schema decision, spans have no feedback_events rows
+        // (that table stays photo/shot); "editorial" filtering for spans means the span is
+        // confirmed evidence in some reference set.
         let clause = |owner_col: &str,
                       status_col: &str,
                       path_col: &str,
                       media: &str,
-                      id_col: &str|
+                      id_col: &str,
+                      feedback_via_reference_set: bool|
          -> String {
+            let feedback_arm = if feedback_via_reference_set {
+                format!(
+                    "AND (?11 IS NULL OR EXISTS (
+           SELECT 1 FROM reference_set_items rsi
+           JOIN reference_sets rs ON rs.id = rsi.set_id AND rs.owner_id = rsi.owner_id
+           WHERE rsi.owner_id = {owner_col} AND rsi.media_kind = '{media}'
+             AND rsi.media_id = {id_col} AND rs.status = 'confirmed'
+             AND rsi.role = 'positive'))"
+                )
+            } else {
+                format!(
+                    "AND (?11 IS NULL OR EXISTS (
+           SELECT 1 FROM feedback_events fe
+           WHERE fe.owner_id = {owner_col} AND fe.media_kind = '{media}'
+             AND fe.media_id = {id_col} AND fe.signal = ?11))"
+                )
+            };
             format!(
                 "
      AND (?2 IS NULL OR {status_col} = ?2)
@@ -3983,14 +4068,12 @@ impl Store {
            WHERE cx.owner_id = {owner_col} AND cx.media_kind = '{media}'
              AND cx.media_id = {id_col} AND cx.context_key = ?9))
      AND (?10 IS NULL OR {path_col} LIKE '%' || ?10 || '%')
-     AND (?11 IS NULL OR EXISTS (
-           SELECT 1 FROM feedback_events fe
-           WHERE fe.owner_id = {owner_col} AND fe.media_kind = '{media}'
-             AND fe.media_id = {id_col} AND fe.signal = ?11))",
+     {feedback_arm}",
             )
         };
-        let photo_clause = clause("p.owner_id", "p.status", "p.path", "photo", "p.id");
-        let shot_clause = clause("s.owner_id", "v.status", "v.path", "shot", "s.id");
+        let photo_clause = clause("p.owner_id", "p.status", "p.path", "photo", "p.id", false);
+        let shot_clause = clause("s.owner_id", "v.status", "v.path", "shot", "s.id", false);
+        let span_clause = clause("a.owner_id", "v.status", "v.path", "span", "a.id", true);
         let photo_select = format!(
             "SELECT 'photo' AS media_kind, p.id AS media_id, p.owner_id, p.path, p.thumb_rel,
                     p.status, p.indexed_at,
@@ -4004,6 +4087,7 @@ impl Store {
                     (SELECT GROUP_CONCAT(si.stack_id) FROM stack_items si
                      WHERE si.owner_id = p.owner_id AND si.media_kind = 'photo'
                        AND si.media_id = p.id) AS stack_ids,
+                    NULL AS source, NULL AS external_id, NULL AS import_id, NULL AS imported_at,
                     COALESCE(p.captured_at, p.indexed_at) AS sort_at
              FROM photos p
              LEFT JOIN editorial_annotations a
@@ -4021,6 +4105,7 @@ impl Store {
                      WHERE ci.owner_id = s.owner_id AND ci.media_kind = 'shot'
                        AND ci.media_id = s.id) AS collection_ids,
                     NULL AS stack_ids,
+                    NULL AS source, NULL AS external_id, NULL AS import_id, NULL AS imported_at,
                     v.indexed_at AS sort_at
              FROM shots s
              JOIN videos v ON v.id = s.video_id AND v.owner_id = s.owner_id
@@ -4028,13 +4113,24 @@ impl Store {
                ON a.owner_id = s.owner_id AND a.media_kind = 'shot' AND a.media_id = s.id
              WHERE s.owner_id = ?1{shot_clause}",
         );
+        let span_select = format!(
+            "SELECT 'span' AS media_kind, a.id AS media_id, a.owner_id, v.path, NULL AS thumb_rel,
+                    v.status, v.indexed_at,
+                    a.video_id, a.start_s, a.end_s, v.width, v.height,
+                    a.quality, a.usable, a.standout,
+                    a.faces_visible, a.nametags_visible, a.blur_required, a.tags,
+                    NULL AS collection_ids, NULL AS stack_ids,
+                    a.source, a.external_id, a.import_id, a.imported_at,
+                    a.imported_at AS sort_at
+             FROM manual_spans a
+             JOIN videos v ON v.id = a.video_id AND v.owner_id = a.owner_id
+             WHERE a.owner_id = ?1{span_clause}",
+        );
         let mut sql = match filter.kind {
             Some(MediaKind::Photo) => photo_select,
             Some(MediaKind::Shot) => shot_select,
-            Some(MediaKind::Span) => {
-                bail!("imported spans are listed through manual_spans, not the library")
-            }
-            None => format!("{photo_select}\nUNION ALL\n{shot_select}"),
+            Some(MediaKind::Span) => span_select,
+            None => format!("{photo_select}\nUNION ALL\n{shot_select}\nUNION ALL\n{span_select}"),
         };
         sql.push_str("\nORDER BY sort_at, media_kind, media_id");
         let mut statement = self.connection.prepare(&sql)?;
@@ -4955,6 +5051,64 @@ impl Store {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to join transcript matches to shots")
+    }
+
+    /// Text-match hits over the span catalogue FTS index (Task 034), bm25-ordered. Spans
+    /// carry no vectors, so these are text-match-only results — the search layer ranks them
+    /// among themselves by this order and never folds them into the cosine ranking.
+    pub fn span_text_hits(
+        &self,
+        owner_id: &str,
+        fts_query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<SpanTextHit>> {
+        ensure!(!fts_query.trim().is_empty(), "FTS query must not be empty");
+        let mut statement = self.connection.prepare(
+            "SELECT ms.id, ms.video_id, v.path, ms.start_s, ms.end_s,
+                    ms.description, ms.subjects, ms.action, ms.tags, ms.shot_type, ms.camera_move,
+                    ms.source, ms.external_id, ms.import_id, ms.imported_at,
+                    bm25(manual_spans_fts),
+                    NULLIF(
+                      TRIM(
+                        COALESCE(NULLIF(ms.description, ''), '') || ' ' ||
+                        COALESCE(NULLIF(ms.subjects, ''), '') || ' ' ||
+                        COALESCE(NULLIF(ms.action, ''), '') || ' ' ||
+                        COALESCE(NULLIF(ms.tags, ''), '') || ' ' ||
+                        COALESCE(NULLIF(ms.shot_type, ''), '') || ' ' ||
+                        COALESCE(NULLIF(ms.camera_move, ''), '')
+                      ), ''
+                    ) AS catalogue_text
+             FROM manual_spans_fts
+             JOIN manual_spans AS ms ON ms.rowid = manual_spans_fts.rowid
+             JOIN videos AS v ON v.id = ms.video_id AND v.owner_id = ms.owner_id
+             WHERE manual_spans_fts MATCH ?2 AND ms.owner_id = ?1
+             ORDER BY bm25(manual_spans_fts), ms.start_s, ms.id
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![owner_id, fts_query, limit as i64], |row| {
+            let imported_at: String = row.get(14)?;
+            Ok(SpanTextHit {
+                span_id: row.get(0)?,
+                video_id: row.get(1)?,
+                video_path: row.get(2)?,
+                start_s: row.get(3)?,
+                end_s: row.get(4)?,
+                description: row.get(5)?,
+                subjects: row.get(6)?,
+                action: row.get(7)?,
+                tags: row.get(8)?,
+                shot_type: row.get(9)?,
+                camera_move: row.get(10)?,
+                source: row.get(11)?,
+                external_id: row.get(12)?,
+                import_id: row.get(13)?,
+                imported_at: timestamp_from_str(&imported_at, 14)?,
+                rank: row.get(15)?,
+                matched_text: row.get::<_, Option<String>>(16)?.unwrap_or_default(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to search span catalogue text")
     }
 
     pub fn job_start(&self, owner_id: &str, job: &NewJob) -> anyhow::Result<JobRecord> {
@@ -6226,6 +6380,10 @@ fn library_asset_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryAsset> {
     let indexed_at: Option<String> = row.get(6)?;
     let collection_ids: Option<String> = row.get(19)?;
     let stack_ids: Option<String> = row.get(20)?;
+    let source: Option<String> = row.get(21)?;
+    let external_id: Option<String> = row.get(22)?;
+    let import_id: Option<String> = row.get(23)?;
+    let imported_at: Option<String> = row.get(24)?;
     Ok(LibraryAsset {
         media_kind: media_kind_from_str(&media_kind)
             .map_err(|error| conversion_message(0, error.to_string()))?,
@@ -6257,6 +6415,12 @@ fn library_asset_from_row(row: &Row<'_>) -> rusqlite::Result<LibraryAsset> {
         stack_ids: stack_ids
             .map(|value| value.split(',').map(str::to_owned).collect())
             .unwrap_or_default(),
+        source,
+        external_id,
+        import_id,
+        imported_at: imported_at
+            .map(|value| timestamp_from_str(&value, 24))
+            .transpose()?,
     })
 }
 
@@ -8087,6 +8251,32 @@ const MANUAL_SPAN_COLUMNS: &str = "id, owner_id, video_id, source, external_id, 
      camera_move, subjects, action, tags, quality, standout, usable, faces_visible, \
      nametags_visible, blur_required, used_in, crop_x, notes, import_id, imported_at, updated_at";
 
+/// One span surfaced by the Preferences "confirm imported evidence" flow (Task 034): a span
+/// with import lineage or catalogue evidence (quality/standout/used_in) that is awaiting —
+/// or has already received — the user's explicit confirmation decision. `sets` carries the
+/// reference sets currently holding the span so the UI can show confirmed evidence and its
+/// withdrawal path instead of guessing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedEvidenceSpan {
+    pub span_id: String,
+    pub external_id: String,
+    pub source: String,
+    pub import_id: Option<String>,
+    pub video_path: String,
+    pub start_s: f64,
+    pub end_s: f64,
+    pub description: String,
+    pub quality: Option<i64>,
+    pub standout: bool,
+    pub used_in: String,
+    pub imported_at: DateTime<Utc>,
+    /// Reference sets (any status) that contain this span, by name.
+    pub sets: Vec<String>,
+    /// True when at least one containing set is `confirmed` — i.e. the explicit
+    /// confirmation step already happened for this span.
+    pub confirmed: bool,
+}
+
 fn manual_span_from_row(row: &Row<'_>) -> rusqlite::Result<ManualSpan> {
     let basis: String = row.get(7)?;
     let imported_at: String = row.get(26)?;
@@ -8410,6 +8600,81 @@ impl Store {
             )
             .context("failed to delete manual span")?;
         Ok(changed == 1)
+    }
+
+    /// Spans that are candidates for the explicit "confirm imported evidence" decision
+    /// (Task 034): spans with import lineage or catalogue evidence (quality/standout/
+    /// used_in). This is derived from the span rows themselves — never from a stored dry-run
+    /// report, which goes stale. Each row reports which reference sets already hold it and
+    /// whether any of them is confirmed, so the Preferences panel shows the real state.
+    pub fn imported_evidence_spans(
+        &self,
+        owner_id: &str,
+    ) -> anyhow::Result<Vec<ImportedEvidenceSpan>> {
+        let mut statement = self.connection.prepare(
+            "SELECT ms.id, ms.external_id, ms.source, ms.import_id, v.path, ms.start_s, ms.end_s,
+                    ms.description, ms.quality, ms.standout, ms.used_in, ms.imported_at
+             FROM manual_spans ms
+             JOIN videos v ON v.id = ms.video_id AND v.owner_id = ms.owner_id
+             WHERE ms.owner_id = ?1
+               AND (ms.import_id IS NOT NULL OR ms.quality IS NOT NULL OR ms.standout = 1
+                    OR ms.used_in <> '')
+             ORDER BY ms.imported_at, ms.video_id, ms.start_s, ms.id",
+        )?;
+        let mut spans = statement
+            .query_map(params![owner_id], |row| {
+                let imported_at: String = row.get(11)?;
+                Ok(ImportedEvidenceSpan {
+                    span_id: row.get(0)?,
+                    external_id: row.get(1)?,
+                    source: row.get(2)?,
+                    import_id: row.get(3)?,
+                    video_path: row.get(4)?,
+                    start_s: row.get(5)?,
+                    end_s: row.get(6)?,
+                    description: row.get(7)?,
+                    quality: row.get(8)?,
+                    standout: row.get::<_, i64>(9)? != 0,
+                    used_in: row.get(10)?,
+                    imported_at: timestamp_from_str(&imported_at, 11)?,
+                    sets: Vec::new(),
+                    confirmed: false,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to list imported evidence spans")?;
+
+        // Attach reference-set membership (any status) in one pass; the confirmed flag
+        // reflects whether the explicit confirmation step has actually happened.
+        let mut membership = self.connection.prepare(
+            "SELECT i.media_id, s.name, s.status
+                 FROM reference_set_items i
+                 JOIN reference_sets s ON s.id = i.set_id AND s.owner_id = i.owner_id
+                 WHERE i.owner_id = ?1 AND i.media_kind = 'span'
+                 ORDER BY s.name",
+        )?;
+        let rows = membership.query_map(params![owner_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut by_span: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (media_id, name, status) = row.context("failed to read span set membership")?;
+            by_span.entry(media_id).or_default().push((name, status));
+        }
+        for span in &mut spans {
+            if let Some(members) = by_span.get(&span.span_id) {
+                span.sets = members.iter().map(|(name, _)| name.clone()).collect();
+                span.confirmed = members.iter().any(|(_, status)| {
+                    status == reference_status_to_str(ReferenceSetStatus::Confirmed)
+                });
+            }
+        }
+        Ok(spans)
     }
 
     /// Append one ledger row. The ledger is append-only at the database layer.
