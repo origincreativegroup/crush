@@ -44,6 +44,10 @@ const state = {
   pendingRemoveId: null,
   poll: null,
   messageTimer: null,
+  // Job ids whose finished-ingest relink summary has already been announced. Backend
+  // tasks are never pruned and every progress event re-carries them, so this is what
+  // keeps the "moved or renamed" message from re-firing forever.
+  announcedIngestJobs: new Set(),
 };
 
 function humanBytes(bytes) {
@@ -283,6 +287,15 @@ function renderVideos() {
     pill.className = `status-pill ${presentation.tone}`;
     pill.textContent = presentation.label;
     statusBox.append(pill);
+    if (video.sourceMissing) {
+      // The row's recorded file is not on disk right now. A bare green Done would hide
+      // that, so the row carries the same failed tone as a Failed row, in plain
+      // language; the "Locate moved file…" action stays gated on exactly this state.
+      const missing = document.createElement("span");
+      missing.className = "status-pill failed";
+      missing.textContent = "Source missing";
+      statusBox.append(missing);
+    }
     if (presentation.active) {
       const progress = document.createElement("div");
       progress.className = "progress-track row-progress";
@@ -417,15 +430,14 @@ function managePolling() {
 async function onIngestProgress(event) {
   state.jobs = event.payload;
   // Ingest reports moved/renamed outcomes honestly: the file was re-pointed to the
-  // existing identity row after the same content was recognized at the new path.
-  const finishedIngest = state.jobs.background.find(
-    (task) => task.kind === "ingest"
-      && (task.status === "done" || task.status === "cancelled")
-      && ((task.moved ?? 0) + (task.renamed ?? 0)) > 0,
-  );
-  if (finishedIngest) {
-    const count = (finishedIngest.moved ?? 0) + (finishedIngest.renamed ?? 0);
-    showMessage(`${count} file${count === 1 ? "" : "s"} moved or renamed — relinked to the original index by content.`);
+  // existing identity row after the same content was recognized at the new path. Each
+  // finished job announces its summary exactly once — the backend keeps finished tasks
+  // forever and re-emits them on every event, so without the guard the message would
+  // re-fire on every poll for the rest of the session.
+  for (const task of state.jobs.background) {
+    if (task.kind === "ingest" && (task.status === "done" || task.status === "cancelled")) {
+      announceIngestRelinks(task);
+    }
   }
   try {
     state.videos = await invoke("list_videos");
@@ -434,6 +446,27 @@ async function onIngestProgress(event) {
   }
   renderVideos();
   managePolling();
+}
+
+function announceIngestRelinks(task) {
+  // moved/renamed count only files whose old copy is really gone; a same-content file
+  // whose old path still exists is a duplicate copy.
+  const moved = (task.moved ?? 0) + (task.renamed ?? 0);
+  const duplicated = task.duplicated ?? 0;
+  if (moved === 0 && duplicated === 0) return;
+  if (state.announcedIngestJobs.has(task.jobId)) return;
+  // Bounded FIFO: only recent job ids matter for repeat suppression, and the set grows
+  // by one per ingest, so evicting the oldest id at 200 keeps it negligible.
+  if (state.announcedIngestJobs.size >= 200) {
+    state.announcedIngestJobs.delete(state.announcedIngestJobs.values().next().value);
+  }
+  state.announcedIngestJobs.add(task.jobId);
+  const parts = [];
+  if (moved > 0) parts.push(`${moved} file${moved === 1 ? "" : "s"} moved or renamed`);
+  if (duplicated > 0) {
+    parts.push(`${duplicated} duplicate cop${duplicated === 1 ? "y" : "ies"} found`);
+  }
+  showMessage(`${parts.join(" and ")} — relinked to the original index by content.`);
 }
 
 async function addPath(path) {

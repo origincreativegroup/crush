@@ -163,10 +163,11 @@
       kind: "ingest",
       status: "done",
       detail:
-        "discovered=1 photos=0 indexed=0 indexed_photos=0 skipped=1 failed=0 moved=1 renamed=0 recovered=0 vectors=12",
+        "discovered=1 photos=0 indexed=0 indexed_photos=0 skipped=1 failed=0 moved=1 renamed=0 duplicated=0 recovered=0 vectors=12",
       error: null,
       moved: 1,
       renamed: 0,
+      duplicated: 0,
     });
   }
 
@@ -888,7 +889,10 @@
       case "job_status": {
         const snap = snapshot();
         // The real backend emits ingest-progress from job_status; mirror that so the
-        // ingest-relinked scenario drives the Library's relinked-files message.
+        // ingest-relinked scenario drives the Library's relinked-files message. The real
+        // backend also never prunes finished tasks, so it re-fires the same finished job
+        // on every event — which is exactly what the scenario's once-per-job assertion
+        // exercises.
         if (scenario === "ingest-relinked") emit("ingest-progress", snap);
         return snap;
       }

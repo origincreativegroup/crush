@@ -39,6 +39,13 @@ async function mockCalls(page) {
   return frame.evaluate(() => window.__crushMock.calls);
 }
 
+/// Evaluate inside the app iframe (FrameLocator has no evaluate).
+async function inAppFrame(page, fn) {
+  const frame = page.frames().find((candidate) => candidate.url().includes("ui/index.html"));
+  if (!frame) throw new Error("app iframe was not found");
+  return frame.evaluate(fn);
+}
+
 async function createPlan(page, name = "Launch selects") {
   const frame = page.frameLocator("#app-frame");
   await frame.locator("#nav-plans").click();
@@ -526,6 +533,10 @@ const tests = {
     assert.equal(await locate.isDisabled(), true);
     await row.click();
     await poll(() => locate.isEnabled());
+    // A missing source is not a green Done row: the row carries a plain-language
+    // "Source missing" pill in the failed tone while the Locate action is available.
+    assert.equal(await visibleText(row.locator(".status-pill.done")), "Done");
+    assert.equal(await visibleText(row.locator(".status-pill.failed")), "Source missing");
     // First attempt picks a different file: refused honestly, nothing changes.
     await locate.click();
     await poll(async () =>
@@ -547,8 +558,14 @@ const tests = {
     assert.equal(relink.args.id, "video-one");
     assert.equal(relink.args.newPath, "/Volumes/Footage/moved/rocket-launch.mov");
     await poll(async () => await locate.isDisabled());
-    // The relinked row shows the new location; its source is no longer missing.
+    // The relinked row shows the new location; its source is no longer missing, so the
+    // pill is gone with it.
     assert.equal(await visibleText(row.locator(".file-path")), "/Volumes/Footage/moved");
+    assert.equal(
+      await row.locator(".status-pill.failed").count(),
+      0,
+      "a verified relink clears the Source missing pill",
+    );
   },
 
   async "ingest-relinked"(page) {
@@ -559,6 +576,30 @@ const tests = {
     await poll(async () =>
       (await visibleText(frame.locator("#library-message")))
         .includes("1 file moved or renamed — relinked to the original index by content"));
+    // The backend keeps finished tasks forever and re-carries them on every progress
+    // event (every job_status call re-fires this finished job in the mock), so the
+    // summary must be announced once per job id. Count relink announcements from here on
+    // (counting, not visibility: the 5 s auto-hide timer makes visibility flaky) and
+    // drive the same refresh path the app itself uses — a second event for the same job
+    // must stay silent.
+    await inAppFrame(page, () => {
+      const original = window.showMessage;
+      window.__relinkAnnouncements = 0;
+      window.showMessage = (...args) => {
+        if (String(args[0]).includes("relinked to the original index by content")) {
+          window.__relinkAnnouncements += 1;
+        }
+        return original(...args);
+      };
+    });
+    await inAppFrame(page, () => window.refreshLibrary());
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "job_status").length >= 2);
+    assert.equal(
+      await inAppFrame(page, () => window.__relinkAnnouncements),
+      0,
+      "the moved/renamed summary must be announced once per job id; a later event for an already-announced job must not re-show it",
+    );
   },
 
   async "search-error"(page) {
