@@ -842,9 +842,14 @@
     // Esc closes the shared detail drawer from every view (spec: "Esc clears/closes
     // detail"). Scoped addition placed ahead of the Search-view guard on purpose:
     // clear-search stays Search-only (that guard was deliberately restored once — see
-    // docs/HANDOFF.md, Task 022 history), and an open modal dialog keeps Esc for its
-    // own native cancel path.
-    if (event.key === "Escape" && detailOpen && !document.querySelector("dialog[open]")) {
+    // docs/HANDOFF.md, Task 022 history). An open modal dialog owns Esc entirely:
+    // the early return below keeps its native cancel path AND stops the key from
+    // reaching the search-clear branch, which would otherwise wipe the query behind
+    // the dialog (review finding on the wave-1 PR).
+    if (event.key === "Escape" && document.querySelector("dialog[open]")) {
+      return;
+    }
+    if (event.key === "Escape" && detailOpen) {
       event.preventDefault();
       closeDetail();
       return;

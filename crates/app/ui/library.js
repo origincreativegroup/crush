@@ -415,6 +415,9 @@
   async function createBatchCollection() {
     const name = el.batchNewName.value.trim();
     if (!name) return;
+    // Guard the in-flight create: the Enter path calls this directly, so a second
+    // Enter while the first invoke is pending would create a duplicate.
+    if (el.batchNewCreate.disabled) return;
     el.batchNewCreate.disabled = true;
     try {
       const created = await invoke("collection_create", { name });
@@ -426,6 +429,9 @@
       // at the new collection so Add applies the pending selection to it immediately.
       renderBatchCollectionOptions(created.id);
       renderBatchBar();
+      // The focused Create button just left the DOM with its form; keep keyboard
+      // focus on the batch bar instead of dropping it to <body>.
+      el.batchCollection.focus();
     } catch (error) {
       showMessage(String(error), true);
     } finally {
