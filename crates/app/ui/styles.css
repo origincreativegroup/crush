@@ -5,6 +5,11 @@
   font-size: 13px;
   font-synthesis: none;
   color-scheme: dark;
+  /* Motion token. --dur-advance is the compare auto-advance beat (Task 039 C4): a 600 ms
+     hold after an explicit decision that lets its feedback land before side B jumps. Kept
+     separate from transition durations (wave 1's PR #42 introduces --dur-fast/--dur-slow
+     separately) so the beat can change without retiming every transition. */
+  --dur-advance: 600ms;
 }
 
 * {
@@ -709,6 +714,13 @@ nav {
   font-size: 11px;
 }
 
+/* Learned-profile scope line (Task 039 follow-up): required visible copy, not a tooltip. */
+.style-scope-note {
+  margin: 6px 0 0;
+  color: #b9b9c0;
+  font-size: 12px;
+}
+
 .style-create-form {
   display: flex;
   flex-wrap: wrap;
@@ -1230,6 +1242,21 @@ nav {
   margin: 0;
   color: #85d4a2;
   font-size: 11px;
+}
+
+.compare-complete {
+  margin: 12px 0 0;
+  color: #85d4a2;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.compare-advance-hint {
+  margin: 12px 0 0;
+  color: #8a8a93;
+  font-size: 11px;
+  text-align: center;
 }
 
 .compare-hint {
