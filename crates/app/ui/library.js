@@ -331,6 +331,12 @@
     tile.dataset.key = key;
     if (state.selection.has(key)) tile.classList.add("selected");
 
+    const openAsset = () => {
+      document.dispatchEvent(new CustomEvent("crush:open-asset", {
+        detail: { asset_type: assetType(asset.mediaKind), asset_id: asset.mediaId },
+      }));
+    };
+
     const selectLabel = document.createElement("label");
     selectLabel.className = "review-select";
     const checkbox = document.createElement("input");
@@ -357,9 +363,28 @@
     tile.addEventListener("click", (event) => {
       // The select checkbox (or its label) must not open the drawer.
       if (event.target.closest(".review-select")) return;
-      document.dispatchEvent(new CustomEvent("crush:open-asset", {
-        detail: { asset_type: assetType(asset.mediaKind), asset_id: asset.mediaId },
-      }));
+      setRovingTile(tile);
+      openAsset();
+    });
+    // Task 039 B4 — the grid was mouse-only; tiles are now roving tab stops with the
+    // same keyboard posture as the search results grid: Enter/Space opens the drawer,
+    // arrows move focus by cell and row (column count from the computed grid).
+    tile.addEventListener("keydown", (event) => {
+      if (event.target instanceof HTMLInputElement) return;
+      const moves = {
+        ArrowDown: reviewGridColumns(),
+        ArrowUp: -reviewGridColumns(),
+        ArrowRight: 1,
+        ArrowLeft: -1,
+      };
+      if (event.key in moves) {
+        event.preventDefault();
+        moveTileFocus(tile, moves[event.key]);
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        setRovingTile(tile);
+        openAsset();
+      }
     });
     return tile;
   }
@@ -369,6 +394,34 @@
     el.empty.hidden = state.assets.length > 0;
     el.grid.hidden = state.assets.length === 0;
     for (const asset of state.assets) el.grid.append(tile(asset));
+    // Roving tabindex: one tab stop for the whole grid, arrows take over from there.
+    [...el.grid.children].forEach((candidate, index) => {
+      candidate.tabIndex = index === 0 ? 0 : -1;
+    });
+  }
+
+  // The review grid is auto-fill, so the real column count follows the window width —
+  // read the computed template the same way the search grid does.
+  function reviewGridColumns() {
+    const template = getComputedStyle(el.grid).gridTemplateColumns;
+    const count = template && template !== "none" ? template.trim().split(/\s+/).length : 0;
+    return count > 0 ? count : 4;
+  }
+
+  function setRovingTile(target) {
+    for (const candidate of el.grid.children) {
+      candidate.tabIndex = candidate === target ? 0 : -1;
+    }
+  }
+
+  function moveTileFocus(fromTile, delta) {
+    const tiles = [...el.grid.children];
+    const index = tiles.indexOf(fromTile) + delta;
+    const next = tiles[Math.max(0, Math.min(index, tiles.length - 1))];
+    if (!next) return;
+    setRovingTile(next);
+    next.focus();
+    next.scrollIntoView({ block: "nearest" });
   }
 
   // ---------- batch bar ----------
