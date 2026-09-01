@@ -348,7 +348,7 @@ nav {
   margin-top: 7px;
   padding: 0;
   border: 0;
-  color: #777781;
+  color: #8a8a93;
   background: transparent;
   font-size: 11px;
   cursor: pointer;
@@ -429,7 +429,7 @@ nav {
   place-items: center;
   border: 1px dashed #44444d;
   border-radius: 13px;
-  color: #777781;
+  color: #8a8a93;
   font-size: 25px;
 }
 
@@ -450,7 +450,7 @@ nav {
   height: 34px;
   padding: 0 10px;
   border-bottom: 1px solid #303037;
-  color: #777781;
+  color: #8a8a93;
   background: #1a1a1e;
   font-size: 10px;
   font-weight: 700;
@@ -528,7 +528,7 @@ nav {
 .file-path {
   overflow: hidden;
   margin-top: 4px;
-  color: #6f6f78;
+  color: #8a8a93;
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1187,7 +1187,7 @@ nav {
 
 .stack-memberships-empty {
   margin: 0;
-  color: #6f6f78;
+  color: #8a8a93;
   font-size: 11px;
 }
 
@@ -1283,7 +1283,7 @@ nav {
 
 .compare-hint {
   margin: 14px 0 0;
-  color: #6f6f78;
+  color: #8a8a93;
   font-size: 11px;
   text-align: center;
 }

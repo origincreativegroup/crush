@@ -17,7 +17,7 @@
 .import-issue { padding: 6px 8px; border-left: 2px solid #8d7a4a; background: #202024; color: #b7b7be; font-size: 12px; }
 .import-issue.missing_source, .import-issue.out_of_range, .import-issue.unknown_segment { border-left-color: #ff5c5c; }
 .import-table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 11px; }
-.import-table th { text-align: left; padding: 4px 6px; color: #777781; border-bottom: 1px solid #303037; }
+.import-table th { text-align: left; padding: 4px 6px; color: #8a8a93; border-bottom: 1px solid #303037; }
 .import-table td { padding: 4px 6px; border-bottom: 1px solid #28282e; color: #b9b9c0; vertical-align: top; }
 .import-outcome.new { color: #85d4a2; }
 .import-outcome.updated { color: #8bb4ff; }
