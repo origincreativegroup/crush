@@ -330,6 +330,10 @@ function renderVideos() {
     if (!state.videos.some((video) => video.id === id)) state.selectedIds.delete(id);
   }
   const selectionCount = state.selectedIds.size;
+  // Belt and braces (review MEDIUM-1): an empty selection must never keep the armed
+  // re-index confirm alive. Every clearing path disarms explicitly; this guard also
+  // catches any future path that forgets, and fixes the "Really re-index 0?" copy.
+  if (selectionCount === 0) disarmReindex();
   // Locate is inherently per-asset (one file → one new path): the toolbar button
   // lights up only for exactly one selected asset whose source is missing, and each
   // missing row also carries its own Locate action (rendered below) so the remedy
@@ -689,6 +693,10 @@ function selectedPhotoOps(op, extra = {}) {
 }
 
 async function runLibraryBatch(ops, summary) {
+  // A selection-clearing operation must also disarm a pending re-index confirm
+  // (review MEDIUM-1): the armed state used to survive batch ops, so the next
+  // re-index click would fire without its two-click ritual.
+  disarmReindex();
   try {
     const applied = await invoke("review_batch", { ops });
     showMessage(summary(applied));
@@ -972,6 +980,9 @@ function confirmRemove() {
 }
 
 async function removeConfirmed() {
+  // A selection-clearing operation must also disarm a pending re-index confirm
+  // (review MEDIUM-1) — same rule as runLibraryBatch.
+  disarmReindex();
   const ids = state.pendingRemoveIds || [];
   state.pendingRemoveIds = null;
   elements.removeDialog.close();
