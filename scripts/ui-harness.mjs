@@ -647,9 +647,15 @@ const tests = {
     await rows.nth(2).click({ modifiers: ["ControlOrMeta"] });
     assert.equal(await frame.locator("#library-batch-hint").isHidden(), true);
 
-    // The header checkbox selects everything listed; ⌘A does the same from the keyboard.
+    // The header checkbox selects everything listed.
     await frame.locator("#library-select-all").check();
     assert.equal(await visibleText(count), "4 selected");
+    await frame.locator("#library-select-all").uncheck();
+    await poll(async () => bar.isHidden());
+    // ⌘A does the same from the keyboard — asserted from one row selected, so the
+    // shortcut has to do the selecting itself (review LOW).
+    await rows.nth(0).click();
+    assert.equal(await visibleText(count), "1 selected");
     await rows.nth(0).press("ControlOrMeta+a");
     assert.equal(await visibleText(count), "4 selected");
     await frame.locator("#library-select-all").uncheck();

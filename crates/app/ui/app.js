@@ -665,7 +665,7 @@ function renderLibraryCollectionOptions(selectedId = null) {
   create.value = "new";
   create.textContent = "New collection…";
   elements.batchCollection.append(create);
-  elements.batchCollection.value = state.collections.some((set) => set.id === current)
+  elements.batchCollection.value = state.collections.some((collection) => collection.id === current)
     ? current
     : "";
   renderLibraryBatchBar();
@@ -1129,7 +1129,8 @@ function bindActions() {
   elements.removeAsset.addEventListener("click", confirmRemove);
   elements.selectAll.addEventListener("change", () => {
     // Tri-state header checkbox: checked selects everything listed, unchecked clears;
-    // the indeterminate middle state always resolves to clear-first for predictability.
+    // a click in the indeterminate middle state flips to checked (browser default),
+    // i.e. it resolves to select-all.
     if (elements.selectAll.checked) {
       state.selectedIds = new Set(state.videos.map((video) => video.id));
     } else {
