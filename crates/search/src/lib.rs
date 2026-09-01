@@ -104,14 +104,32 @@ pub struct AssetSearchResult {
     pub path: String,
     pub start_s: Option<f64>,
     pub end_s: Option<f64>,
+    /// Spans have no thumbnails — this stays `None` for them and the UI shows the honest
+    /// no-preview state instead of fabricating an image Crush does not have.
     pub thumb_path: Option<String>,
     pub score: f32,
     pub cosine: f32,
     pub transcript_snippet: Option<String>,
+    /// The matched catalogue text for a span text-match result (Task 034); `None` for
+    /// photos and shots, whose matches are semantic, not catalogue text.
+    pub catalogue_snippet: Option<String>,
     pub editorial_quality: Option<i64>,
     pub aesthetic_score: Option<f64>,
     pub personal_style_score: Option<f32>,
     pub score_breakdown: Option<ScoreBreakdown>,
+    /// Catalogue provenance for a span text-match result: where the imported clip came
+    /// from, exported verbatim so the UI can show an honest provenance pill.
+    pub provenance: Option<SpanResultProvenance>,
+}
+
+/// Provenance of a span text-match result (Task 034). `source` is `reel_studio` or
+/// `manual`; `external_id` is the stable catalogue identity that survives re-imports.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SpanResultProvenance {
+    pub source: String,
+    pub external_id: String,
+    pub import_id: Option<String>,
+    pub imported_at: String,
 }
 
 /// Plain-language decomposition of one asset's composed score
@@ -140,6 +158,10 @@ pub struct ScoreBreakdown {
     pub context_fit: f32,
     /// The composed total: the sum of every component above.
     pub total: f32,
+    /// True only for span text-match results (Task 034): the match came from the span
+    /// catalogue FTS index, not from an embedding — every other component of this
+    /// breakdown is deliberately `0.0` because no semantic score exists to report.
+    pub text_match_only: bool,
 }
 
 /// Resolve one stored media vector (photos and shots share the shape). The trainer and the
@@ -424,6 +446,14 @@ impl SearchEngine {
                 transcript_hits.entry(hit.shot_id).or_insert(hit.text);
             }
         }
+        // Task 034: the same query words run against the span catalogue FTS index. Spans
+        // carry no vectors, so these hits are text-match-only results appended after the
+        // semantic ranking — never mixed into the cosine score.
+        let fts_query = transcript_fts_query(query);
+        let span_hits = match &fts_query {
+            Some(fts_query) => store.span_text_hits(&self.owner_id, fts_query, top_k)?,
+            None => Vec::new(),
+        };
         let query_vector = embedder.embed_text(query)?;
         let shot_matches = self.index.search_with_boosts(
             &query_vector,
@@ -485,10 +515,12 @@ impl SearchEngine {
                 score,
                 cosine: found.cosine,
                 transcript_snippet,
+                catalogue_snippet: None,
                 editorial_quality: annotation.as_ref().and_then(|value| value.quality),
                 aesthetic_score: aesthetic.as_ref().map(|value| value.overall),
                 personal_style_score,
                 score_breakdown: Some(breakdown),
+                provenance: None,
             });
         }
 
@@ -526,10 +558,12 @@ impl SearchEngine {
                 score,
                 cosine: found.cosine,
                 transcript_snippet: None,
+                catalogue_snippet: None,
                 editorial_quality: annotation.as_ref().and_then(|value| value.quality),
                 aesthetic_score: aesthetic.as_ref().map(|value| value.overall),
                 personal_style_score,
                 score_breakdown: Some(breakdown),
+                provenance: None,
             });
         }
 
@@ -540,6 +574,13 @@ impl SearchEngine {
                 .then_with(|| left.asset_id.cmp(&right.asset_id))
         });
         results.truncate(top_k);
+        // Task 034: span catalogue hits are appended AFTER the semantic ranking as a
+        // distinct text-match-only kind. They carry score 0.0 (no comparable score exists
+        // — fabricating one would be dishonest), are bm25-ordered among themselves, never
+        // displace a semantic result, and never claim a thumbnail spans do not have.
+        if !span_hits.is_empty() {
+            results.extend(span_text_results(&span_hits));
+        }
         tracing::info!(
             job_id = "search",
             stage = "search",
@@ -795,6 +836,9 @@ fn compose_score(
         personal_affinity,
         context_fit,
         total,
+        // Photos and shots always carry a semantic score; the text-match-only marker is
+        // reserved for span catalogue hits (see `span_text_results`).
+        text_match_only: false,
     };
     let personal_style_score = personal.exported_affinity(vector, aesthetic_features);
     (total, breakdown, personal_style_score)
@@ -896,7 +940,13 @@ pub fn selects_candidates<E: TextEmbedder>(
     let personalized = match brief {
         Some(brief) => {
             ensure!(!brief.trim().is_empty(), "brief must not be empty");
-            engine.search_assets_in_context(store, embedder, brief, top_k, context_key)?
+            // Span catalogue hits are text-match-only (no vectors, no composed score), so
+            // they stay out of the brief-driven plan candidate ordering: plan candidates
+            // must come from the composed ranker. They surface in search only.
+            let mut results =
+                engine.search_assets_in_context(store, embedder, brief, top_k, context_key)?;
+            results.retain(|result| result.asset_type != "span");
+            results
         }
         None => Vec::new(),
     };
@@ -1016,10 +1066,12 @@ fn hydrate_strong_asset(
                 score: strong.overall as f32,
                 cosine: 0.0,
                 transcript_snippet,
+                catalogue_snippet: None,
                 editorial_quality,
                 aesthetic_score: Some(strong.overall),
                 personal_style_score: style,
                 score_breakdown: None,
+                provenance: None,
             })
         }
         MediaKind::Photo => {
@@ -1041,10 +1093,12 @@ fn hydrate_strong_asset(
                 score: strong.overall as f32,
                 cosine: 0.0,
                 transcript_snippet: None,
+                catalogue_snippet: None,
                 editorial_quality,
                 aesthetic_score: Some(strong.overall),
                 personal_style_score: style,
                 score_breakdown: None,
+                provenance: None,
             })
         }
     }
@@ -1084,6 +1138,52 @@ fn transcript_fts_query(query: &str) -> Option<String> {
 
 fn snippet(text: &str) -> String {
     text.chars().take(200).collect()
+}
+
+/// Convert bm25-ordered store span hits into search results (Task 034). Everything about a
+/// span result is honest-by-construction: `score`/`cosine` are 0.0 (no embedding exists to
+/// score), the breakdown carries only the text-match marker, `thumb_path` stays `None`
+/// (spans have no thumbnails), and the matched catalogue text plus the verbatim provenance
+/// ride along so the UI can label the result "Imported · Reel Studio" and never "learned".
+fn span_text_results(hits: &[crush_store::SpanTextHit]) -> Vec<AssetSearchResult> {
+    hits.iter()
+        .map(|hit| AssetSearchResult {
+            asset_type: "span".to_owned(),
+            asset_id: hit.span_id.clone(),
+            path: hit.video_path.clone(),
+            start_s: Some(hit.start_s),
+            end_s: Some(hit.end_s),
+            thumb_path: None,
+            score: 0.0,
+            cosine: 0.0,
+            transcript_snippet: None,
+            catalogue_snippet: Some(snippet(if hit.matched_text.is_empty() {
+                &hit.description
+            } else {
+                &hit.matched_text
+            })),
+            editorial_quality: None,
+            aesthetic_score: None,
+            personal_style_score: None,
+            score_breakdown: Some(ScoreBreakdown {
+                semantic: 0.0,
+                transcript_boost: 0.0,
+                editorial: 0.0,
+                general_aesthetic: 0.0,
+                penalties: 0.0,
+                personal_affinity: 0.0,
+                context_fit: 0.0,
+                total: 0.0,
+                text_match_only: true,
+            }),
+            provenance: Some(SpanResultProvenance {
+                source: hit.source.clone(),
+                external_id: hit.external_id.clone(),
+                import_id: hit.import_id.clone(),
+                imported_at: hit.imported_at.to_rfc3339(),
+            }),
+        })
+        .collect()
 }
 
 #[inline]
@@ -2845,5 +2945,226 @@ mod tests {
         items: &[crush_store::PlanItem],
     ) -> crate::sequence::SequenceReport {
         crate::sequence::sequence_report(store, items).expect("sequence report succeeds")
+    }
+
+    // ---- Task 034: catalogue unification — span text in search ----
+
+    fn span_fixture(store: &mut Store, span_id: &str, external_id: &str, description: &str) {
+        store
+            .manual_span_upsert(
+                DEFAULT_OWNER_ID,
+                &crush_store::ManualSpan {
+                    id: span_id.to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    video_id: "video-1".to_owned(),
+                    source: "reel_studio".to_owned(),
+                    external_id: external_id.to_owned(),
+                    start_s: 0.5,
+                    end_s: 1.75,
+                    boundary_basis: crush_store::SpanBoundaryBasis::CatalogueTc,
+                    boundary_tolerance_s: 1.0,
+                    library_relative_offset_s: 0.0,
+                    description: description.to_owned(),
+                    shot_type: "wide".to_owned(),
+                    camera_move: "static".to_owned(),
+                    subjects: String::new(),
+                    action: String::new(),
+                    tags: "exhibit".to_owned(),
+                    quality: Some(4),
+                    standout: true,
+                    usable: true,
+                    faces_visible: false,
+                    nametags_visible: false,
+                    blur_required: false,
+                    used_in: "reel-01".to_owned(),
+                    crop_x: None,
+                    notes: String::new(),
+                    import_id: Some("import-34".to_owned()),
+                    imported_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
+    }
+
+    /// Spans join search as TEXT-MATCH-ONLY results: a span whose catalogue description
+    /// matches surfaces even when its video has no matching transcript and the query
+    /// words appear nowhere in the embeddings' transcript text. Every span result states
+    /// what it is — score/cosine 0.0, no thumbnail, verbatim provenance, and a breakdown
+    /// whose only honest content is the text-match-only marker — and it never displaces
+    /// or dilutes the semantic ranking.
+    #[test]
+    fn span_catalogue_text_surfaces_as_text_match_only_results() {
+        let (_directory, mut store) = populated_store();
+        // The transcript says nothing about a zeppelin, so no shot can gain a text boost.
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.15).unwrap();
+        let mut embedder = |_text: &str| {
+            let mut vector = [0.0_f32; EMBEDDING_DIM];
+            vector[0] = 1.0;
+            Ok(vector)
+        };
+        let without_span = engine
+            .search_assets(&store, &mut embedder, "zeppelin harbor", 5)
+            .unwrap();
+        assert!(without_span
+            .iter()
+            .all(|result| result.asset_type != "span"));
+
+        span_fixture(
+            &mut store,
+            "span-a",
+            "V1-0001_S1",
+            "zeppelin over the harbor at dusk",
+        );
+        let results = engine
+            .search_assets(&store, &mut embedder, "zeppelin harbor", 5)
+            .unwrap();
+        let spans = results
+            .iter()
+            .filter(|result| result.asset_type == "span")
+            .collect::<Vec<_>>();
+        assert_eq!(spans.len(), 1, "exactly one imported clip matches the text");
+        let span = spans[0];
+        assert_eq!(span.asset_id, "span-a");
+        assert_eq!(span.path, "/footage/video.mov");
+        assert_eq!(span.start_s, Some(0.5));
+        assert_eq!(span.end_s, Some(1.75));
+        assert_eq!(span.thumb_path, None, "spans have no thumbnail — ever");
+        assert_eq!(span.cosine, 0.0);
+        assert_eq!(span.score, 0.0);
+        assert_eq!(span.transcript_snippet, None);
+        assert!(span
+            .catalogue_snippet
+            .as_deref()
+            .unwrap()
+            .contains("zeppelin"));
+        let provenance = span.provenance.as_ref().expect("span provenance exported");
+        assert_eq!(provenance.source, "reel_studio");
+        assert_eq!(provenance.external_id, "V1-0001_S1");
+        assert_eq!(provenance.import_id.as_deref(), Some("import-34"));
+        let breakdown = span.score_breakdown.expect("span breakdown exported");
+        assert!(breakdown.text_match_only);
+        assert_eq!(breakdown.semantic, 0.0);
+        assert_eq!(breakdown.total, 0.0);
+        // The semantic results are untouched by the span pass.
+        assert!(results
+            .iter()
+            .filter(|result| result.asset_type != "span")
+            .all(|result| result.score > 0.0));
+
+        // Text-match-only results never enter the brief-driven plan candidate ordering.
+        store
+            .upsert_photo(
+                DEFAULT_OWNER_ID,
+                &Photo {
+                    id: "photo-a".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: "/photos/photo-a.jpg".to_owned(),
+                    sha256: "photo-a-sha".to_owned(),
+                    width: 6000,
+                    height: 4000,
+                    format: "jpeg".to_owned(),
+                    orientation: None,
+                    captured_at: None,
+                    camera_make: None,
+                    camera_model: None,
+                    lens: None,
+                    thumb_rel: None,
+                    status: PhotoStatus::Done,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        let selection = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            Some("zeppelin harbor"),
+            5,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(selection
+            .personalized
+            .iter()
+            .all(|result| result.asset_type != "span"));
+        // The strong-shot general list is aesthetic-only and stays span-free too.
+        assert!(selection
+            .general
+            .iter()
+            .all(|result| result.asset_type != "span"));
+    }
+
+    /// Confirmed span reference sets are inert for the current trainer: spans have no
+    /// vectors, so the trainer skips them without crashing and without counting them as
+    /// samples. The honesty requirement is that confirmation still stores the evidence —
+    /// readable, reversible, and ready for span analysis — never that it silently trains.
+    #[test]
+    fn confirmed_span_reference_sets_are_inert_for_the_trainer() {
+        let (_directory, mut store) = style_store();
+        span_fixture(
+            &mut store,
+            "span-good-0",
+            "V1-0001_S1",
+            "zeppelin over the harbor",
+        );
+        span_fixture(&mut store, "span-good-1", "V1-0001_S2", "harbor at dusk");
+        store
+            .reference_set_create(
+                DEFAULT_OWNER_ID,
+                &crush_store::ReferenceSet {
+                    id: "set-spans".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    name: "imported evidence".to_owned(),
+                    context_key: "default".to_owned(),
+                    description: "confirmed imported clips".to_owned(),
+                    scope: crush_store::ReferenceSetScope::WholeSet,
+                    status: crush_store::ReferenceSetStatus::Unconfirmed,
+                    source_collection_id: None,
+                    created_at: chrono::Utc::now(),
+                    confirmed_at: None,
+                },
+            )
+            .unwrap();
+        for span_id in ["span-good-0", "span-good-1"] {
+            store
+                .reference_set_add_item(
+                    DEFAULT_OWNER_ID,
+                    &crush_store::ReferenceSetItem {
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        set_id: "set-spans".to_owned(),
+                        media_kind: MediaKind::Span,
+                        media_id: span_id.to_owned(),
+                        role: crush_store::ReferenceItemRole::Positive,
+                        added_at: chrono::Utc::now(),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .reference_set_confirm(DEFAULT_OWNER_ID, "set-spans")
+            .unwrap();
+        // The evidence is really confirmed and readable.
+        assert_eq!(
+            store
+                .reference_set_confirmed_items(DEFAULT_OWNER_ID, "default")
+                .unwrap(),
+            vec![
+                (MediaKind::Span, "span-good-0".to_owned()),
+                (MediaKind::Span, "span-good-1".to_owned()),
+            ]
+        );
+        // The trainer tolerates the span items and produces no profile from them: below
+        // the sample floor with the previous profile untouched, never a crash, never a
+        // fabricated sample count.
+        assert!(retrain_style_profile(&mut store, DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .active_style_profile(DEFAULT_OWNER_ID)
+            .unwrap()
+            .is_none());
     }
 }

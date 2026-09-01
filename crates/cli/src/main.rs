@@ -584,28 +584,50 @@ fn search(
             result.path
         );
         if let Some(breakdown) = &result.score_breakdown {
-            println!(
-                "     asset={} thumb={} editorial_quality={} aesthetic={} breakdown=semantic{:+.3} transcript{:+.3} general{:+.3} style{:+.3} context{:+.3} penalty{:+.3} editorial{:+.3} total{:+.3}",
-                result.asset_id,
-                result.thumb_path.as_deref().unwrap_or("-"),
-                result
-                    .editorial_quality
-                    .map_or_else(|| "-".to_owned(), |value| value.to_string()),
-                result
-                    .aesthetic_score
-                    .map_or_else(|| "-".to_owned(), |value| format!("{value:.3}")),
-                breakdown.semantic,
-                breakdown.transcript_boost,
-                breakdown.general_aesthetic,
-                breakdown.personal_affinity,
-                breakdown.context_fit,
-                breakdown.penalties,
-                breakdown.editorial,
-                breakdown.total,
-            );
+            if breakdown.text_match_only {
+                // Task 034: span catalogue hits are text-match-only — say so plainly
+                // instead of printing a fake decomposition of a score that does not exist.
+                println!(
+                    "     asset={} thumb={} text-match-only (imported clip; no vectors — not semantically ranked)",
+                    result.asset_id,
+                    result.thumb_path.as_deref().unwrap_or("-"),
+                );
+            } else {
+                println!(
+                    "     asset={} thumb={} editorial_quality={} aesthetic={} breakdown=semantic{:+.3} transcript{:+.3} general{:+.3} style{:+.3} context{:+.3} penalty{:+.3} editorial{:+.3} total{:+.3}",
+                    result.asset_id,
+                    result.thumb_path.as_deref().unwrap_or("-"),
+                    result
+                        .editorial_quality
+                        .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+                    result
+                        .aesthetic_score
+                        .map_or_else(|| "-".to_owned(), |value| format!("{value:.3}")),
+                    breakdown.semantic,
+                    breakdown.transcript_boost,
+                    breakdown.general_aesthetic,
+                    breakdown.personal_affinity,
+                    breakdown.context_fit,
+                    breakdown.penalties,
+                    breakdown.editorial,
+                    breakdown.total,
+                );
+            }
         }
         if let Some(snippet) = &result.transcript_snippet {
             println!("     transcript: {snippet}");
+        }
+        if let Some(snippet) = &result.catalogue_snippet {
+            println!("     catalogue: {snippet}");
+        }
+        if let Some(provenance) = &result.provenance {
+            println!(
+                "     provenance: source={} external_id={} import_id={} imported_at={}",
+                provenance.source,
+                provenance.external_id,
+                provenance.import_id.as_deref().unwrap_or("-"),
+                provenance.imported_at,
+            );
         }
     }
     Ok(())
