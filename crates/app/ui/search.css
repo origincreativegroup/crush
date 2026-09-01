@@ -175,12 +175,6 @@
   color: var(--muted);
 }
 
-.button.small {
-  min-height: 26px;
-  padding: 0 10px;
-  font-size: 11px;
-}
-
 .results-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));

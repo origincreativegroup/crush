@@ -22,4 +22,3 @@
 .import-outcome.new { color: var(--success); }
 .import-outcome.updated { color: var(--accent-text); }
 .import-outcome.skipped { color: var(--danger-text); }
-.button.small { min-height: 28px; padding: 0 10px; font-size: 11px; }

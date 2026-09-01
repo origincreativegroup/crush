@@ -357,6 +357,18 @@ h2 {
   opacity: 0.42;
 }
 
+/* The single .button.small definition. It was previously declared twice with
+   different heights (search.css: 26px, import.css: 28px); import.css loaded last
+   and silently resized every small button app-wide. 28px is kept: it is what has
+   been shipping (import.css won the cascade) and it holds the small/default
+   hierarchy (28 vs 34) at the 1100px frame. Used by the Projects preview and
+   export controls. */
+.button.small {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
 .app-shell {
   min-height: 100vh;
   display: grid;
