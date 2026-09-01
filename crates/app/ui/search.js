@@ -63,6 +63,11 @@
     next: $("#next-shot"),
     transcript: $("#detail-transcript"),
     notesLabel: $("#detail-notes-label"),
+    feedbackBlock: document.querySelector(".detail-feedback"),
+    safetyBlock: document.querySelector(".detail-safety"),
+    metadataBlock: document.querySelector(".detail-metadata"),
+    stacksBlock: document.querySelector(".detail-stacks"),
+    compareOpen: $("#compare-open"),
     feedbackPick: $("#feedback-pick"),
     feedbackReject: $("#feedback-reject"),
     feedbackRating: $("#feedback-rating"),
@@ -301,7 +306,7 @@
   }
 
   const browseResult = (asset) => ({
-    asset_type: asset.mediaKind === "photo" ? "photo" : "video",
+    asset_type: asset.mediaKind === "photo" ? "photo" : asset.mediaKind === "span" ? "span" : "video",
     asset_id: asset.mediaId,
     path: asset.path,
     start_s: asset.startS,
@@ -314,6 +319,15 @@
     tags: asset.tags,
     standout: asset.standout,
     usable: asset.usable,
+    // Task 034: imported clips carry their catalogue provenance into the DAM browser.
+    provenance: asset.mediaKind === "span"
+      ? {
+          source: asset.source,
+          external_id: asset.externalId,
+          import_id: asset.importId,
+          imported_at: asset.importedAt,
+        }
+      : null,
   });
 
   function filterByKind(results) {
@@ -322,7 +336,11 @@
   }
 
   function updateDamHeading() {
-    const kindLabel = state.assetKind === "photo" ? "Photos" : state.assetKind === "video" ? "Video" : "All assets";
+    const kindLabel =
+      state.assetKind === "photo" ? "Photos"
+      : state.assetKind === "video" ? "Video"
+      : state.assetKind === "span" ? "Imported clips"
+      : "All assets";
     el.damContext.textContent = state.mode === "search" ? "Semantic search" : "Local library";
     el.damTitle.textContent = state.mode === "search" ? `Results for “${state.query}”` : kindLabel;
     for (const button of el.damKinds) {
@@ -419,6 +437,15 @@
 
       const thumb = document.createElement("div");
       thumb.className = "thumb-box";
+      if (result.asset_type === "span") {
+        // Task 034: spans have no thumbnail and none may be fabricated — the honest
+        // no-preview state names what the clip is instead of inventing an image.
+        thumb.classList.add("span-thumb");
+        const noPreview = document.createElement("span");
+        noPreview.className = "span-no-preview";
+        noPreview.textContent = "No preview — plays the source clip";
+        thumb.append(noPreview);
+      }
       if (result.thumb_path) {
         const img = document.createElement("img");
         img.loading = "lazy";
@@ -431,14 +458,26 @@
       const play = document.createElement("span");
       play.className = "play-overlay";
       play.setAttribute("aria-hidden", "true");
-      play.textContent = result.asset_type === "photo" ? "PHOTO" : "▶";
+      play.textContent =
+        result.asset_type === "photo" ? "PHOTO"
+        : result.asset_type === "span" ? "CLIP"
+        : "▶";
       const duration = document.createElement("span");
       duration.className = "badge badge-duration mono";
       duration.textContent = result.asset_type === "photo"
         ? (result.editorial_quality ? `★ ${result.editorial_quality}` : "STILL")
         : durationBadge(result.end_s - result.start_s);
       thumb.append(play, duration);
-      if (result.browse && result.standout) {
+      if (result.asset_type === "span") {
+        // Provenance pill, never a score: spans are text-match-only results with no
+        // comparable semantic score to display.
+        const pill = document.createElement("span");
+        pill.className = "badge badge-span-provenance";
+        const source = result.provenance?.source;
+        pill.textContent = source === "manual" ? "Manual clip" : "Imported · Reel Studio";
+        pill.title = `Catalogue text match · external id ${result.provenance?.external_id || "—"}`;
+        thumb.append(pill);
+      } else if (result.browse && result.standout) {
         const standout = document.createElement("span");
         standout.className = "badge badge-standout";
         standout.textContent = "Standout";
@@ -457,8 +496,8 @@
       name.title = result.path;
       const transcript = document.createElement("div");
       transcript.className = "result-snippet";
-      transcript.textContent = result.transcript_snippet || "";
-      transcript.hidden = !result.transcript_snippet;
+      transcript.textContent = result.transcript_snippet || result.catalogue_snippet || "";
+      transcript.hidden = !transcript.textContent;
       const browseMeta = result.browse
         ? [
             result.asset_type === "photo" && result.width && result.height ? `${result.width} × ${result.height}` : "",
@@ -472,9 +511,12 @@
       const personal = Number.isFinite(result.personal_style_score)
         ? `Preference fit ${signedPercent(result.personal_style_score)}`
         : "";
+      const spanMeta = result.asset_type === "span"
+        ? `Catalogue text match · ${shortTime(result.start_s)}–${shortTime(result.end_s)}`
+        : "";
       const styleLine = document.createElement("div");
       styleLine.className = "result-style";
-      styleLine.textContent = browseMeta || [personal, aesthetic].filter(Boolean).join(" · ");
+      styleLine.textContent = browseMeta || spanMeta || [personal, aesthetic].filter(Boolean).join(" · ");
       styleLine.hidden = !styleLine.textContent;
 
       card.append(thumb, name, transcript, styleLine);
@@ -512,6 +554,7 @@
   // ---------- detail ----------
   async function openAssetDetail(result) {
     if (result.asset_type === "photo") return openPhotoDetail(result.asset_id);
+    if (result.asset_type === "span") return openSpanDetail(result.asset_id);
     return openDetail(result.asset_id);
   }
 
@@ -519,6 +562,17 @@
     try {
       const detail = await invoke("shot_detail", { id: shotId });
       state.detail = { ...detail, kind: "video" };
+      notifyDetailChanged();
+      renderDetail();
+    } catch (error) {
+      showMessage(String(error), { error: true });
+    }
+  }
+
+  async function openSpanDetail(spanId) {
+    try {
+      const detail = await invoke("span_detail", { id: spanId });
+      state.detail = { ...detail, kind: "span" };
       notifyDetailChanged();
       renderDetail();
     } catch (error) {
@@ -557,7 +611,14 @@
     el.shell.classList.add("detail-open");
     el.detail.focus();
     const isPhoto = d.kind === "photo";
-    el.detailKind.textContent = isPhoto ? "Photo detail" : "Shot detail";
+    const isSpan = d.kind === "span";
+    // Task 034: the drawer re-scopes for imported clips — catalogue evidence is read-only,
+    // there is no span analysis or thumbnail, and pick/reject/rating/compare/safety do not
+    // apply to spans (feedback_events stays photo/shot by the v13 schema decision).
+    for (const block of [el.feedbackBlock, el.safetyBlock, el.metadataBlock, el.stacksBlock, el.compareOpen]) {
+      if (block) block.hidden = isSpan;
+    }
+    el.detailKind.textContent = isPhoto ? "Photo detail" : isSpan ? "Imported clip detail" : "Shot detail";
     el.video.hidden = isPhoto;
     el.photo.hidden = !isPhoto;
     el.playerHint.hidden = isPhoto;
@@ -565,10 +626,45 @@
     el.exportClip.hidden = isPhoto;
     el.photoExport.hidden = !isPhoto;
     el.photoExportStatus.hidden = true;
-    el.prev.hidden = isPhoto;
-    el.next.hidden = isPhoto;
-    el.notesLabel.textContent = isPhoto ? "Editorial context" : "Transcript";
+    el.prev.hidden = isPhoto || isSpan;
+    el.next.hidden = isPhoto || isSpan;
+    el.notesLabel.textContent = isPhoto ? "Editorial context" : isSpan ? "Catalogue evidence" : "Transcript";
     el.copy.textContent = isPhoto ? "Copy path" : "Copy path + timecodes";
+    if (isSpan) {
+      el.detailFile.textContent = fileName(d.videoPath);
+      el.detailFile.title = d.videoPath;
+      const length = Math.max(0, d.endS - d.startS);
+      el.timecodes.textContent = `${timecode(d.startS, d.fps)} → ${timecode(d.endS, d.fps)}  (${length.toFixed(1)} s)`;
+      const evidence = [
+        `Catalogue id ${d.externalId}`,
+        d.source === "reel_studio" ? "Imported · Reel Studio" : "Manual clip",
+        d.description,
+        d.subjects && `Subjects: ${d.subjects}`,
+        d.action && `Action: ${d.action}`,
+        d.shot_type && `Shot type: ${d.shot_type}`,
+        d.camera_move && `Camera move: ${d.camera_move}`,
+        d.tags && `Tags: ${d.tags}`,
+        d.quality && `Quality ★ ${d.quality}`,
+        d.standout && "Standout",
+        d.used_in && `Used in ${d.used_in}`,
+        d.notes && `Notes: ${d.notes}`,
+        "Catalogued evidence — it does not train recommendations until clip analysis lands.",
+      ].filter(Boolean);
+      el.shotIndex.textContent = evidence.slice(0, 2).join(" · ");
+      renderSpanEvidence(evidence);
+      const src = fileSrc(d.videoPath);
+      if (el.video.dataset.src !== src) {
+        el.video.dataset.src = src;
+        el.video.src = src;
+        el.video.load();
+      }
+      el.scrubber.max = String(length);
+      el.scrubber.value = "0";
+      el.position.textContent = `${shortTime(0)} / ${shortTime(length)}`;
+      updatePlayButton();
+      seekAndPlay();
+      return;
+    }
     if (isPhoto) {
       el.detailFile.textContent = fileName(d.photoPath);
       el.detailFile.title = d.photoPath;
@@ -626,6 +722,28 @@
     text.className = values.length ? "transcript-text" : "transcript-empty";
     text.textContent = values.length ? values.join("\n") : "No analysis or editorial feedback yet.";
     el.transcript.append(text);
+  }
+
+  // Task 034: read-only catalogue evidence lines for an imported clip, plus the honest
+  // boundary-basis note when the clip's timecodes were taken from the catalogue.
+  function renderSpanEvidence(lines) {
+    el.transcript.replaceChildren();
+    for (const line of lines) {
+      const row = document.createElement("p");
+      row.className = line.startsWith("Catalogued evidence")
+        ? "transcript-empty span-evidence-note"
+        : "transcript-text";
+      row.textContent = line;
+      el.transcript.append(row);
+    }
+    if (state.detail?.boundaryBasis === "catalogue_tc") {
+      const note = document.createElement("p");
+      note.className = "transcript-empty";
+      note.textContent =
+        "Boundaries come from the catalogue timecodes and may be off by up to " +
+        `${state.detail.boundaryToleranceS?.toFixed(1) || "1.0"} s — adjust In/Out in Projects.`;
+      el.transcript.append(note);
+    }
   }
 
   function seekAndPlay() {
@@ -910,7 +1028,7 @@
     }
     if (detailOpen) {
       if (inInput) return;
-      if (state.detail?.kind === "photo") return;
+      if (state.detail?.kind !== "video") return;
       if (event.key === "ArrowLeft") { event.preventDefault(); stepShot(-1); }
       else if (event.key === "ArrowRight") { event.preventDefault(); stepShot(1); }
       else if (event.key === " " && !inInput) {

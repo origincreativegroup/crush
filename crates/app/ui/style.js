@@ -27,6 +27,13 @@
     retrain: $("#style-retrain"),
     detailSet: $("#detail-style-set"),
     detailAdd: $("#detail-add-style"),
+    evidence: $("#imported-evidence"),
+    evidenceList: $("#imported-evidence-list"),
+    evidenceEmpty: $("#imported-evidence-empty"),
+    evidenceActions: $("#imported-evidence-actions"),
+    evidenceConfirm: $("#imported-evidence-confirm"),
+    evidenceSkip: $("#imported-evidence-skip"),
+    evidenceCount: $("#imported-evidence-count"),
   };
 
   const state = {
@@ -40,6 +47,18 @@
     resetArmed: false,
     resetTimer: null,
     addedTimer: null,
+    evidence: [],
+    evidenceSelection: new Set(),
+    // Task 034: Skip is a local UI decision only — no store write, so re-imports can
+    // never resurrect or revoke it; the list is the only thing it hides. Persisted in
+    // localStorage so the panel does not nag across restarts, and clearable below.
+    evidenceSkipped: (() => {
+      try {
+        return new Set(JSON.parse(localStorage.getItem("crush-skipped-evidence") || "[]"));
+      } catch {
+        return new Set();
+      }
+    })(),
   };
 
   const scopeLabels = { whole_set: "whole set", selected: "selected examples" };
@@ -242,20 +261,201 @@
     el.detailAdd.disabled = !state.detail || !el.detailSet.value;
   }
 
+  // ---------- imported evidence (Task 034) ----------
+  // Span evidence becomes preference evidence ONLY through this explicit confirmation, and
+  // the honest copy says what it does today: confirmed spans are catalogued evidence and do
+  // NOT train the current model (they have no vectors) — that starts when span analysis
+  // lands. Nothing here ever claims "learned".
+  const sourceLabels = { reel_studio: "Imported · Reel Studio", manual: "Manual clip" };
+
+  function persistSkippedEvidence() {
+    try {
+      localStorage.setItem(
+        "crush-skipped-evidence",
+        JSON.stringify([...state.evidenceSkipped]),
+      );
+    } catch {
+      // Storage can be unavailable (private mode); skipping still works for the session.
+    }
+  }
+
+  function evidenceSummary(item) {
+    const bits = [];
+    if (item.description) bits.push(item.description);
+    if (item.quality) bits.push(`★ ${item.quality}`);
+    if (item.standout) bits.push("Standout");
+    if (item.used_in) bits.push(`Used in ${item.used_in}`);
+    return bits.join(" · ");
+  }
+
+  function evidenceSetLine(item) {
+    if (item.confirmed) {
+      const names = item.sets.length ? ` (${item.sets.join(", ")})` : "";
+      return `Confirmed as evidence${names}`;
+    }
+    if (item.sets.length) {
+      return `In “${item.sets.join(", ")}” — confirm that set to finish`;
+    }
+    return "";
+  }
+
+  function evidenceRow(item) {
+    const row = document.createElement("div");
+    row.className = "style-set-row";
+    row.dataset.spanId = item.spanId;
+
+    const select = document.createElement("label");
+    select.className = "review-select";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.evidenceSelection.has(item.spanId);
+    checkbox.setAttribute("aria-label", `Confirm ${item.externalId || item.spanId} as evidence`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.evidenceSelection.add(item.spanId);
+      else state.evidenceSelection.delete(item.spanId);
+      renderEvidenceControls();
+    });
+    select.append(checkbox);
+
+    const main = document.createElement("div");
+    main.className = "style-set-main";
+    const name = document.createElement("div");
+    name.className = "style-set-name";
+    name.textContent = item.externalId || item.spanId;
+    const meta = document.createElement("div");
+    meta.className = "style-set-meta";
+    const bits = [sourceLabels[item.source] || item.source, evidenceSummary(item)].filter(Boolean);
+    meta.textContent = bits.join(" · ");
+    main.append(name, meta);
+    const setLine = evidenceSetLine(item);
+    if (setLine) {
+      const sets = document.createElement("div");
+      sets.className = "style-set-meta style-set-sets";
+      sets.textContent = setLine;
+      main.append(sets);
+    }
+
+    const pill = document.createElement("span");
+    pill.className = `status-pill ${item.confirmed ? "done" : "pending"}`;
+    pill.textContent = item.confirmed ? "Confirmed" : "Awaiting decision";
+
+    const actions = document.createElement("div");
+    actions.className = "style-set-actions";
+    if (!item.confirmed) {
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.className = "button secondary small";
+      confirm.textContent = "Confirm";
+      confirm.addEventListener("click", () =>
+        withButton(confirm, async () => {
+          const outcome = await invoke("imported_evidence_confirm", {
+            spanIds: [item.spanId],
+          });
+          showMessage(
+            `Added to “${outcome.setName}”. The set stays inert until you confirm it — and ` +
+              "confirmed clips do not train recommendations until clip analysis lands.",
+          );
+          await refreshStyle();
+        }));
+      actions.append(confirm);
+    }
+    const skip = document.createElement("button");
+    skip.type = "button";
+    skip.className = "button danger small";
+    skip.textContent = "Skip";
+    skip.addEventListener("click", () => {
+      state.evidenceSkipped.add(item.spanId);
+      state.evidenceSelection.delete(item.spanId);
+      persistSkippedEvidence();
+      showMessage(
+        "Skipped. Nothing was written to the library — skipped clips stay out of this list.",
+      );
+      renderEvidence();
+    });
+    actions.append(skip);
+
+    row.append(select, main, pill, actions);
+    return row;
+  }
+
+  function renderEvidenceControls() {
+    const visible = state.evidence.filter(
+      (item) => !item.confirmed && !state.evidenceSkipped.has(item.spanId),
+    );
+    el.evidenceActions.hidden = visible.length === 0 && state.evidenceSkipped.size === 0;
+    const count = state.evidenceSelection.size;
+    el.evidenceConfirm.disabled = count === 0;
+    el.evidenceSkip.disabled = count === 0;
+    el.evidenceCount.textContent = [
+      count ? `${count} selected` : "",
+      state.evidenceSkipped.size
+        ? `${state.evidenceSkipped.size} skipped — Skip is local only, re-import never changes it`
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    el.evidenceConfirm.textContent = count
+      ? `Confirm ${count} as evidence`
+      : "Confirm selected as evidence";
+  }
+
+  function renderEvidence() {
+    el.evidenceList.replaceChildren();
+    const visible = state.evidence.filter(
+      (item) => !state.evidenceSkipped.has(item.spanId),
+    );
+    el.evidenceEmpty.hidden = visible.length > 0;
+    el.evidenceList.hidden = visible.length === 0;
+    for (const item of visible) el.evidenceList.append(evidenceRow(item));
+    renderEvidenceControls();
+  }
+
+  async function confirmSelectedEvidence() {
+    const spanIds = [...state.evidenceSelection];
+    if (!spanIds.length) return;
+    el.evidenceConfirm.disabled = true;
+    try {
+      const outcome = await invoke("imported_evidence_confirm", { spanIds });
+      state.evidenceSelection.clear();
+      showMessage(outcome.added === 0
+        ? `Already in “${outcome.setName}” — nothing to add. Confirmed clips are catalogued ` +
+          "evidence; they do not train recommendations until clip analysis lands."
+        : `Added ${outcome.added} imported clip${outcome.added === 1 ? "" : "s"} to ` +
+          `“${outcome.setName}” (${outcome.alreadyPresent} already there). Now confirm the ` +
+          "set below to make it count — and note: confirmed clips are catalogued evidence, " +
+          "they do not train recommendations until clip analysis lands.");
+      await refreshStyle();
+    } catch (error) {
+      showError(error);
+      el.evidenceConfirm.disabled = false;
+    }
+  }
+
+  function skipSelectedEvidence() {
+    for (const id of state.evidenceSelection) state.evidenceSkipped.add(id);
+    state.evidenceSelection.clear();
+    persistSkippedEvidence();
+    showMessage("Skipped. Nothing was written to the library — skipped clips stay out of this list.");
+    renderEvidence();
+  }
+
   function renderAll() {
     renderStatus();
     renderSets();
     renderDetailSets();
+    renderEvidence();
   }
 
   async function refreshStyle() {
     try {
-      const [sets, status] = await Promise.all([
+      const [sets, status, evidence] = await Promise.all([
         invoke("reference_set_list"),
         invoke("style_profile_status"),
+        invoke("imported_evidence_list"),
       ]);
       state.sets = sets;
       state.status = status;
+      state.evidence = evidence;
     } catch (error) {
       showMessage(String(error), true);
     }
@@ -343,6 +543,9 @@
     el.detailAdd.disabled = !el.detailSet.value;
   });
   el.detailAdd.addEventListener("click", addToSet);
+
+  el.evidenceConfirm.addEventListener("click", confirmSelectedEvidence);
+  el.evidenceSkip.addEventListener("click", skipSelectedEvidence);
 
   // ---------- wiring ----------
   document.addEventListener("crush:detail", (event) => {

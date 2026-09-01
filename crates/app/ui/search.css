@@ -253,6 +253,27 @@
   color: var(--gold);
 }
 
+/* Task 034: imported-clip cards. The thumb area carries the honest no-preview state
+   (spans have no thumbnail and none may be fabricated) and the provenance pill replaces
+   the score badge — there is no comparable score to display. */
+.span-thumb {
+  display: grid;
+  place-items: center;
+}
+
+.span-no-preview {
+  padding: 0 var(--space-4);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+.badge-span-provenance {
+  right: 6px;
+  color: var(--white);
+  background: color-mix(in srgb, var(--accent) 78%, transparent);
+}
+
 .result-name {
   margin-top: var(--space-4);
 }
