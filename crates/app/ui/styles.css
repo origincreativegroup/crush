@@ -5,10 +5,10 @@
   font-size: 13px;
   font-synthesis: none;
   color-scheme: dark;
-  /* Motion tokens. --dur-advance is the compare auto-advance beat (Task 039 C4): the hold
-     after an explicit decision that lets its feedback land before side B jumps. Kept
-     separate from transition durations (wave 1's --dur-fast/--dur-slow) so the beat can
-     change without retiming every transition. */
+  /* Motion token. --dur-advance is the compare auto-advance beat (Task 039 C4): a 600 ms
+     hold after an explicit decision that lets its feedback land before side B jumps. Kept
+     separate from transition durations (wave 1's PR #42 introduces --dur-fast/--dur-slow
+     separately) so the beat can change without retiming every transition. */
   --dur-advance: 600ms;
 }
 

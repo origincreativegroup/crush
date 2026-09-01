@@ -66,7 +66,7 @@
   // did not pass keep the experimental copy. No surface ever claims more than the gate
   // measured: probe evidence over held-out media, not unseen future work.
   const LEARNED_SCOPE_TEXT =
-    "This claim rests on probe evidence over held-out media from your indexed library — not on unseen future work.";
+    "This claim rests on synthetic probe evidence over held-out media from your indexed library — not on unseen future work.";
 
   function setProfileClasses(learned) {
     el.statusLine.classList.toggle("learned", learned);

@@ -1033,7 +1033,9 @@ const tests = {
         (call) => call.command === "record_feedback" && call.args.signal === "pick",
       ));
     await complete.waitFor({ state: "visible" });
-    assert.equal(await visibleText(complete), "All compared — 1 picked.");
+    // Copy per the review fix: completion means end-of-pool, not "everything decided",
+    // and the earlier prefer is counted (1 picked, 1 preferred).
+    assert.equal(await visibleText(complete), "End of pool — 1 picked, 1 preferred.");
     await page.clock.fastForward(700);
     assert.equal(await selectB.inputValue(), "shot-1");
     await frame.locator("#compare-close").click();

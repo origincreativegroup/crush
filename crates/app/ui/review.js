@@ -34,6 +34,7 @@
     // Session-level discoverability flag: the hint shows once per app session, the first
     // time an auto-advance is scheduled. Never a setting, never persisted.
     advanceHintShown: false,
+    prefers: 0,
     picks: 0,
     rejects: 0,
   };
@@ -110,13 +111,17 @@
     return null;
   }
 
+  // End-of-pool completion (fires when no forward candidate remains — not a claim that
+  // everything in the pool was decided). Counts what this dialog session actually recorded;
+  // zero terms are omitted.
   function showCompletion() {
     const parts = [];
     if (state.picks) parts.push(`${state.picks} picked`);
     if (state.rejects) parts.push(`${state.rejects} rejected`);
+    if (state.prefers) parts.push(`${state.prefers} preferred`);
     el.complete.textContent = parts.length
-      ? `All compared — ${parts.join(", ")}.`
-      : "All compared — nothing picked or rejected.";
+      ? `End of pool — ${parts.join(", ")}.`
+      : "End of pool — nothing picked or rejected.";
     el.complete.hidden = false;
   }
 
@@ -187,6 +192,7 @@
   async function openCompare() {
     cancelAdvance();
     hideCompletion();
+    state.prefers = 0;
     state.picks = 0;
     state.rejects = 0;
     // advanceHintShown is deliberately NOT reset: the hint is once per app session.
@@ -241,6 +247,10 @@
       args.comparedAssetType = assetType(compared.mediaKind);
       args.comparedId = compared.mediaId;
     }
+    // Snapshot side B at decision time: while the record is in flight the user can still
+    // navigate (⌥arrows, selects), and an advance scheduled after the invoke resolves would
+    // jump B off the pair the user manually moved to.
+    const bAtDecision = state.current.b;
     try {
       await invoke("record_feedback", args);
       showStatus(
@@ -255,9 +265,12 @@
       );
       // Auto-advance fires only here, on an explicit recorded decision (prefer, pick,
       // reject, rating) — never on passive viewing, focus changes, or failed records.
+      if (signal === "prefer") state.prefers += 1;
       if (signal === "pick") state.picks += 1;
       if (signal === "reject") state.rejects += 1;
-      scheduleAdvance();
+      // If B moved manually while the record was in flight, stand down: no auto-jump off
+      // the user's navigation and no completion overwrite from the stale decision.
+      if (sameAsset(bAtDecision, state.current.b) && el.dialog.open) scheduleAdvance();
     } catch (error) {
       showStatus(state.focus, String(error));
     }
