@@ -608,11 +608,16 @@ const tests = {
   async "style-panel"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-style").click();
-    // Automated success is not human approval. Never claim learned at the open hard stop.
+    // Verdict conditions (docs/style-proof-review.md, 2026-08-31): a gate-passed profile
+    // reads "Learned profile" and carries the visible plain-language scope line.
     await poll(async () =>
-      /Experimental preferences · human review pending/.test(
-        await visibleText(frame.locator("#style-status-line")),
-      ));
+      (await visibleText(frame.locator("#style-status-line"))) === "Learned profile",
+    );
+    const scopeNote = frame.locator("#style-scope-note");
+    await scopeNote.waitFor({ state: "visible" });
+    assert.match(await visibleText(scopeNote), /held-out media/);
+    assert.match(await visibleText(scopeNote), /not on unseen future work/);
+    assert.match(await visibleText(frame.locator("#style-status-meta")), /Automated pair evaluation/);
     const rows = frame.locator("#style-sets .style-set-row");
     await rows.first().waitFor({ state: "visible" });
     assert.equal(await rows.count(), 2);
@@ -649,6 +654,24 @@ const tests = {
     await reset.click();
     await poll(
       async () => (await visibleText(frame.locator("#style-status-line"))) === "General model only",
+    );
+    assert.equal(await frame.locator("#style-scope-note").isHidden(), true);
+  },
+
+  async "style-not-learned"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-style").click();
+    // Verdict condition 1: a profile whose training gate did not pass keeps the
+    // experimental copy, and no scope line is shown for it.
+    await poll(
+      async () =>
+        (await visibleText(frame.locator("#style-status-line")))
+          === "Experimental preferences · human review pending",
+    );
+    assert.equal(await frame.locator("#style-scope-note").isHidden(), true);
+    assert.match(
+      await visibleText(frame.locator("#style-status-meta")),
+      /have not beaten the general model on held-out examples/,
     );
   },
 

@@ -709,6 +709,13 @@ nav {
   font-size: 11px;
 }
 
+/* Learned-profile scope line (Task 039 follow-up): required visible copy, not a tooltip. */
+.style-scope-note {
+  margin: 6px 0 0;
+  color: #b9b9c0;
+  font-size: 12px;
+}
+
 .style-create-form {
   display: flex;
   flex-wrap: wrap;

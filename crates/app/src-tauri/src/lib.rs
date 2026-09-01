@@ -1152,8 +1152,10 @@ mod macos {
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
     struct StyleProfileStatusView {
-        /// Automated eval result only. NOT human approval: the UI must label this
-        /// experimental until the held-out proof review in HANDOFF is signed off.
+        /// Automated eval result only. The held-out proof review was recorded 2026-08-31
+        /// (docs/style-proof-review.md): the UI labels a gate-passed profile "Learned
+        /// profile" with the required scope line; gate-failed profiles keep the
+        /// experimental copy. This flag alone never unlocks stronger claims.
         learned: bool,
         has_active_profile: bool,
         profile_id: Option<String>,
