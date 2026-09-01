@@ -1,24 +1,24 @@
 /* Reel Studio import dialog (Task 022) */
 .import-dialog { width: 760px; max-height: 90vh; overflow: auto; }
-.import-copy { margin: 14px 0 16px; color: var(--text-dim); line-height: 1.5; }
-.import-form { display: grid; gap: 12px; }
-.import-field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; }
-.import-picker { display: flex; gap: 8px; }
-.import-picker input, #import-context { flex: 1; height: 32px; padding: 0 10px; border: 1px solid var(--border-input); border-radius: 7px; color: var(--text); background: var(--bg); }
-.import-advanced { padding: 8px 0; }
+.import-copy { margin: var(--space-7) 0 var(--space-8); color: var(--text-dim); line-height: 1.5; }
+.import-form { display: grid; gap: var(--space-6); }
+.import-field label { display: block; margin-bottom: var(--space-3); color: var(--muted); font-size: var(--font-size-sm); }
+.import-picker { display: flex; gap: var(--space-4); }
+.import-picker input, #import-context { flex: 1; height: 32px; padding: 0 var(--space-5); border: 1px solid var(--border-input); border-radius: var(--radius-md); color: var(--text); background: var(--bg); }
+.import-advanced { padding: var(--space-4) 0; }
 .import-advanced summary { color: var(--muted); cursor: pointer; }
-.import-advanced .import-field { margin-top: 10px; }
-.import-check { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--text-dim); }
-.import-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
-.import-status { min-height: 20px; margin-top: 12px; color: var(--text-body); }
-.import-report { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+.import-advanced .import-field { margin-top: var(--space-5); }
+.import-check { display: flex; gap: var(--space-4); align-items: center; margin-top: var(--space-5); color: var(--text-dim); }
+.import-actions { display: flex; justify-content: flex-end; gap: var(--space-4); margin-top: var(--space-3); }
+.import-status { min-height: 20px; margin-top: var(--space-6); color: var(--text-body); }
+.import-report { margin-top: var(--space-6); border-top: 1px solid var(--border); padding-top: var(--space-6); }
 .import-summary { color: var(--text); font-weight: 650; }
-.import-issues { display: grid; gap: 4px; margin: 8px 0; }
-.import-issue { padding: 6px 8px; border-left: 2px solid var(--amber-border); background: var(--surface-2); color: var(--text-body); font-size: 12px; }
+.import-issues { display: grid; gap: var(--space-2); margin: var(--space-4) 0; }
+.import-issue { padding: var(--space-3) var(--space-4); border-left: 2px solid var(--amber-border); background: var(--surface-2); color: var(--text-body); font-size: var(--font-size-md); }
 .import-issue.missing_source, .import-issue.out_of_range, .import-issue.unknown_segment { border-left-color: var(--danger); }
-.import-table { width: 100%; margin-top: 8px; border-collapse: collapse; font-size: 11px; }
-.import-table th { text-align: left; padding: 4px 6px; color: var(--muted); border-bottom: 1px solid var(--border-card); }
-.import-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); color: var(--text-body); vertical-align: top; }
+.import-table { width: 100%; margin-top: var(--space-4); border-collapse: collapse; font-size: var(--font-size-sm); }
+.import-table th { text-align: left; padding: var(--space-2) var(--space-3); color: var(--muted); border-bottom: 1px solid var(--border-card); }
+.import-table td { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); color: var(--text-body); vertical-align: top; }
 .import-outcome.new { color: var(--success); }
 .import-outcome.updated { color: var(--accent-text); }
 .import-outcome.skipped { color: var(--danger-text); }

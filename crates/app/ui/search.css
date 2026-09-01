@@ -1,7 +1,7 @@
 /* Search + Shot detail (Task 12c) */
 
 .search-toolbar {
-  gap: 18px;
+  gap: var(--space-9);
 }
 
 .search-box {
@@ -16,7 +16,7 @@
   position: absolute;
   left: 12px;
   color: var(--muted);
-  font-size: 17px;
+  font-size: var(--font-size-xl);
   pointer-events: none;
 }
 
@@ -25,7 +25,7 @@
   height: 38px;
   padding: 0 52px 0 36px;
   border: 1px solid var(--border-input);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   color: var(--text);
   background: var(--bg);
   outline: none;
@@ -49,60 +49,60 @@
 .search-kbd {
   position: absolute;
   right: 10px;
-  padding: 2px 6px;
+  padding: var(--space-1) var(--space-3);
   border: 1px solid var(--border-input);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   color: var(--muted);
-  font: 10px "SFMono-Regular", Consolas, monospace;
+  font: var(--font-size-xs) var(--font-mono);
 }
 
 .search-meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
 /* Skin for .top-select select comes from the shared raised-select rule in styles.css. */
 
 .search-content {
-  height: calc(100vh - 86px);
+  height: calc(100vh - var(--toolbar-height));
   overflow: auto;
-  padding: 20px 26px 40px;
+  padding: var(--space-10) var(--gutter) var(--space-20);
 }
 
 .dam-browser-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 16px;
+  gap: var(--space-9);
+  margin-bottom: var(--space-8);
 }
 
 .dam-browser-head h2 {
-  font-size: 18px;
+  font-size: var(--font-size-xl);
 }
 
 .dam-kind-switch {
   display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px;
+  gap: var(--space-2);
+  padding: var(--space-2);
   border: 1px solid var(--border-card);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--fill);
 }
 
 .dam-kind {
   min-height: 27px;
-  padding: 0 11px;
+  padding: 0 var(--space-6);
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--muted);
   background: transparent;
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   cursor: pointer;
 }
 
@@ -125,19 +125,19 @@
 }
 
 .search-error {
-  margin: 0 0 16px;
+  margin: 0 0 var(--space-8);
 }
 
 .search-message {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-6);
 }
 
 .shortcut-help {
-  margin: 0 0 10px;
+  margin: 0 0 var(--space-5);
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
 }
 
 .shortcut-help summary {
@@ -148,18 +148,18 @@
 .shortcut-help dl {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 18px;
-  margin: 8px 0 0;
+  gap: var(--space-2) var(--space-9);
+  margin: var(--space-4) 0 0;
 }
 
 .shortcut-help dl > div {
   display: flex;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .shortcut-help dt {
   color: var(--text-body);
-  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  font-family: var(--font-mono);
   min-width: 96px;
 }
 
@@ -171,14 +171,14 @@
 .results-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  gap: 16px 14px;
+  gap: var(--space-8) var(--space-7);
 }
 
 .result-card {
   min-width: 0;
-  padding: 6px;
+  padding: var(--space-3);
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
 }
 
@@ -206,7 +206,7 @@
   position: relative;
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--control);
 }
 
@@ -224,9 +224,9 @@
   place-items: center;
   color: var(--white);
   background: rgb(0 0 0 / 28%);
-  font-size: 26px;
+  font-size: 26px; /* play glyph */
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) ease;
 }
 
 .result-card:hover .play-overlay {
@@ -254,29 +254,29 @@
 }
 
 .result-name {
-  margin-top: 8px;
+  margin-top: var(--space-4);
 }
 
 .result-snippet {
   overflow: hidden;
-  margin-top: 3px;
+  margin-top: var(--space-2);
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .result-style {
-  margin-top: 3px;
+  margin-top: var(--space-2);
   color: var(--accent-muted);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
 .result-breakdown {
-  margin-top: 4px;
+  margin-top: var(--space-2);
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
 }
 
 .result-breakdown summary {
@@ -290,8 +290,8 @@
 }
 
 .result-breakdown ul {
-  margin: 4px 0 0;
-  padding-left: 14px;
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-7);
 }
 
 /* ---- detail slide-over ---- */
@@ -305,8 +305,8 @@
   width: 520px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px 22px;
+  gap: var(--space-7);
+  padding: var(--space-10) var(--space-11);
   overflow: auto;
   border-left: 1px solid var(--border);
   background: var(--panel);
@@ -316,7 +316,7 @@
 /* Keep Review/Search usable while inspecting an asset. The detail surface is a real third
    column on desktop rather than an overlay that hides the candidate grid underneath it. */
 .app-shell.detail-open {
-  grid-template-columns: 220px minmax(360px, 1fr) minmax(400px, 520px);
+  grid-template-columns: var(--sidebar-width) minmax(360px, 1fr) minmax(400px, 520px);
 }
 
 .app-shell.detail-open .workspace:not([hidden]) {
@@ -340,12 +340,12 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
 }
 
 .detail-file {
   max-width: 420px;
-  font-size: 13px;
+  font-size: var(--font-size-base);
 }
 
 .player-box {
@@ -353,7 +353,7 @@
   flex: 0 0 auto;
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: var(--media-bg);
 }
 
@@ -369,13 +369,13 @@
   position: absolute;
   right: 8px;
   bottom: 8px;
-  padding: 2px 7px;
-  border-radius: 5px;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-sm);
   color: var(--text-dim);
   background: rgb(0 0 0 / 55%);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) ease;
 }
 
 .player-box:hover .player-hint {
@@ -386,16 +386,16 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-6);
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--font-size-base);
 }
 
 .detail-playback {
   display: grid;
   grid-template-columns: auto auto minmax(120px, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .detail-playback input[type="range"] {
@@ -405,27 +405,27 @@
 
 #detail-position {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
 .detail-shot-index {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
 }
 
 .detail-actions,
 .detail-nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-4);
   align-items: center;
 }
 
 .photo-detail-export {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-3);
 }
 
 .photo-detail-export select {
@@ -433,16 +433,16 @@
 }
 
 .detail-export-status {
-  margin: 8px 2px 0;
+  margin: var(--space-4) var(--space-1) 0;
   color: var(--verify-text);
-  font-size: 12px;
+  font-size: var(--font-size-md);
 }
 
 /* Skin comes from the shared drawer sub-panel rule in styles.css; layout only here. */
 .detail-feedback {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-4);
 }
 
 .detail-feedback .eyebrow {
@@ -456,8 +456,8 @@
 .standout-control {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 12px;
+  gap: var(--space-3);
+  font-size: var(--font-size-md);
   color: var(--text);
   cursor: pointer;
 }
@@ -471,27 +471,27 @@
 }
 
 .detail-transcript {
-  padding-top: 6px;
+  padding-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
 
 .transcript-row {
   display: grid;
   grid-template-columns: 84px 1fr;
-  gap: 10px;
-  padding: 6px 0;
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
   color: var(--text-body);
   line-height: 1.5;
 }
 
 .transcript-time {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-size-sm);
 }
 
 .transcript-text mark {
-  padding: 0 2px;
-  border-radius: 3px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
   color: var(--white);
   background: rgb(var(--accent-rgb) / 38%);
 }
