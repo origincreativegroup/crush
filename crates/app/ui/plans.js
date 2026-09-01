@@ -10,6 +10,7 @@
     busy: false, dirty: new Set(), loaded: false, previewKey: null, previewLoop: false,
     photoExportKey: null, photoExportKind: null, photoExportBusy: false, photoExportResult: null,
     reelExportKey: null, reelExportBusy: false, reelExportResult: null,
+    sequence: null, sequenceSuggestions: [],
   };
   const kind = (value) => value === "photo" ? "photo" : value === "span" ? "span" : "video";
   const itemKey = (item) => `${kind(item.mediaKind)}:${item.mediaId}`;
@@ -133,7 +134,12 @@
     const [plan, items, revisions] = await Promise.all([
       invoke("plan_get", { id }), invoke("plan_items", { id }), invoke("plan_revisions", { id }),
     ]);
-    Object.assign(state, { plan, items, revisions });
+    // Sequence notes are advisory reads; a bridge without them must not break the editor.
+    const [sequence, sequenceSuggestions] = await Promise.all([
+      invoke("plan_sequence_signals", { id }).catch(() => null),
+      invoke("plan_sequence_suggestions", { id }).catch(() => []),
+    ]);
+    Object.assign(state, { plan, items, revisions, sequence, sequenceSuggestions });
     if (!state.items.some((item) => itemKey(item) === state.previewKey)) {
       state.previewKey = state.items.length ? itemKey(state.items[0]) : null;
     }
@@ -170,8 +176,53 @@
         return row;
       }));
     renderCandidates();
+    renderSequence();
     renderPreview();
     renderReelExport();
+  }
+  // Sequence notes (Task 033): describe what was measured, in editor language. Applying a
+  // suggestion writes normal plan state through reorder, with a saved version as the undo.
+  function renderSequence() {
+    const root = $("plan-sequence-notes");
+    const report = state.sequence;
+    const suggestions = state.sequenceSuggestions || [];
+    root.hidden = !report && suggestions.length === 0;
+    if (!report && suggestions.length === 0) return;
+    const rows = [];
+    // An empty plan has nothing to judge; "0 items from 0 distinct sources" is noise.
+    if (report?.summary?.item_count === 0) {
+      root.hidden = true;
+      root.replaceChildren();
+      return;
+    }
+    if (report?.summary) {
+      const lines = [report.summary.coverage_note];
+      if (report.summary.pacing_note) lines.push(report.summary.pacing_note);
+      if (report.summary.near_duplicate_adjacencies > 0) {
+        lines.push(`${report.summary.near_duplicate_adjacencies} adjacent pair${report.summary.near_duplicate_adjacencies === 1 ? "" : "s"} of shots look near-identical.`);
+      }
+      rows.push(node("p", lines.join(" "), "plans-muted"));
+    }
+    for (const transition of report?.transitions || []) {
+      if (!transition.note) continue;
+      rows.push(node("p", `Between items ${transition.position + 1} and ${transition.position + 2}: ${transition.note}`, "plans-muted"));
+    }
+    for (const suggestion of suggestions) {
+      const row = node("div", undefined, "plans-actions");
+      row.append(node("span", suggestion.note));
+      row.append(button("Apply reorder…", async () => {
+        if (!await confirmAction("Move this item to the end of the sequence? A version is saved first so you can undo.")) return;
+        await invoke("plan_save_revision", { id: state.plan.id, label: "Before sequence suggestion" });
+        await invoke("plan_reorder_items", {
+          id: state.plan.id,
+          items: suggestion.suggested_order.map((entry) => ({ assetType: entry.media_kind, mediaId: entry.media_id })),
+        });
+        await openPlan(state.plan.id, false);
+        message("Reordered. The previous order is saved under Versions.");
+      }));
+      rows.push(row);
+    }
+    root.replaceChildren(...rows);
   }
   function evidence(result) {
     const breakdown = result.score_breakdown;
@@ -181,8 +232,11 @@
   }
   function renderCandidates() {
     const response = state.candidates;
+    const capNote = response?.duplicate_cap
+      ? ` · similar-shot cap ${response.duplicate_cap} applied (${response.skipped_duplicates} skipped)`
+      : "";
     $("plan-candidate-status").textContent = response
-      ? `${response.general.length} general · ${response.personalized.length} brief candidates. Scores use different scales; compare order within each column.`
+      ? `${response.general.length} general · ${response.personalized.length} brief candidates${capNote}. Scores use different scales; compare order within each column.`
       : "Find strong shots. Add a brief to also rank them for this project's story.";
     $("plan-personal-status").textContent = response?.profile
       ? `Experimental preference profile v${response.profile.version} · ${response.profile.context_key}. Human proof review pending.`
@@ -605,8 +659,14 @@
   });
   $("plan-generate").addEventListener("click", () => run(async () => {
     $("plan-candidate-status").textContent = "Finding candidates…";
+    const capValue = Number.parseInt($("plan-duplicate-cap").value, 10);
     try {
-      state.candidates = await invoke("selects_candidates", { brief: $("plan-brief").value.trim() || null, context: state.plan.contextKey, top: 12 });
+      state.candidates = await invoke("selects_candidates", {
+        brief: $("plan-brief").value.trim() || null,
+        context: state.plan.contextKey,
+        top: 12,
+        duplicateCap: Number.isFinite(capValue) && capValue > 0 ? capValue : null,
+      });
       renderCandidates();
     } catch (error) {
       state.candidates = null; renderCandidates();

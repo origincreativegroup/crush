@@ -318,6 +318,44 @@ const tests = {
     assert.doesNotMatch(await visibleText(frame.locator("#style-status-line")), /^Learned/);
   },
 
+  async "plans-sequence"(page) {
+    const frame = await createPlan(page, "Sequence notes");
+    // The visible, adjustable similar-shot cap: echo and skip count land in the status line.
+    await frame.locator("#plan-generate").click();
+    await poll(async () => await frame.locator("#plan-general .plans-candidate").count() === 3);
+    await frame.locator("#plan-duplicate-cap").fill("1");
+    await frame.locator("#plan-generate").click();
+    await poll(async () =>
+      (await frame.locator("#plan-general .plans-candidate").count()) === 2
+      && (await visibleText(frame.locator("#plan-candidate-status"))).includes("cap 1 applied"));
+    await frame.locator("#plan-duplicate-cap").fill("");
+    await frame.locator("#plan-generate").click();
+    await poll(async () => await frame.locator("#plan-general .plans-candidate").count() === 3);
+    // Two adjacent clip items: sequence notes flag the near-identical pair. A two-item plan
+    // cannot separate the pair by reordering, so no chip is offered yet — the note is honest.
+    await frame.locator("#plan-general .plans-candidate").first().locator("button").click();
+    await poll(async () => await frame.locator("#plan-items .plans-item").count() === 1);
+    await frame.locator("#plan-general .plans-candidate").nth(1).locator("button").click();
+    await poll(async () => await frame.locator("#plan-items .plans-item").count() === 2);
+    const notes = frame.locator("#plan-sequence-notes");
+    await notes.waitFor({ state: "visible" });
+    assert.match(await visibleText(notes), /near-identical/);
+    assert.equal(await notes.locator("button").count(), 0);
+    // A third item gives the move somewhere to go: the chip appears, and applying it writes
+    // normal plan state (reorder) with a saved version for undo.
+    await frame.locator("#plan-general .plans-candidate").nth(2).locator("button").click();
+    await poll(async () => await visibleText(notes).then((text) => text.includes("Move item 2 to the end")));
+    await notes.locator("button", { hasText: "Apply reorder" }).click();
+    await frame.locator('#plan-confirm button[value="confirm"]').click();
+    await poll(async () => (await visibleText(frame.locator("#plans-message"))).includes("Reordered"));
+    const reorder = (await mockCalls(page)).find((call) => call.command === "plan_reorder_items");
+    assert.equal(reorder.args.items.length, 3, "the suggestion reorders the whole plan");
+    const saved = (await mockCalls(page)).filter((call) => call.command === "plan_save_revision");
+    assert.equal(saved.at(-1).args.label, "Before sequence suggestion");
+    // After the move the mock reports no flagged adjacency, so the chip is gone.
+    await poll(async () => (await notes.locator("button").count()) === 0);
+  },
+
   async "plans-errors"(page) {
     const frame = await createPlan(page);
     await frame.locator("#plan-generate").click();

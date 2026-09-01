@@ -166,6 +166,7 @@
               <section class="plans-candidates" aria-label="Candidate orderings">
                 <div class="plans-actions">
                   <div><p class="workflow-step">Step 1</p><h2>Find clips and selects</h2></div>
+                  <label class="plans-muted">Similar-shot cap <input id="plan-duplicate-cap" type="number" min="1" step="1" placeholder="off" style="width:5rem" /></label>
                   <button id="plan-generate" class="button primary" type="button">Find suggestions</button>
                 </div>
                 <p id="plan-candidate-status" class="plans-muted" role="status">Find strong shots. Add a brief to also rank them for this project's story.</p>
@@ -240,6 +241,7 @@
                 </div>
                 <div id="plan-items" class="plans-stack"></div>
                 <p id="plan-items-empty" class="plans-muted">No sequence yet. Add a suggestion above to begin.</p>
+                <div id="plan-sequence-notes" class="plans-stack" hidden aria-label="Sequence notes"></div>
               </section>
               <section class="plans-revisions" aria-labelledby="plan-revisions-title">
                 <p class="workflow-step">Step 3</p>

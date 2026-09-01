@@ -256,6 +256,23 @@
           total: 0,
         },
       },
+      ...(scenario === "plans-sequence"
+        ? [{
+            asset_type: "video",
+            asset_id: "shot-2",
+            path: video.path,
+            start_s: 3.2,
+            end_s: 5.95,
+            thumb_path: null,
+            score: 0.38,
+            cosine: 0.27,
+            transcript_snippet: null,
+            editorial_quality: null,
+            aesthetic_score: 0.79,
+            personal_style_score: 0.41,
+            score_breakdown: null,
+          }]
+        : []),
       {
         asset_type: "photo",
         asset_id: "photo-0",
@@ -616,6 +633,47 @@
     if (!item) throw "Plan item not found";
     return item;
   };
+  // Task 033 sequence mock: two adjacent shots read as near-identical (the mock has no
+  // embeddings), spans group by their provenance external id. Snake_case matches the bridge.
+  const sequenceReportFor = (plan) => {
+    const transitions = plan.items.slice(0, -1).map((item, index) => {
+      const next = plan.items[index + 1];
+      const similarity = item.mediaKind === "shot" && next.mediaKind === "shot" ? 0.97 : null;
+      const nearDuplicate = similarity != null && similarity >= 0.95;
+      const spanSource = (value) => { try { return JSON.parse(value.provenanceJson || "{}").external_id; } catch { return undefined; } };
+      const sameSource = item.mediaKind === "span" && next.mediaKind === "span" && spanSource(item) === spanSource(next);
+      return {
+        position: index,
+        similarity,
+        near_duplicate: nearDuplicate,
+        same_source: sameSource,
+        note: nearDuplicate
+          ? "These two neighbors look near-identical (cosine 0.97)."
+          : sameSource ? "Two items in a row come from the same source (imported catalogue)." : "",
+      };
+    });
+    const distinctSources = plan.items.length;
+    return {
+      items: plan.items.map((item, index) => ({
+        position: index,
+        media_kind: item.mediaKind,
+        media_id: item.mediaId,
+        neighbor_similarity: [transitions[index - 1], transitions[index]].map((value) => value?.similarity).find((value) => value != null) ?? null,
+        notes: [["previous", transitions[index - 1]], ["next", transitions[index]]]
+          .filter(([, value]) => value?.near_duplicate)
+          .map(([side]) => `Looks near-identical to the ${side} item.`),
+      })),
+      transitions,
+      summary: {
+        item_count: plan.items.length,
+        distinct_sources: distinctSources,
+        sources: {},
+        coverage_note: `${plan.items.length} items from ${distinctSources} distinct sources; the busiest source contributes 1 item.`,
+        pacing_note: plan.items.some((item) => item.mediaKind !== "photo") ? "Video item durations run 1.0s to 1.0s (median 1.0s)." : "",
+        near_duplicate_adjacencies: transitions.filter((value) => value.near_duplicate).length,
+      },
+    };
+  };
   const validatePlanItem = (item) => {
     if ((item.mediaKind === "shot" || item.mediaKind === "span") && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
     if ((item.origin === "historical" || item.origin === "imported") && item.profileVersion != null) throw "Invalid provenance";
@@ -634,7 +692,18 @@
           breakdown.total = Object.entries(breakdown).filter(([key]) => key !== "total").reduce((total, [, value]) => total + value, 0);
           return { ...asset, score: breakdown.total, score_breakdown: breakdown, personal_style_score: profile ? asset.personal_style_score : null };
         }) : [];
-        return clone({ brief: args.brief || "", context_key: args.context, general, personalized, profile });
+        // Mock diversification: per asset_type is the mock's stand-in for per-source.
+        const cap = args.duplicateCap ?? null;
+        let skipped = 0;
+        const seen = {};
+        const generalCapped = cap
+          ? general.filter((asset) => {
+              seen[asset.asset_type] = (seen[asset.asset_type] || 0) + 1;
+              if (seen[asset.asset_type] > cap) { skipped += 1; return false; }
+              return true;
+            })
+          : general;
+        return clone({ brief: args.brief || "", context_key: args.context, general: generalCapped, personalized, profile, duplicate_cap: cap, skipped_duplicates: skipped });
       }
       case "plan_list": return clone([...plans.values()].map(planView));
       case "plan_create": {
@@ -670,6 +739,29 @@
         const plan = planFor(args.id);
         plan.items = args.items.map((ref) => planItemFor(plan, ref));
         plan.items.forEach((value, position) => value.position = position); return clone(plan.items);
+      }
+      case "plan_sequence_signals":
+        return clone(sequenceReportFor(planFor(args.id)));
+      case "plan_sequence_suggestions": {
+        const plan = planFor(args.id);
+        const report = sequenceReportFor(plan);
+        const suggestions = report.transitions
+          .filter((value) => value.near_duplicate)
+          .flatMap((transition) => {
+            const later = transition.position + 1;
+            const order = plan.items.filter((_, index) => index !== later).map((item) => ({ media_kind: item.mediaKind, media_id: item.mediaId }));
+            order.push({ media_kind: plan.items[later].mediaKind, media_id: plan.items[later].mediaId });
+            if (order.map((entry) => entry.media_id).join("|") === plan.items.map((item) => item.mediaId).join("|")) return [];
+            return [{
+              position: later,
+              media_kind: plan.items[later].mediaKind,
+              media_id: plan.items[later].mediaId,
+              neighbor_position: transition.position,
+              note: `Items ${transition.position + 1} and ${later + 1} look near-identical. Move item ${later + 1} to the end so similar shots are not back-to-back.`,
+              suggested_order: order,
+            }];
+          });
+        return clone(suggestions);
       }
       case "plan_save_revision": {
         const plan = planFor(args.id);

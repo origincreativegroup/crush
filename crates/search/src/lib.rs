@@ -12,6 +12,7 @@ use anyhow::{ensure, Context};
 use crush_store::{MediaKind, Store, StrongAsset, StyleProfile};
 use serde::Serialize;
 
+pub mod sequence;
 pub mod style;
 
 pub use style::trainer::{retrain_style_profile, retrain_style_profile_for_context};
@@ -841,6 +842,11 @@ pub struct SelectsCandidates {
     /// Effective profile used for this request, not a later UI status lookup. Absent means
     /// the right-hand list is brief-driven general ranking, not personalized evidence.
     pub profile: Option<SelectsProfile>,
+    /// The near-duplicate-per-source cap applied to the general list, echoed for visibility.
+    /// `None` means no diversification was requested.
+    pub duplicate_cap: Option<usize>,
+    /// How many general-list candidates were skipped by the cap, for transparency.
+    pub skipped_duplicates: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -854,6 +860,12 @@ pub struct SelectsProfile {
 /// Produce both selects orderings in one response. With a `brief`, the personalized list is
 /// ranked through the same composed score as mixed-media search (so its breakdown is
 /// directly explainable); without one, only the general strong-shot list is produced.
+///
+/// `duplicate_cap` optionally diversifies the general list: after ranking, at most that many
+/// candidates per source may appear (shots count per source video; near-duplicate photos
+/// cosine ≥ 0.95 count as one source). The cap is echoed on the response with the number of
+/// skipped candidates so the UI can show it; the personalized list is never altered.
+#[allow(clippy::too_many_arguments)] // the flat candidate-request shape is the public contract
 pub fn selects_candidates<E: TextEmbedder>(
     store: &Store,
     owner_id: &str,
@@ -862,8 +874,12 @@ pub fn selects_candidates<E: TextEmbedder>(
     brief: Option<&str>,
     top_k: usize,
     context_key: Option<&str>,
+    duplicate_cap: Option<usize>,
 ) -> anyhow::Result<SelectsCandidates> {
     ensure!(top_k > 0, "top must be greater than zero");
+    if let Some(cap) = duplicate_cap {
+        ensure!(cap > 0, "duplicate cap must be greater than zero");
+    }
     let scorer = PersonalScorer::load(store, owner_id, context_key)?;
     let profile = brief.and_then(|_| {
         scorer
@@ -884,17 +900,80 @@ pub fn selects_candidates<E: TextEmbedder>(
         }
         None => Vec::new(),
     };
-    let mut general = Vec::new();
+    let mut ranked_general = Vec::new();
     for strong in store.strongest_assets(owner_id, top_k)? {
-        general.push(hydrate_strong_asset(store, owner_id, &strong)?);
+        ranked_general.push(hydrate_strong_asset(store, owner_id, &strong)?);
     }
+    let (general, skipped_duplicates) = match duplicate_cap {
+        None => (ranked_general, 0),
+        Some(cap) => diversify_general(store, owner_id, ranked_general, cap)?,
+    };
     Ok(SelectsCandidates {
         brief: brief.unwrap_or_default().to_owned(),
         context_key: context_key.map(str::to_owned),
         general,
         personalized,
         profile,
+        duplicate_cap,
+        skipped_duplicates,
     })
+}
+
+/// Enforce the near-duplicate-per-source cap on the ranked general list. Shots group by
+/// their source video; near-duplicate photos (cosine ≥ 0.95) share the first kept photo's
+/// source key, so a burst counts as one exhibit against the cap. Deterministic: the walk
+/// follows the ranked order and keeps the first candidates per source.
+fn diversify_general(
+    store: &Store,
+    owner_id: &str,
+    ranked: Vec<AssetSearchResult>,
+    cap: usize,
+) -> anyhow::Result<(Vec<AssetSearchResult>, usize)> {
+    let mut kept = Vec::with_capacity(ranked.len());
+    let mut source_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut kept_photo_vectors: Vec<(String, Vec<f32>)> = Vec::new();
+    let mut skipped = 0usize;
+    for result in ranked {
+        let key = if result.asset_type == "video" {
+            let video_id = store
+                .search_shot_context(owner_id, &result.asset_id)
+                .ok()
+                .flatten()
+                .map(|context| context.video_id)
+                .unwrap_or_else(|| result.asset_id.clone());
+            format!("video:{video_id}")
+        } else {
+            // Near-duplicate photos share the first kept photo's bucket, so a burst counts
+            // as one exhibit against the cap.
+            let mut anchor: Option<String> = None;
+            if let Some(vector) = store.vector_for_photo(owner_id, &result.asset_id)? {
+                for (kept_id, kept_vector) in &kept_photo_vectors {
+                    if sequence::cosine(vector.as_slice(), kept_vector)
+                        >= sequence::NEAR_DUPLICATE_COSINE
+                    {
+                        anchor = Some(kept_id.clone());
+                        break;
+                    }
+                }
+                if anchor.is_none() {
+                    kept_photo_vectors.push((result.asset_id.clone(), vector));
+                }
+            }
+            format!(
+                "photo:{}",
+                anchor.unwrap_or_else(|| result.asset_id.clone())
+            )
+        };
+        let count = source_counts.entry(key).or_insert(0);
+        if *count >= cap {
+            skipped += 1;
+            continue;
+        }
+        *count += 1;
+        kept.push(result);
+    }
+    Ok((kept, skipped))
 }
 
 /// Hydrate one general strong-shot row into the same result shape search returns, so the UI
@@ -1369,6 +1448,7 @@ mod tests {
             Some("portraits"),
             12,
             Some("homepage-hero"),
+            None,
         )
         .unwrap();
         let provenance = named.profile.expect("effective named profile exported");
@@ -1383,6 +1463,7 @@ mod tests {
             Some("portraits"),
             12,
             Some("another-project"),
+            None,
         )
         .unwrap();
         assert!(
@@ -2064,6 +2145,7 @@ mod tests {
             Some("a quiet travel film"),
             3,
             None,
+            None,
         )
         .unwrap();
 
@@ -2098,6 +2180,7 @@ mod tests {
             &mut embedder,
             None,
             3,
+            None,
             None,
         )
         .unwrap();
@@ -2137,6 +2220,7 @@ mod tests {
             &mut embedder,
             None,
             3,
+            None,
             None,
         )
         .unwrap();
@@ -2261,5 +2345,505 @@ mod tests {
         for value in values {
             *value /= norm;
         }
+    }
+
+    // ---- Task 033: sequence and repetition judgment ----
+
+    fn sequence_plan(store: &mut Store) -> String {
+        store
+            .plan_create(
+                DEFAULT_OWNER_ID,
+                &crush_store::Plan {
+                    id: "plan-seq".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    name: "Sequence fixture".to_owned(),
+                    description: String::new(),
+                    context_key: "default".to_owned(),
+                    brief: String::new(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
+        "plan-seq".to_owned()
+    }
+
+    fn plan_item(
+        plan_id: &str,
+        media_kind: MediaKind,
+        media_id: &str,
+        start_s: Option<f64>,
+        end_s: Option<f64>,
+    ) -> crush_store::PlanItem {
+        crush_store::PlanItem {
+            owner_id: DEFAULT_OWNER_ID.to_owned(),
+            plan_id: plan_id.to_owned(),
+            media_kind,
+            media_id: media_id.to_owned(),
+            position: 0,
+            start_s,
+            end_s,
+            pacing: None,
+            crop_x: None,
+            grade_json: None,
+            reason: String::new(),
+            signals_json: "{}".to_owned(),
+            origin: crush_store::PlanOrigin::General,
+            rank: None,
+            profile_version: None,
+            provenance_json: "{}".to_owned(),
+            added_at: chrono::Utc::now(),
+        }
+    }
+
+    fn sequence_fixture() -> (TempDir, Store, String) {
+        let (directory, mut store) = populated_store();
+        // A second video with a visually distinct shot, so coverage has two sources.
+        store
+            .upsert_video(
+                DEFAULT_OWNER_ID,
+                &Video {
+                    id: "video-2".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: "/footage/video-b.mov".to_owned(),
+                    sha256: "video-sha-2".to_owned(),
+                    duration_s: Some(2.0),
+                    fps: Some(24.0),
+                    width: Some(1920),
+                    height: Some(1080),
+                    has_audio: false,
+                    status: VideoStatus::Embedded,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        let shots = [
+            Shot {
+                id: "shot-c".to_owned(),
+                video_id: "video-2".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                idx: 0,
+                start_s: 0.0,
+                end_s: 1.5,
+                rep_frame_s: 0.5,
+                thumb_rel: None,
+                scene_score: None,
+            },
+            Shot {
+                id: "shot-d".to_owned(),
+                video_id: "video-2".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                idx: 1,
+                start_s: 1.5,
+                end_s: 2.0,
+                rep_frame_s: 1.6,
+                thumb_rel: None,
+                scene_score: None,
+            },
+        ];
+        store.insert_shots(DEFAULT_OWNER_ID, &shots).unwrap();
+        // shot-a and shot-b share one vector (near-duplicates); shot-c is orthogonal.
+        let mut other = [0.0_f32; EMBEDDING_DIM];
+        other[1] = 1.0;
+        store
+            .put_vector(DEFAULT_OWNER_ID, "shot-c", &other)
+            .unwrap();
+        store
+            .put_vector(DEFAULT_OWNER_ID, "shot-d", &other)
+            .unwrap();
+        let plan_id = sequence_plan(&mut store);
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Shot, "shot-a", Some(0.0), Some(1.0)),
+            )
+            .unwrap();
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Shot, "shot-b", Some(1.0), Some(2.0)),
+            )
+            .unwrap();
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Shot, "shot-c", Some(0.0), Some(1.5)),
+            )
+            .unwrap();
+        (directory, store, plan_id)
+    }
+
+    #[test]
+    fn sequence_report_flags_near_duplicate_adjacency_and_coverage() {
+        let (_directory, store, plan_id) = sequence_fixture();
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let report = sequence_report_helper(&store, &items);
+
+        assert_eq!(report.summary.item_count, 3);
+        assert_eq!(report.summary.distinct_sources, 2);
+        assert_eq!(report.summary.near_duplicate_adjacencies, 1);
+        assert!(report
+            .summary
+            .coverage_note
+            .contains("3 items from 2 distinct sources"));
+        assert!(report.summary.pacing_note.contains("median"));
+
+        let first_cut = &report.transitions[0];
+        assert!(
+            first_cut.near_duplicate,
+            "identical vectors are near-duplicates"
+        );
+        assert!(first_cut.same_source, "shot-a and shot-b share video-1");
+        assert!(first_cut.similarity.is_some_and(|value| value > 0.99));
+        assert!(first_cut.note.contains("near-identical"));
+        let second_cut = &report.transitions[1];
+        assert!(!second_cut.near_duplicate);
+        assert!(!second_cut.same_source, "shot-c lives on video-2");
+        assert!(second_cut.note.is_empty(), "quiet transitions say nothing");
+
+        assert!(report.items[1]
+            .notes
+            .iter()
+            .any(|note| note.contains("near-identical to the previous item")));
+        assert!(report.items[0].neighbor_similarity.unwrap() > 0.99);
+    }
+
+    #[test]
+    fn sequence_suggestion_apply_clears_the_adjacency() {
+        let (_directory, mut store, plan_id) = sequence_fixture();
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let suggestions = crate::sequence::sequence_suggestions(&store, &items).unwrap();
+        assert_eq!(suggestions.len(), 1, "one adjacency, one suggestion");
+        let suggestion = &suggestions[0];
+        assert_eq!(suggestion.position, 1, "the later twin moves");
+        assert_eq!(suggestion.neighbor_position, 0);
+        assert!(suggestion.note.contains("Move item 2 to the end"));
+
+        let ordered = crate::sequence::reorder_pairs(suggestion);
+        store
+            .plan_reorder_items(DEFAULT_OWNER_ID, &plan_id, &ordered)
+            .unwrap();
+        let reordered = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let after = crate::sequence::sequence_report(&store, &reordered).expect("report succeeds");
+        assert_eq!(
+            after.summary.near_duplicate_adjacencies, 0,
+            "applying the suggestion must clear the flagged adjacency"
+        );
+        // b was moved to the end; a and c now sit adjacent and they are dissimilar.
+        assert_eq!(reordered[2].media_id, "shot-b");
+    }
+
+    #[test]
+    fn sequence_report_groups_imported_spans_by_external_source() {
+        let (_directory, mut store, plan_id) = sequence_fixture();
+        // Two spans imported from one Reel Studio project (import-1) plus one from another
+        // import. Spans are not embedded (Task 022), so their repetition evidence is
+        // provenance, not cosine.
+        for (id, external, import_id, video, start, end) in [
+            ("span-a", "seg-1", "import-1", "video-1", 0.0, 1.0),
+            ("span-b", "seg-2", "import-1", "video-1", 1.0, 2.0),
+            ("span-c", "seg-3", "import-2", "video-1", 0.0, 1.0),
+        ] {
+            store
+                .manual_span_upsert(
+                    DEFAULT_OWNER_ID,
+                    &crush_store::ManualSpan {
+                        id: id.to_owned(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        video_id: video.to_owned(),
+                        source: "reel_studio".to_owned(),
+                        external_id: external.to_owned(),
+                        start_s: start,
+                        end_s: end,
+                        boundary_basis: crush_store::SpanBoundaryBasis::CatalogueTc,
+                        boundary_tolerance_s: 0.05,
+                        library_relative_offset_s: 0.0,
+                        description: String::new(),
+                        shot_type: String::new(),
+                        camera_move: String::new(),
+                        subjects: String::new(),
+                        action: String::new(),
+                        tags: String::new(),
+                        quality: None,
+                        standout: false,
+                        usable: true,
+                        faces_visible: true,
+                        nametags_visible: false,
+                        blur_required: false,
+                        used_in: String::new(),
+                        crop_x: None,
+                        notes: String::new(),
+                        import_id: None,
+                        imported_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    },
+                )
+                .unwrap();
+            let mut item = plan_item(&plan_id, MediaKind::Span, id, Some(start), Some(end));
+            item.provenance_json = format!(
+                r#"{{"source":"reel_studio","external_id":"{external}","import_id":"{import_id}"}}"#
+            );
+            store.plan_add_item(DEFAULT_OWNER_ID, &item).unwrap();
+        }
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let report = sequence_report_helper(&store, &items);
+        let span_transition = &report.transitions[3]; // between span-a and span-b
+        assert!(
+            span_transition.same_source,
+            "same external_id is one source"
+        );
+        assert!(!span_transition.near_duplicate, "spans carry no embeddings");
+        assert!(span_transition.similarity.is_none());
+        assert!(span_transition.note.contains("same source"));
+        // Coverage: 3 shots across 2 videos + 2 span sources = 4 distinct sources now.
+        assert_eq!(report.summary.distinct_sources, 4);
+    }
+
+    #[test]
+    fn selects_duplicate_cap_diversifies_per_source() {
+        let (_directory, store) = populated_store();
+        // photo-b is a near-duplicate of photo-a (a burst), photo-c is distinct.
+        for (id, sha) in [
+            ("photo-a", "photo-a-sha"),
+            ("photo-b", "photo-b-sha"),
+            ("photo-c", "photo-c-sha"),
+        ] {
+            store
+                .upsert_photo(
+                    DEFAULT_OWNER_ID,
+                    &Photo {
+                        id: id.to_owned(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        path: format!("/photos/{id}.jpg"),
+                        sha256: sha.to_owned(),
+                        width: 6000,
+                        height: 4000,
+                        format: "jpeg".to_owned(),
+                        orientation: None,
+                        captured_at: None,
+                        camera_make: None,
+                        camera_model: None,
+                        lens: None,
+                        thumb_rel: None,
+                        status: PhotoStatus::Done,
+                        indexed_at: None,
+                    },
+                )
+                .unwrap();
+        }
+        let mut burst = [0.0_f32; EMBEDDING_DIM];
+        burst[0] = 1.0;
+        let mut distinct = [0.0_f32; EMBEDDING_DIM];
+        distinct[1] = 1.0;
+        for (id, vector) in [
+            ("photo-a", burst),
+            ("photo-b", burst),
+            ("photo-c", distinct),
+        ] {
+            store
+                .put_photo_vector(DEFAULT_OWNER_ID, id, &vector)
+                .unwrap();
+            store
+                .upsert_aesthetic_assessment(
+                    DEFAULT_OWNER_ID,
+                    &AestheticAssessment {
+                        media_kind: MediaKind::Photo,
+                        media_id: id.to_owned(),
+                        ..aesthetic_assessment(id, 0.8)
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-a", 0.9))
+            .unwrap();
+        store
+            .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-b", 0.7))
+            .unwrap();
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
+
+        let uncapped = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            None,
+            5,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(uncapped.duplicate_cap, None);
+        assert_eq!(uncapped.skipped_duplicates, 0);
+        assert_eq!(uncapped.general.len(), 5);
+
+        let capped = selects_candidates(
+            &store,
+            DEFAULT_OWNER_ID,
+            &engine,
+            &mut embedder,
+            None,
+            5,
+            None,
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(capped.duplicate_cap, Some(1));
+        // Ranked order shot-a (video-1), photo-b (0.8 tie order by id then photo-a, photo-c,
+        // shot-b (video-1 again): the cap keeps one per source, so video-1's second shot and
+        // the burst twin are skipped; photo-c and photo-a survive as their own exhibits.
+        let kept_ids = capped
+            .general
+            .iter()
+            .map(|result| result.asset_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            kept_ids
+                .iter()
+                .filter(|id| **id == "shot-a" || **id == "shot-b")
+                .count()
+                == 1,
+            "only one shot per source video survives the cap: {kept_ids:?}"
+        );
+        assert!(
+            !(kept_ids.contains(&"photo-a") && kept_ids.contains(&"photo-b")),
+            "near-duplicate photo bursts count as one source: {kept_ids:?}"
+        );
+        assert_eq!(capped.general.len() + capped.skipped_duplicates, 5);
+        assert_eq!(capped.skipped_duplicates, 5 - capped.general.len());
+    }
+
+    #[test]
+    fn sequence_suggestions_refuse_a_move_that_creates_new_adjacencies() {
+        let (_directory, mut store, plan_id) = sequence_fixture();
+        // A mutual near-duplicate clique: shot-e repeats shot-a's vector, so shot-a,
+        // shot-b and shot-e are pairwise near-identical. Moving the flagged twin to the
+        // end separates that pair but seats it next to the third twin, so the chip's
+        // promise would be false after applying it.
+        store
+            .insert_shots(
+                DEFAULT_OWNER_ID,
+                &[Shot {
+                    id: "shot-e".to_owned(),
+                    video_id: "video-2".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    idx: 2,
+                    start_s: 2.0,
+                    end_s: 2.5,
+                    rep_frame_s: 2.1,
+                    thumb_rel: None,
+                    scene_score: None,
+                }],
+            )
+            .unwrap();
+        let mut twin = [0.0_f32; EMBEDDING_DIM];
+        twin[0] = 1.0;
+        store.put_vector(DEFAULT_OWNER_ID, "shot-e", &twin).unwrap();
+        store
+            .plan_remove_item(DEFAULT_OWNER_ID, &plan_id, MediaKind::Shot, "shot-c")
+            .unwrap();
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Shot, "shot-e", Some(2.0), Some(2.5)),
+            )
+            .unwrap();
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let report = crate::sequence::sequence_report(&store, &items).unwrap();
+        assert_eq!(
+            report.summary.near_duplicate_adjacencies, 2,
+            "the clique flags both adjacencies"
+        );
+        let suggestions = crate::sequence::sequence_suggestions(&store, &items).unwrap();
+        assert!(
+            suggestions.is_empty(),
+            "a move that trades the flagged pair for new adjacencies must not be suggested"
+        );
+    }
+
+    #[test]
+    fn sequence_suggestions_refuse_a_move_that_cannot_separate() {
+        let (_directory, mut store, plan_id) = sequence_fixture();
+        // A two-item plan with a near-duplicate pair: moving either twin to the end is a
+        // no-op, so no suggestion may pretend to fix it. The note alone informs the editor.
+        store
+            .plan_remove_item(DEFAULT_OWNER_ID, &plan_id, MediaKind::Shot, "shot-c")
+            .unwrap();
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let suggestions = crate::sequence::sequence_suggestions(&store, &items).unwrap();
+        assert!(
+            suggestions.is_empty(),
+            "a no-op reorder must not be suggested"
+        );
+        let report = crate::sequence::sequence_report(&store, &items).unwrap();
+        assert_eq!(report.summary.near_duplicate_adjacencies, 1);
+        assert!(report.transitions[0].note.contains("near-identical"));
+    }
+
+    #[test]
+    fn sequence_report_handles_empty_and_photo_only_plans() {
+        // Empty and photo-only plans have no video durations, so the pacing median has an
+        // empty slice. The UI calls this report on every plan open, so it must return a
+        // report, never panic (the even-count median once indexed before the empty guard).
+        let (_directory, mut store, plan_id) = sequence_fixture();
+        let empty = crate::sequence::sequence_report(&store, &[]).unwrap();
+        assert_eq!(empty.summary.item_count, 0);
+        assert!(empty.summary.pacing_note.is_empty());
+
+        // Empty the fixture plan of its shot items so the plan below is photo-only.
+        for id in ["shot-a", "shot-b", "shot-c"] {
+            store
+                .plan_remove_item(DEFAULT_OWNER_ID, &plan_id, MediaKind::Shot, id)
+                .unwrap();
+        }
+        for (id, sha) in [("photo-0", "photo-0-sha"), ("photo-1", "photo-1-sha")] {
+            store
+                .upsert_photo(
+                    DEFAULT_OWNER_ID,
+                    &Photo {
+                        id: id.to_owned(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        path: format!("/photos/{id}.jpg"),
+                        sha256: sha.to_owned(),
+                        width: 6000,
+                        height: 4000,
+                        format: "jpeg".to_owned(),
+                        orientation: None,
+                        captured_at: None,
+                        camera_make: None,
+                        camera_model: None,
+                        lens: None,
+                        thumb_rel: None,
+                        status: PhotoStatus::Done,
+                        indexed_at: None,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Photo, "photo-0", None, None),
+            )
+            .unwrap();
+        store
+            .plan_add_item(
+                DEFAULT_OWNER_ID,
+                &plan_item(&plan_id, MediaKind::Photo, "photo-1", None, None),
+            )
+            .unwrap();
+        let items = store.plan_items(DEFAULT_OWNER_ID, &plan_id).unwrap();
+        let report = sequence_report_helper(&store, &items);
+        assert_eq!(report.summary.item_count, 2);
+        assert_eq!(report.summary.distinct_sources, 2);
+        assert!(report.summary.pacing_note.is_empty());
+    }
+
+    fn sequence_report_helper(
+        store: &Store,
+        items: &[crush_store::PlanItem],
+    ) -> crate::sequence::SequenceReport {
+        crate::sequence::sequence_report(store, items).expect("sequence report succeeds")
     }
 }
