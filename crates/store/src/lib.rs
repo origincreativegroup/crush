@@ -8170,13 +8170,15 @@ fn validate_plan_item_provenance(item: &PlanItem) -> anyhow::Result<()> {
         }
     }
 }
-
 /// Task 037: derive the honest `adjusted` provenance marker for span plan items. The marker
-/// is derived here — inside the store's item write paths, against the span row — so it can
-/// neither drift from the stored boundaries nor be spoofed by a caller. When the item's
-/// In/Out differ from the span's imported boundaries the provenance gains
-/// `adjusted: true` + `adjusted_at`; returning to the imported default removes both.
-/// Lineage keys (`source`, `external_id`, `import_id`, boundary basis/tolerance) are
+/// is derived here — inside the store's item write paths — so it can neither drift from the
+/// stored boundaries nor be spoofed by a caller. The comparison default is the item's
+/// import-time boundaries (`imported_start_s`/`imported_end_s`, recorded by the importer,
+/// because a recipe's trim of a catalogue segment is the imported default even though it
+/// differs from the span row); items without those keys (manual spans, legacy imports)
+/// compare against the span row. When the item's In/Out differ from that default the
+/// provenance gains `adjusted: true` + `adjusted_at`; returning to the default removes
+/// both. Lineage keys (`source`, `external_id`, `import_id`, boundary basis/tolerance) are
 /// preserved. Call only after `validate_plan_item_fields`, which guarantees a JSON object.
 fn derive_span_adjusted_provenance(
     item: &mut PlanItem,
@@ -8191,8 +8193,19 @@ fn derive_span_adjusted_provenance(
     let object = provenance
         .as_object_mut()
         .context("plan item provenance_json must be a JSON object")?;
-    let matches_imported = item.start_s == Some(span.start_s) && item.end_s == Some(span.end_s);
-    if matches_imported {
+    let imported_start = object
+        .get("imported_start_s")
+        .and_then(serde_json::Value::as_f64);
+    let imported_end = object
+        .get("imported_end_s")
+        .and_then(serde_json::Value::as_f64);
+    let (default_start, default_end) = match (imported_start, imported_end) {
+        (Some(start), Some(end)) => (start, end),
+        // No recorded import boundaries: the span row is the only honest default.
+        _ => (span.start_s, span.end_s),
+    };
+    let matches_default = item.start_s == Some(default_start) && item.end_s == Some(default_end);
+    if matches_default {
         object.remove("adjusted");
         object.remove("adjusted_at");
     } else {

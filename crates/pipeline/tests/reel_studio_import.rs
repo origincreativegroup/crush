@@ -630,11 +630,22 @@ fn adjusted_span_items_survive_re_import_and_span_refresh() {
     options.originals = vec![speech.parent().unwrap().to_path_buf()];
     options.recipes = vec![recipe_path.clone()];
     options.apply = true;
-    let report = import_reel_studio(&mut store, &options).unwrap();
+    let _report = import_reel_studio(&mut store, &options).unwrap();
     let plan = store.plan_list(DEFAULT_OWNER_ID).unwrap().remove(0);
     let items = store.plan_items(DEFAULT_OWNER_ID, &plan.id).unwrap();
     assert_eq!(items.len(), 2);
     let span_id = items[0].media_id.clone();
+    // A recipe's trim of the catalogue segment is the imported default, not an adjustment:
+    // the importer records the import-time boundaries and no marker is derived at import.
+    for item in &items {
+        let provenance: serde_json::Value = serde_json::from_str(&item.provenance_json).unwrap();
+        assert!(
+            provenance.get("adjusted").is_none(),
+            "fresh import must not be marked adjusted: {provenance}"
+        );
+        assert_eq!(provenance["imported_start_s"], item.start_s.unwrap());
+        assert_eq!(provenance["imported_end_s"], item.end_s.unwrap());
+    }
 
     // Extend item 1 past its imported span (0..2) but inside the video (5 s): accepted and
     // honestly marked as adjusted.

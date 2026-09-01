@@ -5868,6 +5868,72 @@ fn span_plan_items_clamp_to_the_source_video_and_record_adjusted_provenance() {
     assert!(provenance.get("adjusted_at").is_none());
     assert_eq!(provenance["external_id"], "V2-0001_S1");
 
+    // Items whose provenance records their import-time boundaries (the importer writes
+    // imported_start_s/imported_end_s) derive the marker against those: a recipe's trim of
+    // the catalogue segment is the imported default, not an adjustment, even though it
+    // differs from the span row.
+    store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-vc-2", "video-vc", "V2-0001_S2", 2.0, 9.0),
+        )
+        .unwrap();
+    let mut trimmed = plan_item("plan-vc", MediaKind::Span, "span-vc-2");
+    trimmed.start_s = Some(3.0);
+    trimmed.end_s = Some(6.0);
+    trimmed.origin = PlanOrigin::Historical;
+    trimmed.provenance_json = serde_json::json!({
+        "source": "reel_studio",
+        "external_id": "V2-0001_S1",
+        "import_id": "import-1",
+        "imported_start_s": 3.0,
+        "imported_end_s": 6.0,
+    })
+    .to_string();
+    store.plan_add_item(DEFAULT_OWNER_ID, &trimmed).unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[1];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert!(
+        provenance.get("adjusted").is_none(),
+        "a fresh import is not an adjustment: {provenance}"
+    );
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc-2",
+            &PlanItemPatch {
+                start_s: Some(1.0),
+                end_s: Some(8.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[1];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert_eq!(provenance["adjusted"], true);
+    // Returning to the recorded import boundaries clears the marker again.
+    store
+        .plan_update_item(
+            DEFAULT_OWNER_ID,
+            "plan-vc",
+            MediaKind::Span,
+            "span-vc-2",
+            &PlanItemPatch {
+                start_s: Some(3.0),
+                end_s: Some(6.0),
+                ..PlanItemPatch::default()
+            },
+        )
+        .unwrap();
+    let stored = &store.plan_items(DEFAULT_OWNER_ID, "plan-vc").unwrap()[1];
+    let provenance: serde_json::Value = serde_json::from_str(&stored.provenance_json).unwrap();
+    assert!(provenance.get("adjusted").is_none(), "{provenance}");
+    store
+        .plan_remove_item(DEFAULT_OWNER_ID, "plan-vc", MediaKind::Span, "span-vc-2")
+        .unwrap();
+
     // Boundaries past the video duration are refused by the store...
     assert!(store
         .plan_update_item(

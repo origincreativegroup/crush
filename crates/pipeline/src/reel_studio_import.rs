@@ -768,6 +768,11 @@ pub fn import_reel_studio(
                             "recipe_version": version,
                             "boundary_basis": crush_store::span_boundary_basis_to_str(span.boundary_basis),
                             "boundary_tolerance_s": span.boundary_tolerance_s,
+                            // Task 037: the item's import-time boundaries. The store derives
+                            // the `adjusted` marker against these — a recipe's trim of the
+                            // catalogue segment is the imported default, not an adjustment.
+                            "imported_start_s": *start_s,
+                            "imported_end_s": *end_s,
                         })
                         .to_string(),
                         added_at: now,
