@@ -49,10 +49,16 @@ pub struct IngestSummary {
     pub discovered_photos: usize,
     pub indexed_photos: usize,
     /// Files whose (owner, sha256) identity was already indexed at a different path and
-    /// were re-pointed to the existing row during this ingest ("moved/renamed →
-    /// relinked"). Additive: `indexed`/`skipped` keep their exact meaning.
+    /// were re-pointed to the existing row during this ingest ("moved/renamed/duplicate →
+    /// relinked"). Additive: `indexed`/`skipped` keep their exact meaning, and `moved` /
+    /// `renamed` only ever count files whose old copy is really gone — a same-content
+    /// file whose old path still exists is a duplicate copy, counted in `duplicated`.
     pub moved: usize,
     pub renamed: usize,
+    /// Same content found at a new path while the old file still exists on disk: the
+    /// catalog was re-pointed to the new copy, but nothing moved — the old copy is still
+    /// where it was.
+    pub duplicated: usize,
     pub recovered_jobs: usize,
     pub search_vectors: usize,
     pub errors: Vec<(PathBuf, String)>,
@@ -62,7 +68,8 @@ pub struct IngestSummary {
 
 /// One media file that ingest found at a new path: the existing identity row was
 /// re-pointed, never duplicated. `Moved` means the directory changed; `Renamed` means
-/// only the file name changed.
+/// only the file name changed; `DuplicateCopy` means the old file still exists on disk —
+/// the same content lives in two places and the catalog now points at the new copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelinkedAsset {
     pub media_kind: &'static str,
@@ -76,6 +83,7 @@ pub struct RelinkedAsset {
 pub enum RelinkKind {
     Moved,
     Renamed,
+    DuplicateCopy,
 }
 
 impl RelinkKind {
@@ -83,13 +91,20 @@ impl RelinkKind {
         match self {
             RelinkKind::Moved => "moved",
             RelinkKind::Renamed => "renamed",
+            RelinkKind::DuplicateCopy => "duplicate copy",
         }
     }
 }
 
-/// Classify a same-content path change: a new parent directory is a move, a new file name
-/// in the same directory is a rename.
+/// Classify a same-content path change found during ingest. If the old file still exists
+/// on disk, nothing was moved or renamed — the same content exists at two locations and
+/// the catalog now points at the new copy, so report it honestly as a duplicate copy
+/// (the path update semantics are unchanged). Otherwise a new parent directory is a
+/// move, and a new file name in the same directory is a rename.
 fn relink_kind(old_path: &str, new_path: &Path) -> RelinkKind {
+    if Path::new(old_path).exists() {
+        return RelinkKind::DuplicateCopy;
+    }
     let old = Path::new(old_path);
     match (old.parent(), new_path.parent()) {
         (Some(old_parent), Some(new_parent)) if old_parent == new_parent => RelinkKind::Renamed,
@@ -221,9 +236,10 @@ impl Pipeline {
     ) -> anyhow::Result<IngestOutcome> {
         let sha256 = sha256_file(path)?;
         let existing = store.photo_by_sha(DEFAULT_OWNER_ID, &sha256)?;
-        // Same (owner, sha256) identity at a different path: moved or renamed. The path
-        // update below rides on the same-row upsert, and the outcome is reported
-        // honestly instead of looking like an ordinary skip.
+        // Same (owner, sha256) identity at a different path: moved, renamed, or a
+        // duplicate copy (old file still on disk). The path update below rides on the
+        // same-row upsert, and the outcome is reported honestly instead of looking like
+        // an ordinary skip.
         let mut relink = None;
         if let Some(existing_photo) = &existing {
             if existing_photo.path != path.to_string_lossy() {
@@ -679,7 +695,8 @@ impl Pipeline {
             let mut existing = existing;
             // The (owner, sha256) identity already exists at a different path: same
             // content, new location. Keep the same-row path update and report it
-            // honestly as moved/renamed instead of a silent relink.
+            // honestly — moved or renamed when the old copy is gone, duplicate copy
+            // when the old file still exists on disk — instead of a silent relink.
             let mut relink = None;
             if existing.path != path.to_string_lossy() {
                 relink = Some(RelinkedAsset {
@@ -1330,8 +1347,9 @@ struct IngestOutcome {
     relink: Option<RelinkedAsset>,
 }
 
-/// Count and log a moved/renamed outcome. Additive by contract: `indexed`/`skipped`
-/// keep their exact meaning (the UI progress copy keys on them).
+/// Count and log a moved/renamed/duplicate outcome. Additive by contract: `indexed`/
+/// `skipped` keep their exact meaning (the UI progress copy keys on them), and `moved`/
+/// `renamed` count only files whose old copy is really gone.
 fn record_relink(summary: &mut IngestSummary, relink: Option<RelinkedAsset>) {
     let Some(relinked) = relink else {
         return;
@@ -1339,6 +1357,7 @@ fn record_relink(summary: &mut IngestSummary, relink: Option<RelinkedAsset>) {
     match relinked.kind {
         RelinkKind::Moved => summary.moved += 1,
         RelinkKind::Renamed => summary.renamed += 1,
+        RelinkKind::DuplicateCopy => summary.duplicated += 1,
     }
     tracing::info!(
         media_kind = relinked.media_kind,
@@ -1346,7 +1365,7 @@ fn record_relink(summary: &mut IngestSummary, relink: Option<RelinkedAsset>) {
         from = %relinked.from_path.display(),
         to = %relinked.to_path.display(),
         outcome = relinked.kind.as_str(),
-        "ingest re-pointed moved media to the existing identity row"
+        "ingest re-pointed media to the existing identity row"
     );
     summary.relinked.push(relinked);
 }

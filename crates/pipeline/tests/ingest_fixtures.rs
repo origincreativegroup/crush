@@ -433,6 +433,49 @@ fn renamed_and_moved_files_keep_identity_and_evidence() {
     assert_eq!(summary.relinked[0].to_path, moved);
     evidence_intact("after a move");
 
+    // 2b) Duplicate copy: the same bytes appear at a second path while the old file is
+    //     still on disk. Nothing moved or renamed — ingest re-points the catalog at the
+    //     new copy and says so honestly instead of claiming a move.
+    let copied = media.canonicalize().unwrap().join("launch-day-copy.mp4");
+    std::fs::copy(&moved, &copied).unwrap();
+    let summary = pipeline.ingest(&media, false).unwrap();
+    assert_eq!(summary.moved, 0, "the old file still exists: not a move");
+    assert_eq!(summary.renamed, 0);
+    assert_eq!(
+        summary.duplicated, 1,
+        "an old copy left on disk is reported as a duplicate copy"
+    );
+    assert_eq!(
+        summary.indexed, 0,
+        "a duplicate copy is relinked, not re-indexed"
+    );
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.relinked.len(), 1);
+    assert_eq!(
+        summary.relinked[0].kind,
+        crush_pipeline::RelinkKind::DuplicateCopy
+    );
+    assert_eq!(summary.relinked[0].from_path, moved);
+    assert_eq!(summary.relinked[0].to_path, copied);
+    let store = Store::open(temp.path()).unwrap();
+    assert_eq!(
+        store
+            .video_by_id(DEFAULT_OWNER_ID, &video.id)
+            .unwrap()
+            .unwrap()
+            .path,
+        copied.to_string_lossy(),
+        "the path update semantics are unchanged: the row points at the ingested copy"
+    );
+    drop(store);
+    evidence_intact("after a duplicate copy");
+    // Clean the copy up so the later phases see a single file on disk again.
+    std::fs::remove_file(&copied).unwrap();
+    // The row still points at the removed copy; restore it to the surviving file for the
+    // explicit-relink phase below.
+    let restored = pipeline.relink(&video.id, &moved).unwrap();
+    assert_eq!(restored.new_path, moved.to_string_lossy());
+
     // 3) Explicit relink without re-adding any folder: hash verified, row re-pointed.
     let relocated_dir = temp.path().join("relocated");
     std::fs::create_dir(&relocated_dir).unwrap();

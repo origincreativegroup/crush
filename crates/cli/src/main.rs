@@ -464,7 +464,7 @@ fn ingest(
     let summary =
         Pipeline::new(cfg.clone(), paths.clone(), cancellation.clone()).ingest(input, debug)?;
     println!(
-        "Ingest complete: discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} moved={} renamed={} recovered_jobs={} search_vectors={}",
+        "Ingest complete: discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} moved={} renamed={} duplicated={} recovered_jobs={} search_vectors={}",
         summary.discovered,
         summary.discovered_photos,
         summary.indexed,
@@ -473,12 +473,13 @@ fn ingest(
         summary.failed,
         summary.moved,
         summary.renamed,
+        summary.duplicated,
         summary.recovered_jobs,
         summary.search_vectors
     );
     for relinked in &summary.relinked {
         println!(
-            "{} {}: {} → {} (relindex {})",
+            "{} {}: {} → {} (id {})",
             relinked.kind.as_str(),
             relinked.media_kind,
             relinked.from_path.display(),
