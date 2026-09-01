@@ -104,7 +104,17 @@ const state = {
   reindexQueue: null,
   reindexTotal: 0,
   reindexFailed: 0,
+  // Assets that could not start at all (e.g. removed mid-batch → "asset … was not
+  // found"): skipped, not aborting the queue, and reported separately in the
+  // summary because there is no failed row to point at.
+  reindexSkipped: 0,
+  reindexSkipReason: null,
   reindexCurrentId: null,
+  // The background job id of the asset currently being re-indexed (from
+  // reindex_asset's TaskStarted). The backend keeps every background task forever
+  // keyed by UUID, so cancel detection must match THIS job's id — matching by
+  // kind alone would trip over stale tasks from earlier in the session.
+  reindexCurrentJobId: null,
   reindexBusy: false,
   reindexArmed: false,
   reindexArmTimer: null,
@@ -818,7 +828,10 @@ async function reindexSelected() {
   state.reindexQueue = ids;
   state.reindexTotal = ids.length;
   state.reindexFailed = 0;
+  state.reindexSkipped = 0;
+  state.reindexSkipReason = null;
   state.reindexCurrentId = null;
+  state.reindexCurrentJobId = null;
   showMessage(`Re-indexing ${ids.length} assets one at a time — progress shows below.`);
   renderVideos();
   await pumpReindexQueue();
@@ -828,16 +841,27 @@ async function reindexSelected() {
 // running" otherwise), so a batch re-index is a frontend queue that starts the next
 // asset only after the previous ingest reaches a terminal state. Every job reports
 // its real progress through the existing ingest-progress events; nothing here fakes
-// completion.
+// completion. Cancel detection matches the job id this batch started (review
+// HIGH-1): the background snapshot keeps every task from the whole session, so
+// matching by kind alone would read a stale task and both miss a real cancel and
+// abort a fresh batch on an old one.
 async function pumpReindexQueue() {
   if (!state.reindexQueue || state.reindexBusy) return;
   state.reindexBusy = true;
   try {
     while (state.reindexQueue && !isIngestActive()) {
-      const ingestTask = state.jobs.background.find((task) => task.kind === "ingest");
-      if (state.reindexCurrentId && ingestTask?.status === "cancelled") {
-        const remaining = state.reindexQueue.length;
+      const currentTask = state.reindexCurrentJobId
+        ? state.jobs.background.find(
+            (task) => task.kind === "ingest" && task.jobId === state.reindexCurrentJobId,
+          )
+        : null;
+      if (currentTask?.status === "cancelled") {
+        // The in-flight asset was cancelled along with the never-started rest of
+        // the queue — both count as not re-indexed.
+        const remaining = state.reindexQueue.length + (state.reindexCurrentId ? 1 : 0);
         state.reindexQueue = null;
+        state.reindexCurrentId = null;
+        state.reindexCurrentJobId = null;
         showMessage(
           `Re-index stopped — ${remaining} asset${remaining === 1 ? "" : "s"} not re-indexed.`,
           true,
@@ -850,14 +874,25 @@ async function pumpReindexQueue() {
         const asset = state.videos.find((video) => video.id === state.reindexCurrentId);
         if (asset?.status === "failed") state.reindexFailed += 1;
         state.reindexCurrentId = null;
+        state.reindexCurrentJobId = null;
       }
       const nextId = state.reindexQueue.shift();
       if (!nextId) {
-        const { reindexTotal, reindexFailed } = state;
+        const { reindexTotal, reindexFailed, reindexSkipped, reindexSkipReason } = state;
         state.reindexQueue = null;
-        showMessage(reindexFailed
-          ? `Re-indexed ${reindexTotal - reindexFailed} of ${reindexTotal} assets · ${reindexFailed} failed — see the failed rows for details.`
-          : `Re-indexed ${reindexTotal} asset${reindexTotal === 1 ? "" : "s"}.`, reindexFailed > 0);
+        const notIndexed = reindexFailed + reindexSkipped;
+        const notes = [
+          reindexFailed
+            ? `${reindexFailed} failed — see the failed rows for details`
+            : null,
+          reindexSkipped ? `${reindexSkipped} skipped — ${reindexSkipReason}` : null,
+        ].filter(Boolean);
+        showMessage(
+          notIndexed
+            ? `Re-indexed ${reindexTotal - notIndexed} of ${reindexTotal} assets · ${notes.join(" · ")}.`
+            : `Re-indexed ${reindexTotal} asset${reindexTotal === 1 ? "" : "s"}.`,
+          notIndexed > 0,
+        );
         renderVideos();
         return;
       }
@@ -865,13 +900,25 @@ async function pumpReindexQueue() {
       const done = state.reindexTotal - state.reindexQueue.length;
       showMessage(`Re-indexing ${done} of ${state.reindexTotal}…`);
       try {
-        await invoke("reindex_asset", { id: nextId });
+        const started = await invoke("reindex_asset", { id: nextId });
+        state.reindexCurrentJobId = started.jobId;
         // Reflects the now-active ingest (or, in tests/mock, its instant completion)
         // before the loop decides to start the next asset.
         await refreshLibrary();
       } catch (error) {
+        if (/was not found/i.test(String(error))) {
+          // The asset was removed (or vanished) mid-batch. Skip it and keep the
+          // queue going — one stale id must not abort the remaining assets
+          // (review LOW). The summary counts it with the mapped error, since a
+          // skipped asset leaves no failed row to point at.
+          state.reindexSkipped += 1;
+          state.reindexSkipReason = state.reindexSkipReason || crushErrorText(error);
+          state.reindexCurrentId = null;
+          continue;
+        }
         state.reindexQueue = null;
         state.reindexCurrentId = null;
+        state.reindexCurrentJobId = null;
         showMessage(`Re-index stopped: ${crushErrorText(error)}`, true);
         renderVideos();
         return;

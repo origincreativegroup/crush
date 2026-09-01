@@ -699,6 +699,9 @@ const tests = {
 
     // Batch re-index arms once through the two-step button, then queues one
     // reindex_asset per selected asset (the backend runs one ingest at a time).
+    // The background snapshot carries a STALE cancelled ingest task from earlier
+    // in the session (mock-bridge pre-seeds it): cancel detection must match this
+    // batch's own job id, so the fresh batch still completes (review HIGH-1).
     await rows.nth(0).click();
     await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
     const reindex = frame.locator("#reindex");
@@ -721,6 +724,68 @@ const tests = {
     );
     await frame.locator("#remove-asset-cancel").click();
     assert.equal(await rows.count(), 4);
+  },
+
+  async "reindex-cancel"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 2);
+    const reindex = frame.locator("#reindex");
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    await reindex.click();
+    assert.equal(await visibleText(reindex), "Really re-index 2?");
+    await reindex.click();
+    // The first asset's job really runs: the mock surfaces it as a running
+    // background ingest, so Cancel appears and the queue waits on it.
+    await frame.locator("#cancel").waitFor({ state: "visible" });
+    await poll(async () =>
+      (await mockCalls(page)).some(
+        (call) => call.command === "reindex_asset" && call.args.id === "photo-one",
+      ));
+    // Cancelling the in-flight job stops the queue (review HIGH-1): the stop is
+    // detected by matching THIS batch's job id, and the in-flight asset counts in
+    // the not-re-indexed tally alongside the never-started one.
+    await frame.locator("#cancel").click();
+    await poll(async () =>
+      /Re-index stopped — 2 assets not re-indexed\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
+    const reindexCalls = (await mockCalls(page))
+      .filter((call) => call.command === "reindex_asset");
+    assert.equal(reindexCalls.length, 1);
+    assert.equal(reindexCalls[0].args.id, "photo-one");
+    // The queue is really stopped: the second asset is never started.
+    await poll(async () => (await frame.locator("#cancel").isHidden()));
+    assert.equal(await reindex.isEnabled(), true);
+  },
+
+  async "reindex-stale-asset"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    const reindex = frame.locator("#reindex");
+    await rows.nth(0).click();
+    await rows.nth(1).click({ modifiers: ["ControlOrMeta"] });
+    await reindex.click();
+    assert.equal(await visibleText(reindex), "Really re-index 2?");
+    await reindex.click();
+    // The second asset answers "asset … was not found" (removed mid-batch): the
+    // queue must skip it, still start every queued asset, and finish with the
+    // skip counted in the summary together with the mapped error (review LOW).
+    await poll(async () => {
+      const ids = (await mockCalls(page))
+        .filter((call) => call.command === "reindex_asset")
+        .map((call) => call.args.id);
+      return ids.length === 2 && ids[0] === "photo-one" && ids[1] === "photo-two";
+    });
+    await poll(async () =>
+      /Re-indexed 1 of 2 assets · 1 skipped — asset photo-two was not found\./.test(
+        await visibleText(frame.locator("#library-message")),
+      ));
   },
 
   async "search-error"(page) {
