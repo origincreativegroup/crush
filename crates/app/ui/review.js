@@ -3,6 +3,9 @@
 // user's preference through record_feedback with the compared asset — the strongest signal
 // in the blueprint's feedback table. Keyboard-first: ←/→ focus a side, Enter prefers the
 // focused side, p/x pick or reject it, 1–5 rates it, ⌥←/⌥→ swaps side B through the list.
+// After an explicit decision (prefer, pick, reject, rating) side B auto-advances to the
+// next candidate after a short beat, so a cull run flows (Task 039 C4, John's "yes"):
+// passive viewing never advances, and the last comparison completes instead of advancing.
 
 (() => {
   const bridge = window.__TAURI__;
@@ -17,6 +20,8 @@
     select: { a: $("#compare-select-a"), b: $("#compare-select-b") },
     status: { a: $("#compare-status-a"), b: $("#compare-status-b") },
     side: { a: $("#compare-side-a"), b: $("#compare-side-b") },
+    advanceHint: $("#compare-advance-hint"),
+    complete: $("#compare-complete"),
   };
 
   const state = {
@@ -25,11 +30,27 @@
     focus: "a",
     detail: null,
     statusTimer: null,
+    advanceTimer: null,
+    // Session-level discoverability flag: the hint shows once per app session, the first
+    // time an auto-advance is scheduled. Never a setting, never persisted.
+    advanceHintShown: false,
+    picks: 0,
+    rejects: 0,
   };
 
   const fileSrc = (path) => bridge.core.convertFileSrc(path);
   const fileName = (path) => path.split(/[\\/]/).at(-1) || path;
   const assetType = (kind) => (kind === "photo" ? "photo" : "video");
+
+  // The decision beat is motion-system property, not a magic number: it reads the
+  // --dur-advance token (600 ms) so the hold lives with the app's motion scale. Reduced-
+  // motion users skip the wait entirely — the advance jumps immediately.
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const advanceDelay = () => {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue("--dur-advance");
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) && value >= 0 ? value : 600;
+  };
 
   function showStatus(side, text) {
     el.status[side].textContent = text;
@@ -76,6 +97,71 @@
     setFocus(state.focus);
   }
 
+  // ---------- auto-advance (Task 039 C4) ----------
+  // Side A stays anchored; side B walks forward through the pool (no wrap — the manual
+  // ⌥arrows keep wrap for free browsing). A candidate equal to side A is skipped, so the
+  // pair always shows two different assets. When no forward candidate remains this was the
+  // last comparison: the dialog shows the completion count instead of advancing.
+  function nextBCandidate() {
+    const index = state.assets.findIndex((asset) => sameAsset(asset, state.current.b));
+    for (let next = index + 1; next < state.assets.length; next += 1) {
+      if (!sameAsset(state.assets[next], state.current.a)) return state.assets[next];
+    }
+    return null;
+  }
+
+  function showCompletion() {
+    const parts = [];
+    if (state.picks) parts.push(`${state.picks} picked`);
+    if (state.rejects) parts.push(`${state.rejects} rejected`);
+    el.complete.textContent = parts.length
+      ? `All compared — ${parts.join(", ")}.`
+      : "All compared — nothing picked or rejected.";
+    el.complete.hidden = false;
+  }
+
+  function hideCompletion() {
+    el.complete.hidden = true;
+  }
+
+  function cancelAdvance() {
+    clearTimeout(state.advanceTimer);
+    state.advanceTimer = null;
+  }
+
+  function advance() {
+    state.advanceTimer = null;
+    if (!el.dialog.open) return;
+    const candidate = nextBCandidate();
+    if (!candidate) {
+      showCompletion();
+      return;
+    }
+    state.current.b = candidate;
+    renderSide("b");
+  }
+
+  function scheduleAdvance() {
+    const candidate = nextBCandidate();
+    if (!candidate) {
+      cancelAdvance();
+      showCompletion();
+      return;
+    }
+    if (!state.advanceHintShown) {
+      state.advanceHintShown = true;
+      el.advanceHint.hidden = false;
+    }
+    // One pending advance at a time: a second decision before the beat resets the hold
+    // rather than queueing a second jump — only the current side B was judged twice.
+    cancelAdvance();
+    if (reduceMotion.matches) {
+      advance();
+      return;
+    }
+    state.advanceTimer = setTimeout(advance, advanceDelay());
+  }
+
   function fillSelects() {
     for (const side of ["a", "b"]) {
       const select = el.select[side];
@@ -99,6 +185,12 @@
   }
 
   async function openCompare() {
+    cancelAdvance();
+    hideCompletion();
+    state.picks = 0;
+    state.rejects = 0;
+    // advanceHintShown is deliberately NOT reset: the hint is once per app session.
+    el.advanceHint.hidden = true;
     try {
       const base = window.__crushContext?.reviewFilters || {};
       state.assets = await invoke("library_browse", { filter: base });
@@ -161,6 +253,11 @@
               ? "Marked as rejected."
               : `Rated ${value} of 5.`,
       );
+      // Auto-advance fires only here, on an explicit recorded decision (prefer, pick,
+      // reject, rating) — never on passive viewing, focus changes, or failed records.
+      if (signal === "pick") state.picks += 1;
+      if (signal === "reject") state.rejects += 1;
+      scheduleAdvance();
     } catch (error) {
       showStatus(state.focus, String(error));
     }
@@ -172,6 +269,9 @@
     const next = (index + delta + state.assets.length) % state.assets.length;
     const candidate = state.assets[next];
     if (sameAsset(candidate, state.current.a)) return;
+    // Manual navigation takes control back: no pending auto-jump, no stale completion.
+    cancelAdvance();
+    hideCompletion();
     state.current.b = candidate;
     renderSide("b");
   }
@@ -225,6 +325,8 @@
       showStatus("a", "That asset is already on side B.");
       return;
     }
+    cancelAdvance();
+    hideCompletion();
     state.current.a = asset;
     renderSide("a");
   });
@@ -236,6 +338,8 @@
       showStatus("b", "That asset is already on side A.");
       return;
     }
+    cancelAdvance();
+    hideCompletion();
     state.current.b = asset;
     renderSide("b");
   });
@@ -246,6 +350,8 @@
   });
   el.dialog.addEventListener("keydown", onKeydown);
   el.dialog.addEventListener("close", () => {
+    cancelAdvance();
+    hideCompletion();
     el.status.a.textContent = "";
     el.status.b.textContent = "";
   });

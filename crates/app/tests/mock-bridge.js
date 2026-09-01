@@ -444,6 +444,8 @@
     "library-flags",
     "library-saved-search",
     "compare-view",
+    "compare-advance",
+    "compare-advance-reduced",
   ].includes(scenario);
 
   const reviewAssets = reviewScenario
