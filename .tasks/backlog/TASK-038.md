@@ -7,12 +7,8 @@ migration** as scoped, see (c)).
 Source: John's named key features, 2026-08-31 — *file renaming* and *shot identity*
 (`docs/HANDOFF.md` § Product direction). Shot identity is content-addressed by design:
 `stable_shot_id` from video sha256 + index + start (`crates/stage-split/src/scene.rs:244`),
-media rows keyed owner+sha256 so renames/moves preserve identity. **OPEN SCOPE QUESTION John
-has not answered yet:** should Crush *perform* renames, or only *survive* them? This task
-deliberately scopes only what is true under both readings — survival, relink, and identity
-hardening. Performing renames is out of scope until John answers (and would have to respect
-the safety posture: originals are never modified by Crush today, so renaming would be
-opt-in, previewed, and reversible).
+media rows keyed owner+sha256 so renames/moves preserve identity. **Scope question answered
+2026-08-31:** Crush *survives* renames for this task; performing renames is out of scope.
 
 ## What the code actually does today (verified 2026-08-31, `task/21-render-export` head)
 

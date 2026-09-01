@@ -524,8 +524,7 @@ mod macos {
             let result =
                 Pipeline::new(config, paths, spawned_cancellation.clone()).ingest(&input, false);
             let cancelled = spawned_cancellation.is_cancelled();
-            let completed =
-                complete_ingest_background(&tasks, &spawned_job_id, result, cancelled);
+            let completed = complete_ingest_background(&tasks, &spawned_job_id, result, cancelled);
             release_ingest_slot(&active_ingest, &spawned_job_id);
             if completed.is_ok() {
                 if let Ok(snapshot) = job_snapshot(&data_dir, &tasks) {

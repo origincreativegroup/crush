@@ -12,8 +12,8 @@ use crush_search::SearchEngine;
 use crush_stage_embed::embedder::{Embedder, ProviderPreference};
 use crush_stage_split::ffmpeg;
 use crush_store::{
-    EditorialAnnotation, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, PhotoProxyProvenance,
-    PhotoStatus, Plan, PlanItem, PlanOrigin, Store, VideoStatus,
+    EditorialAnnotation, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob,
+    PhotoProxyProvenance, PhotoStatus, Plan, PlanItem, PlanOrigin, Store, VideoStatus,
 };
 use image::{Rgb, RgbImage};
 
@@ -387,20 +387,23 @@ fn renamed_and_moved_files_keep_identity_and_evidence() {
     };
 
     // 1) Rename in place: same directory, new file name → reported as renamed.
-    let renamed = media
-        .canonicalize()
-        .unwrap()
-        .join("launch-day-renamed.mp4");
+    let renamed = media.canonicalize().unwrap().join("launch-day-renamed.mp4");
     std::fs::rename(&original, &renamed).unwrap();
     let summary = pipeline.ingest(&media, false).unwrap();
     assert_eq!(summary.renamed, 1, "a same-directory rename is a rename");
     assert_eq!(summary.moved, 0);
-    assert_eq!(summary.indexed, 0, "a moved file is relinked, not re-indexed");
+    assert_eq!(
+        summary.indexed, 0,
+        "a moved file is relinked, not re-indexed"
+    );
     assert_eq!(summary.skipped, 1);
     assert_eq!(summary.relinked.len(), 1);
     assert_eq!(summary.relinked[0].media_kind, "video");
     assert_eq!(summary.relinked[0].id, video.id);
-    assert_eq!(summary.relinked[0].kind, crush_pipeline::RelinkKind::Renamed);
+    assert_eq!(
+        summary.relinked[0].kind,
+        crush_pipeline::RelinkKind::Renamed
+    );
     assert_eq!(summary.relinked[0].to_path, renamed);
     let store = Store::open(temp.path()).unwrap();
     assert_eq!(

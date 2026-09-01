@@ -245,7 +245,10 @@ impl Pipeline {
                     store.upsert_photo(DEFAULT_OWNER_ID, &updated)?;
                 }
                 tracing::info!(path = %path.display(), "skip: photo already indexed");
-                return Ok(IngestOutcome { result: IngestOne::Skipped, relink });
+                return Ok(IngestOutcome {
+                    result: IngestOne::Skipped,
+                    relink,
+                });
             }
         }
         let photo_id = existing
@@ -255,7 +258,10 @@ impl Pipeline {
         // before its job starts. Failures before that point leave nothing to resume: the
         // next ingest retries the deterministic photo id from scratch.
         self.index_photo(store, path, &photo_id, &sha256, embedder)?;
-        Ok(IngestOutcome { result: IngestOne::Indexed, relink })
+        Ok(IngestOutcome {
+            result: IngestOne::Indexed,
+            relink,
+        })
     }
 
     fn index_photo(
@@ -413,7 +419,9 @@ impl Pipeline {
             new_path.display()
         );
         // Ingest stores canonicalized paths, so relink records the same form.
-        let canonical = new_path.canonicalize().unwrap_or_else(|_| new_path.to_path_buf());
+        let canonical = new_path
+            .canonicalize()
+            .unwrap_or_else(|_| new_path.to_path_buf());
         let new_path_string = canonical.to_string_lossy().into_owned();
         let resolved = if let Some(video) = store.video_by_id(DEFAULT_OWNER_ID, target)? {
             Some(("video", video.id, video.path))
@@ -659,7 +667,12 @@ impl Pipeline {
             .map_err(Into::into)
     }
 
-    fn ingest_one(&self, store: &mut Store, path: &Path, debug: bool) -> anyhow::Result<IngestOutcome> {
+    fn ingest_one(
+        &self,
+        store: &mut Store,
+        path: &Path,
+        debug: bool,
+    ) -> anyhow::Result<IngestOutcome> {
         let sha256 = sha256_file(path)?;
         if let Some(existing) = store.video_by_sha(DEFAULT_OWNER_ID, &sha256)? {
             let fidelity_complete = video_fidelity_complete(store, &existing.id)?;
@@ -682,16 +695,25 @@ impl Pipeline {
             if existing.status == VideoStatus::Done && fidelity_complete {
                 if !video_assessments_current(store, &existing.id)? {
                     self.run_analyze(store, &existing, debug)?;
-                    return Ok(IngestOutcome { result: IngestOne::Indexed, relink });
+                    return Ok(IngestOutcome {
+                        result: IngestOne::Indexed,
+                        relink,
+                    });
                 }
                 tracing::info!(path = %path.display(), "skip: already indexed");
-                return Ok(IngestOutcome { result: IngestOne::Skipped, relink });
+                return Ok(IngestOutcome {
+                    result: IngestOne::Skipped,
+                    relink,
+                });
             }
             if existing.status == VideoStatus::Done {
                 store.set_video_status(DEFAULT_OWNER_ID, &existing.id, VideoStatus::Pending)?;
             }
             self.process_video(store, &existing.id, debug)?;
-            return Ok(IngestOutcome { result: IngestOne::Indexed, relink });
+            return Ok(IngestOutcome {
+                result: IngestOne::Indexed,
+                relink,
+            });
         }
         if let Some(old) = store.video_by_path(DEFAULT_OWNER_ID, &path.to_string_lossy())? {
             tracing::info!(
@@ -719,7 +741,10 @@ impl Pipeline {
             },
         )?;
         self.process_video(store, &video_id, debug)?;
-        Ok(IngestOutcome { result: IngestOne::Indexed, relink: None })
+        Ok(IngestOutcome {
+            result: IngestOne::Indexed,
+            relink: None,
+        })
     }
 
     fn process_video(&self, store: &mut Store, video_id: &str, debug: bool) -> anyhow::Result<()> {

@@ -4198,7 +4198,14 @@ impl Store {
         new_path: &str,
         verified_sha256: &str,
     ) -> anyhow::Result<Video> {
-        self.relink_row(owner_id, "videos", "video", video_id, new_path, verified_sha256)?;
+        self.relink_row(
+            owner_id,
+            "videos",
+            "video",
+            video_id,
+            new_path,
+            verified_sha256,
+        )?;
         self.video_by_id(owner_id, video_id)?
             .context("relinked video could not be read back")
     }
@@ -4212,7 +4219,14 @@ impl Store {
         new_path: &str,
         verified_sha256: &str,
     ) -> anyhow::Result<Photo> {
-        self.relink_row(owner_id, "photos", "photo", photo_id, new_path, verified_sha256)?;
+        self.relink_row(
+            owner_id,
+            "photos",
+            "photo",
+            photo_id,
+            new_path,
+            verified_sha256,
+        )?;
         self.photo_by_id(owner_id, photo_id)?
             .context("relinked photo could not be read back")
     }
@@ -4482,11 +4496,10 @@ impl Store {
                     scene_score
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            for shot in shots.iter().filter(|shot| {
-                !existing
-                    .iter()
-                    .any(|stored| stored.id == shot.id)
-            }) {
+            for shot in shots
+                .iter()
+                .filter(|shot| !existing.iter().any(|stored| stored.id == shot.id))
+            {
                 statement.execute(params![
                     shot.id,
                     video_id,

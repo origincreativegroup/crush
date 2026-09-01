@@ -5103,10 +5103,20 @@ fn resplit_preserves_shot_evidence_and_cleans_only_vanished_shots() {
     store
         .append_feedback(
             DEFAULT_OWNER_ID,
-            &feedback("fb-ev-0", MediaKind::Shot, "shot-ev-0", FeedbackSignal::Pick),
+            &feedback(
+                "fb-ev-0",
+                MediaKind::Shot,
+                "shot-ev-0",
+                FeedbackSignal::Pick,
+            ),
         )
         .unwrap();
-    let mut preference = feedback("fb-ev-1", MediaKind::Shot, "shot-ev-0", FeedbackSignal::Prefer);
+    let mut preference = feedback(
+        "fb-ev-1",
+        MediaKind::Shot,
+        "shot-ev-0",
+        FeedbackSignal::Prefer,
+    );
     preference.value = Some(1.0);
     preference.compared_media_kind = Some(MediaKind::Shot);
     preference.compared_media_id = Some("shot-ev-1".to_owned());
@@ -5116,7 +5126,12 @@ fn resplit_preserves_shot_evidence_and_cleans_only_vanished_shots() {
     store
         .append_feedback(
             DEFAULT_OWNER_ID,
-            &feedback("fb-ev-2", MediaKind::Shot, "shot-ev-1", FeedbackSignal::Pick),
+            &feedback(
+                "fb-ev-2",
+                MediaKind::Shot,
+                "shot-ev-1",
+                FeedbackSignal::Pick,
+            ),
         )
         .unwrap();
 
@@ -5271,7 +5286,10 @@ fn resplit_preserves_shot_evidence_and_cleans_only_vanished_shots() {
         .vector_for_shot(DEFAULT_OWNER_ID, "shot-ev-1")
         .unwrap()
         .is_some());
-    assert_eq!(store.plan_items(DEFAULT_OWNER_ID, "plan-ev").unwrap().len(), 2);
+    assert_eq!(
+        store.plan_items(DEFAULT_OWNER_ID, "plan-ev").unwrap().len(),
+        2
+    );
     assert_eq!(
         store
             .reference_set_items(DEFAULT_OWNER_ID, "set-ev")
@@ -5452,7 +5470,12 @@ fn relink_updates_the_row_path_only_after_verifying_the_recorded_hash() {
         .relink_photo(DEFAULT_OWNER_ID, "photo-rl", "/x", "not-the-hash")
         .is_err());
     let relinked_photo = store
-        .relink_photo(DEFAULT_OWNER_ID, "photo-rl", "/new/place/photo-rl.jpg", "sha-photo-rl")
+        .relink_photo(
+            DEFAULT_OWNER_ID,
+            "photo-rl",
+            "/new/place/photo-rl.jpg",
+            "sha-photo-rl",
+        )
         .unwrap();
     assert_eq!(relinked_photo.path, "/new/place/photo-rl.jpg");
     assert_eq!(store.photos(DEFAULT_OWNER_ID).unwrap().len(), 1);
