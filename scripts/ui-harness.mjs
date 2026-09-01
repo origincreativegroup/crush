@@ -516,6 +516,51 @@ const tests = {
     await poll(async () => (await frame.locator("#video-rows tr.video-row").count()) === 1);
   },
 
+  async "relocate-moved-file"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const row = frame.locator("#video-rows tr.video-row");
+    await row.waitFor({ state: "visible" });
+    const locate = frame.locator("#locate-asset");
+    // The affordance is inert until the selected row's source is really missing.
+    assert.equal(await locate.isDisabled(), true);
+    await row.click();
+    await poll(() => locate.isEnabled());
+    // First attempt picks a different file: refused honestly, nothing changes.
+    await locate.click();
+    await poll(async () =>
+      (await visibleText(frame.locator("#library-message"))).includes("SHA-256 mismatch"));
+    assert.match(
+      await visibleText(frame.locator("#library-message")),
+      /not the same media Crush indexed.*Nothing was changed/s,
+    );
+    assert.equal(await locate.isDisabled(), false);
+    assert.equal(await visibleText(row.locator(".file-path")), "/Volumes/Footage/Launch Day");
+    // Second attempt picks the real moved copy: verified identical and relinked.
+    await locate.click();
+    await poll(async () =>
+      (await visibleText(frame.locator("#library-message")))
+        .includes("The file moved. Crush verified the new copy is identical before relinking"));
+    const relink = (await mockCalls(page))
+      .filter((call) => call.command === "relink_asset")
+      .at(-1);
+    assert.equal(relink.args.id, "video-one");
+    assert.equal(relink.args.newPath, "/Volumes/Footage/moved/rocket-launch.mov");
+    await poll(async () => await locate.isDisabled());
+    // The relinked row shows the new location; its source is no longer missing.
+    assert.equal(await visibleText(row.locator(".file-path")), "/Volumes/Footage/moved");
+  },
+
+  async "ingest-relinked"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    // A finished ingest recognized moved content and re-pointed the existing row; the
+    // Library reports that honestly instead of hiding it inside "skipped".
+    await poll(async () =>
+      (await visibleText(frame.locator("#library-message")))
+        .includes("1 file moved or renamed — relinked to the original index by content"));
+  },
+
   async "search-error"(page) {
     const frame = page.frameLocator("#app-frame");
     const input = frame.locator("#search-input");

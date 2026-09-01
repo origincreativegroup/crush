@@ -12,6 +12,7 @@ const elements = {
   addFolder: document.querySelector("#add-folder"),
   emptyAddFolder: document.querySelector("#empty-add-folder"),
   reindex: document.querySelector("#reindex"),
+  locateAsset: document.querySelector("#locate-asset"),
   removeAsset: document.querySelector("#remove-asset"),
   removeDialog: document.querySelector("#remove-asset-dialog"),
   removeCancel: document.querySelector("#remove-asset-cancel"),
@@ -236,6 +237,7 @@ function renderVideos() {
   const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
   elements.reindex.disabled = !selectedAsset || isIngestActive();
   elements.removeAsset.disabled = !selectedAsset || isIngestActive();
+  elements.locateAsset.disabled = !selectedAsset || isIngestActive() || !selectedAsset.sourceMissing;
 
   for (const video of state.videos) {
     const presentation = videoPresentation(video);
@@ -374,6 +376,7 @@ function renderIndexingStatus() {
   const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
   elements.reindex.disabled = !selectedAsset || active;
   elements.removeAsset.disabled = !selectedAsset || active;
+  elements.locateAsset.disabled = !selectedAsset || active || !selectedAsset.sourceMissing;
   const dot = document.createElement("span");
   dot.className = `status-dot${active ? "" : " idle"}`;
   dot.setAttribute("aria-hidden", "true");
@@ -413,6 +416,17 @@ function managePolling() {
 
 async function onIngestProgress(event) {
   state.jobs = event.payload;
+  // Ingest reports moved/renamed outcomes honestly: the file was re-pointed to the
+  // existing identity row after the same content was recognized at the new path.
+  const finishedIngest = state.jobs.background.find(
+    (task) => task.kind === "ingest"
+      && (task.status === "done" || task.status === "cancelled")
+      && ((task.moved ?? 0) + (task.renamed ?? 0)) > 0,
+  );
+  if (finishedIngest) {
+    const count = (finishedIngest.moved ?? 0) + (finishedIngest.renamed ?? 0);
+    showMessage(`${count} file${count === 1 ? "" : "s"} moved or renamed — relinked to the original index by content.`);
+  }
   try {
     state.videos = await invoke("list_videos");
   } catch {
@@ -461,6 +475,26 @@ async function reindexSelected() {
   try {
     const started = await invoke("reindex_asset", { id: state.selectedVideoId });
     showMessage(`Re-index started · job ${started.jobId.slice(0, 8)}`);
+    await refreshLibrary();
+  } catch (error) {
+    showMessage(String(error), true);
+  }
+}
+
+async function locateMovedFile() {
+  const selectedAsset = state.videos.find((asset) => asset.id === state.selectedVideoId);
+  if (!selectedAsset || isIngestActive() || !selectedAsset.sourceMissing) return;
+  try {
+    const picked = await bridge.dialog.open({
+      directory: false,
+      multiple: false,
+      title: "Locate the moved file",
+    });
+    if (typeof picked !== "string" || !picked) return;
+    const outcome = await invoke("relink_asset", { id: selectedAsset.id, newPath: picked });
+    showMessage(
+      `The file moved. Crush verified the new copy is identical before relinking · ${outcome.newPath}`,
+    );
     await refreshLibrary();
   } catch (error) {
     showMessage(String(error), true);
@@ -551,6 +585,7 @@ function bindActions() {
   elements.emptyAddFolder.addEventListener("click", chooseFolder);
   elements.cancel.addEventListener("click", cancelIngest);
   elements.reindex.addEventListener("click", reindexSelected);
+  elements.locateAsset.addEventListener("click", locateMovedFile);
   elements.removeAsset.addEventListener("click", confirmRemove);
   elements.removeCancel.addEventListener("click", () => {
     state.pendingRemoveId = null;

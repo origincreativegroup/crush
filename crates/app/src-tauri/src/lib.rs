@@ -85,6 +85,10 @@ mod macos {
         status: BackgroundStatus,
         detail: Option<String>,
         error: Option<String>,
+        /// Structured relink counts, set only for finished ingest tasks so the Library
+        /// can report "moved/renamed → relinked" without parsing the detail text.
+        moved: Option<usize>,
+        renamed: Option<usize>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -98,6 +102,15 @@ mod macos {
     struct RemoveOutcome {
         removed: bool,
         kind: String,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RelinkOutcomeView {
+        media_kind: String,
+        id: String,
+        from_path: String,
+        new_path: String,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -135,6 +148,9 @@ mod macos {
         indexed_at: Option<String>,
         shots: usize,
         last_error: Option<String>,
+        /// The recorded source file is not present on disk right now — the honest
+        /// "missing source" state that enables the "Locate moved file…" action.
+        source_missing: bool,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -413,6 +429,8 @@ mod macos {
                 status: BackgroundStatus::Running,
                 detail: Some("checking model assets".to_owned()),
                 error: None,
+                moved: None,
+                renamed: None,
             },
         )?;
         let models_dir = state.paths.models();
@@ -487,6 +505,8 @@ mod macos {
                 status: BackgroundStatus::Running,
                 detail: Some(format!("indexing {}", input.display())),
                 error: None,
+                moved: None,
+                renamed: None,
             },
         )
         .inspect_err(|_| release_ingest_slot(&state.active_ingest, &job_id))?;
@@ -504,8 +524,8 @@ mod macos {
             let result =
                 Pipeline::new(config, paths, spawned_cancellation.clone()).ingest(&input, false);
             let cancelled = spawned_cancellation.is_cancelled();
-            let result = result.map(|summary| ingest_summary(&summary));
-            let completed = complete_background(&tasks, &spawned_job_id, result, cancelled);
+            let completed =
+                complete_ingest_background(&tasks, &spawned_job_id, result, cancelled);
             release_ingest_slot(&active_ingest, &spawned_job_id);
             if completed.is_ok() {
                 if let Ok(snapshot) = job_snapshot(&data_dir, &tasks) {
@@ -535,6 +555,7 @@ mod macos {
                     asset_type: "video".to_owned(),
                     shots: store.shots_for_video(DEFAULT_OWNER_ID, &video.id)?.len(),
                     id: video.id,
+                    source_missing: !Path::new(&video.path).exists(),
                     path: video.path,
                     duration_s: video.duration_s,
                     fps: video.fps,
@@ -550,6 +571,7 @@ mod macos {
                 output.push(VideoView {
                     asset_type: "photo".to_owned(),
                     id: photo.id,
+                    source_missing: !Path::new(&photo.path).exists(),
                     path: photo.path,
                     duration_s: None,
                     fps: None,
@@ -685,6 +707,32 @@ mod macos {
         })())
     }
 
+    /// "Locate moved file…": the user picks the file at its new location, Crush verifies
+    /// the bytes are identical (SHA-256) to the indexed media, and the existing catalog
+    /// row is re-pointed at the new path. A different file is refused and nothing is
+    /// changed; no duplicate row is created and the original file is never modified.
+    #[tauri::command]
+    fn relink_asset(
+        id: String,
+        new_path: String,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<RelinkOutcomeView> {
+        command_result((|| {
+            let outcome = Pipeline::new(
+                state.config.clone(),
+                state.paths.clone(),
+                CancellationToken::default(),
+            )
+            .relink(&id, Path::new(&new_path))?;
+            Ok(RelinkOutcomeView {
+                media_kind: outcome.media_kind.to_owned(),
+                id: outcome.id,
+                from_path: outcome.old_path,
+                new_path: outcome.new_path,
+            })
+        })())
+    }
+
     fn start_reindex(
         app: AppHandle,
         state: State<'_, RuntimeState>,
@@ -712,6 +760,8 @@ mod macos {
                     status: BackgroundStatus::Running,
                     detail: Some(format!("re-indexing {path}")),
                     error: None,
+                    moved: None,
+                    renamed: None,
                 },
             )
             .map_err(anyhow::Error::msg)
@@ -3541,13 +3591,15 @@ mod macos {
 
     fn ingest_summary(summary: &IngestSummary) -> String {
         format!(
-            "discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} recovered={} vectors={}",
+            "discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} moved={} renamed={} recovered={} vectors={}",
             summary.discovered,
             summary.discovered_photos,
             summary.indexed,
             summary.indexed_photos,
             summary.skipped,
             summary.failed,
+            summary.moved,
+            summary.renamed,
             summary.recovered_jobs,
             summary.search_vectors
         )
@@ -3620,6 +3672,46 @@ mod macos {
             Err(error) => {
                 task.status = BackgroundStatus::Failed;
                 task.error = Some(format!("{error:#}"));
+            }
+        }
+        Ok(task.clone())
+    }
+
+    /// Ingest tasks carry the moved/renamed counts as structured fields alongside the
+    /// summary text, so the Library can report relinked files without string parsing.
+    /// Mirrors `complete_background` exactly, plus the two count fields.
+    fn complete_ingest_background(
+        tasks: &Arc<Mutex<BTreeMap<String, BackgroundTask>>>,
+        job_id: &str,
+        result: anyhow::Result<IngestSummary>,
+        cancelled: bool,
+    ) -> CommandResult<BackgroundTask> {
+        let mut tasks = lock(tasks)?;
+        let task = tasks
+            .get_mut(job_id)
+            .ok_or_else(|| format!("background task {job_id} disappeared"))?;
+        match result {
+            Ok(summary) => {
+                task.status = if cancelled {
+                    BackgroundStatus::Cancelled
+                } else {
+                    BackgroundStatus::Done
+                };
+                task.detail = Some(ingest_summary(&summary));
+                task.moved = Some(summary.moved);
+                task.renamed = Some(summary.renamed);
+            }
+            Err(error) if cancelled => {
+                task.status = BackgroundStatus::Cancelled;
+                task.error = Some(format!("{error:#}"));
+                task.moved = None;
+                task.renamed = None;
+            }
+            Err(error) => {
+                task.status = BackgroundStatus::Failed;
+                task.error = Some(format!("{error:#}"));
+                task.moved = None;
+                task.renamed = None;
             }
         }
         Ok(task.clone())
@@ -3731,6 +3823,7 @@ mod macos {
                 cancel_ingest,
                 reindex_video,
                 reindex_asset,
+                relink_asset,
                 remove_asset,
                 import_reel_studio,
                 search,
