@@ -19,11 +19,17 @@
     status: $("#filter-status"),
     usable: $("#filter-usable"),
     blur: $("#filter-blur"),
+    feedback: $("#filter-feedback"),
+    minRating: $("#filter-min-rating"),
     collection: $("#filter-collection"),
     stack: $("#filter-stack"),
     context: $("#filter-context"),
     search: $("#filter-search"),
     reset: $("#filter-reset"),
+    more: $("#filter-more"),
+    moreCount: $("#filter-more-count"),
+    advanced: $("#review-advanced-filters"),
+    activeFilters: $("#review-active-filters"),
     savedSelect: $("#saved-search-select"),
     savedLoad: $("#saved-search-load"),
     savedDelete: $("#saved-search-delete"),
@@ -50,6 +56,7 @@
     metaTags: $("#meta-tags"),
     metaNotes: $("#meta-notes"),
     metadataSave: $("#metadata-save"),
+    detailStandout: $("#detail-standout"),
     detailStack: $("#detail-stack"),
     detailStackRole: $("#detail-stack-role"),
     detailAddStack: $("#detail-add-stack"),
@@ -73,6 +80,7 @@
     applyArmed: false,
     deleteArmed: null,
     deleteTimer: null,
+    appliedFilters: {},
   };
 
   const fileSrc = (path) => bridge.core.convertFileSrc(path);
@@ -84,8 +92,13 @@
 
   function timecode(seconds) {
     if (!Number.isFinite(seconds)) return "—";
-    const total = Math.max(0, Math.floor(seconds));
-    return `${pad(Math.floor(total / 3600))}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
+    const total = Math.max(0, Math.round(seconds));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const remaining = total % 60;
+    return hours > 0
+      ? `${hours}:${pad(minutes)}:${pad(remaining)}`
+      : `${minutes}:${pad(remaining)}`;
   }
 
   function showMessage(text, error = false) {
@@ -105,6 +118,8 @@
     if (el.status.value) args.status = el.status.value;
     if (el.usable.value) args.usable = el.usable.value === "true";
     if (el.blur.value) args.blurRequired = el.blur.value === "true";
+    if (el.feedback.value) args.feedback = el.feedback.value;
+    if (el.minRating.value) args.qualityMin = Number(el.minRating.value);
     if (el.collection.value) args.collectionId = el.collection.value;
     if (el.stack.value) args.stackId = el.stack.value;
     if (el.context.value.trim()) args.contextKey = el.context.value.trim();
@@ -118,6 +133,8 @@
     el.usable.value = args.usable === undefined || args.usable === null ? "" : String(args.usable);
     el.blur.value =
       args.blurRequired === undefined || args.blurRequired === null ? "" : String(args.blurRequired);
+    el.feedback.value = args.feedback || "";
+    el.minRating.value = args.qualityMin === undefined || args.qualityMin === null ? "" : String(args.qualityMin);
     el.collection.value = state.collections.some((set) => set.id === args.collectionId)
       ? args.collectionId
       : "";
@@ -152,7 +169,71 @@
       : "";
   }
 
+  function filterLabel(key, value) {
+    const selectLabels = {
+      kind: el.kind,
+      status: el.status,
+      usable: el.usable,
+      blurRequired: el.blur,
+      feedback: el.feedback,
+      qualityMin: el.minRating,
+      collectionId: el.collection,
+      stackId: el.stack,
+    };
+    const select = selectLabels[key];
+    if (select) return select.selectedOptions[0]?.textContent || String(value);
+    if (key === "contextKey") return `Purpose: ${value}`;
+    if (key === "search") return `Name: ${value}`;
+    return String(value);
+  }
+
+  function clearFilter(key) {
+    const empty = { kind: el.kind, status: el.status, usable: el.usable, blurRequired: el.blur,
+      feedback: el.feedback, qualityMin: el.minRating, collectionId: el.collection,
+      stackId: el.stack, contextKey: el.context, search: el.search }[key];
+    if (!empty) return;
+    empty.value = "";
+    refreshReview();
+  }
+
+  function renderActiveFilters() {
+    const entries = Object.entries(state.appliedFilters);
+    el.activeFilters.replaceChildren();
+    el.activeFilters.hidden = entries.length === 0;
+    if (entries.length) {
+      const lead = document.createElement("span");
+      lead.textContent = "Showing:";
+      el.activeFilters.append(lead);
+    }
+    for (const [key, value] of entries) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "active-filter-chip";
+      chip.textContent = `${filterLabel(key, value)} ×`;
+      chip.setAttribute("aria-label", `Remove filter ${filterLabel(key, value)}`);
+      chip.addEventListener("click", () => clearFilter(key));
+      el.activeFilters.append(chip);
+    }
+    const advancedKeys = ["status", "usable", "feedback", "qualityMin", "blurRequired", "collectionId", "stackId", "contextKey"];
+    const count = advancedKeys.filter((key) => key in state.appliedFilters).length;
+    el.moreCount.textContent = count ? `(${count})` : "";
+  }
+
+  function setAdvancedFiltersVisible(visible) {
+    el.advanced.hidden = !visible;
+    el.more.setAttribute("aria-expanded", String(visible));
+    el.more.firstChild.textContent = visible ? "Fewer filters " : "More filters ";
+  }
+
   // ---------- grid ----------
+  const statusLabels = {
+    done: "Ready",
+    failed: "Failed",
+    pending: "Waiting",
+    split: "Indexing",
+    embedded: "Indexing",
+    transcribed: "Indexing",
+  };
   const statusTones = {
     done: "done",
     failed: "failed",
@@ -182,7 +263,8 @@
     thumb.append(tileBadge(asset));
     const pill = document.createElement("span");
     pill.className = `status-pill ${statusTones[asset.status] || "active"}`;
-    pill.textContent = asset.status;
+    pill.textContent = statusLabels[asset.status] || asset.status;
+    pill.title = `Indexing status: ${asset.status}`;
     thumb.append(pill);
     return thumb;
   }
@@ -345,22 +427,29 @@
     renderSavedSearches();
     renderGrid();
     renderBatchBar();
+    renderActiveFilters();
   }
 
   async function refreshReview() {
+    const filters = filterArgs();
     try {
       const [counts, collections, stacks, saved, assets] = await Promise.all([
         invoke("library_counts"),
         invoke("collection_list"),
         invoke("stack_list"),
         invoke("saved_search_list"),
-        invoke("library_browse", { filter: filterArgs() }),
+        invoke("library_browse", { filter: filters }),
       ]);
       state.counts = counts;
       state.collections = collections;
       state.stacks = stacks;
       state.saved = saved;
       state.assets = assets;
+      state.appliedFilters = { ...filters };
+      // Share the applied Review filter so the pairwise-compare dialog (review.js) can seed
+      // its pool from what is on screen instead of loading the entire library blindly.
+      window.__crushContext = window.__crushContext || {};
+      window.__crushContext.reviewFilters = { ...filters };
       for (const key of [...state.selection.keys()]) {
         if (!assets.some((asset) => `${asset.mediaKind}|${asset.mediaId}` === key)) {
           state.selection.delete(key);
@@ -434,6 +523,7 @@
     el.metaAction.value = loaded ? loaded.action : "";
     el.metaTags.value = loaded ? loaded.tags : "";
     el.metaNotes.value = loaded ? loaded.notes : "";
+    el.detailStandout.checked = loaded ? Boolean(loaded.standout) : false;
     el.metadataSave.disabled = !loaded;
   }
 
@@ -528,6 +618,7 @@
     applyFilterArgs({});
     refreshReview();
   });
+  el.more.addEventListener("click", () => setAdvancedFiltersVisible(el.advanced.hidden));
 
   el.savedForm.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -568,6 +659,9 @@
       return;
     }
     applyFilterArgs(filters);
+    const hasAdvanced = ["status", "usable", "feedback", "qualityMin", "blurRequired", "collectionId", "stackId", "contextKey"]
+      .some((key) => filters[key] !== undefined && filters[key] !== null && filters[key] !== "");
+    if (hasAdvanced) setAdvancedFiltersVisible(true);
     refreshReview();
   });
 
@@ -684,6 +778,24 @@
     } catch (error) {
       showMessage(String(error), true);
       el.metadataSave.disabled = false;
+    }
+  });
+
+  el.detailStandout.addEventListener("change", async () => {
+    const detail = state.detail;
+    if (!detail) return;
+    const wanted = el.detailStandout.checked;
+    el.detailStandout.disabled = true;
+    try {
+      await invoke("set_annotation", { assetType: detail.kind, id: detail.id, fields: { standout: wanted } });
+      showMessage(wanted ? "Marked as a standout." : "Standout flag removed.");
+      await refreshDetailState();
+      await refreshReview();
+    } catch (error) {
+      showMessage(String(error), true);
+      el.detailStandout.checked = !wanted;
+    } finally {
+      el.detailStandout.disabled = false;
     }
   });
 

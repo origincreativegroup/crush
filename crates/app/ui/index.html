@@ -6,9 +6,11 @@
     <title>Crush</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="search.css" />
+    <link rel="stylesheet" href="import.css" />
     <link rel="stylesheet" href="plans.css" />
     <script src="app.js" defer></script>
     <script src="search.js" defer></script>
+    <script src="import.js" defer></script>
     <script src="style.js" defer></script>
     <script src="library.js" defer></script>
     <script src="review.js" defer></script>
@@ -29,7 +31,7 @@
             <h1 id="setup-title">Downloading models</h1>
           </div>
         </div>
-        <p class="setup-copy">About 700 MB, one time. Models stay on this Mac and your footage never leaves it.</p>
+        <p class="setup-copy">About 1.2 GB, one time. Models stay on this Mac and your footage never leaves it.</p>
         <div id="model-list" class="model-list" aria-live="polite"></div>
         <p id="model-error" class="error-message" role="alert" hidden></p>
         <div class="setup-actions">
@@ -60,11 +62,11 @@
           </button>
           <button class="nav-item" id="nav-style" type="button">
             <span class="nav-icon" aria-hidden="true">✦</span>
-            Style
+            Preferences
           </button>
           <button class="nav-item" id="nav-plans" type="button">
             <span class="nav-icon" aria-hidden="true">≡</span>
-            Plans
+            Projects
           </button>
         </nav>
         <footer class="sidebar-footer">
@@ -82,9 +84,11 @@
             <p class="eyebrow">Photo + video index</p>
             <h1 id="library-title">Library</h1>
           </div>
-          <div class="toolbar-actions">
+<div class="toolbar-actions">
             <button id="reindex" class="button secondary" type="button" disabled>Re-index selected</button>
+            <button id="remove-asset" class="button danger" type="button" disabled>Remove from library…</button>
             <button id="cancel" class="button danger" type="button" hidden>Cancel</button>
+            <button id="import-reel-studio" class="button secondary" type="button">Import Reel Studio…</button>
             <button id="add-folder" class="button primary" type="button">Add Folder…</button>
           </div>
         </header>
@@ -95,7 +99,7 @@
           <div id="empty-library" class="empty-state" hidden>
             <div class="empty-icon" aria-hidden="true">＋</div>
             <h2>No media yet</h2>
-            <p>No photos or footage indexed yet. Add a folder to start indexing, or run <span class="mono">crushctl ingest</span>.</p>
+            <p>No photos or footage indexed yet. Add a folder to start indexing.</p>
             <button id="empty-add-folder" class="button primary" type="button">Add Folder…</button>
           </div>
 
@@ -127,63 +131,167 @@
 
       <main id="plans-view" class="workspace" aria-labelledby="plans-title" hidden>
         <header class="toolbar">
-          <div><p class="eyebrow">Selects + sequences</p><h1 id="plans-title">Plans</h1></div>
-          <span class="plans-muted">Documents only · originals untouched</span>
+          <div><p class="eyebrow">Build a reel or selects</p><h1 id="plans-title">Projects</h1></div>
+          <span class="plans-muted">Non-destructive edits · originals untouched</span>
         </header>
         <p id="plans-message" class="library-message" role="status" hidden></p>
         <fieldset id="plans-controls" class="plans-layout">
-          <aside class="plans-list-panel" aria-label="Saved plans">
+          <aside class="plans-list-panel" aria-label="Saved projects">
             <form id="plan-create-form" class="plans-stack">
-              <label>New plan name<input id="plan-new-name" required maxlength="200" placeholder="Summer selects" /></label>
-              <label>Style context<input id="plan-new-context" required value="default" maxlength="200" /></label>
-              <button class="button primary" type="submit">Create plan</button>
+              <label>Project name<input id="plan-new-name" required maxlength="200" placeholder="Summer reel" /></label>
+              <label>Purpose <span class="plans-muted">(optional)</span><input id="plan-new-context" maxlength="200" placeholder="Campaign, social, archive…" /></label>
+              <button class="button primary" type="submit">Create project</button>
             </form>
-            <h2>Saved plans</h2>
+            <h2>Saved projects</h2>
             <div id="plans-list" class="plans-stack"></div>
-            <p id="plans-empty" class="plans-muted">No plans yet. Create one to collect photo selects and video clips.</p>
+            <p id="plans-empty" class="plans-muted">No projects yet. Create one to collect and arrange photos or video clips.</p>
           </aside>
           <div class="plans-main">
-            <p id="plan-no-selection" class="plans-muted">Choose or create a plan. General strong-shot candidates work without a style profile.</p>
-            <section id="plan-editor" hidden aria-label="Plan editor">
+            <p id="plan-no-selection" class="plans-muted">Choose or create a project. Suggested strong shots work before you add any preference examples.</p>
+            <section id="plan-editor" hidden aria-label="Project editor">
               <form id="plan-header-form" class="plans-stack">
                 <div class="plans-fields">
-                  <label>Plan name<input id="plan-name" required maxlength="200" /></label>
-                  <label>Context (fixed for this plan)<input id="plan-context" readonly /></label>
+                  <label>Project name<input id="plan-name" required maxlength="200" /></label>
+                  <label>Purpose<input id="plan-context" readonly /></label>
                 </div>
                 <label>Description<input id="plan-description" /></label>
                 <label>Creative brief<textarea id="plan-brief" rows="2" placeholder="Quiet close-ups, warm evening light…"></textarea></label>
                 <div class="plans-actions">
-                  <button class="button secondary" type="submit">Save plan details</button>
+                  <button class="button secondary" type="submit">Save project details</button>
                   <button id="plan-duplicate" class="button secondary" type="button">Duplicate</button>
-                  <button id="plan-delete" class="button danger" type="button">Delete plan…</button>
+                  <button id="plan-delete" class="button danger" type="button">Delete project…</button>
                   <span id="plan-dirty" class="plans-muted" hidden>Unsaved edits</span>
                 </div>
               </form>
               <section class="plans-candidates" aria-label="Candidate orderings">
                 <div class="plans-actions">
-                  <h2>Find candidates</h2>
-                  <button id="plan-generate" class="button primary" type="button">Refresh candidates</button>
+                  <div><p class="workflow-step">Step 1</p><h2>Find clips and selects</h2></div>
+                  <button id="plan-generate" class="button primary" type="button">Find suggestions</button>
                 </div>
-                <p id="plan-candidate-status" class="plans-muted" role="status">General quality is always available. Add a brief for the second ordering.</p>
+                <p id="plan-candidate-status" class="plans-muted" role="status">Find strong shots. Add a brief to also rank them for this project's story.</p>
                 <div class="plans-columns">
-                  <section aria-labelledby="plan-general-title"><h3 id="plan-general-title">General</h3><p class="plans-muted">Strong-shot quality, independent of your style.</p><div id="plan-general" class="plans-stack"></div></section>
-                  <section aria-labelledby="plan-personal-title"><h3 id="plan-personal-title">Personalized</h3><p id="plan-personal-status" class="plans-muted">Add a brief. Without an eligible profile, this is general brief matching.</p><div id="plan-personal" class="plans-stack"></div></section>
+                  <section aria-labelledby="plan-general-title"><h3 id="plan-general-title">Strong shots</h3><p class="plans-muted">Technical quality, composition, and moment—independent of your preferences.</p><div id="plan-general" class="plans-stack"></div></section>
+                  <section aria-labelledby="plan-personal-title"><h3 id="plan-personal-title">For this project</h3><p id="plan-personal-status" class="plans-muted">Add a brief to match the story you want. Confirmed examples can refine this ordering.</p><div id="plan-personal" class="plans-stack"></div></section>
                 </div>
               </section>
               <section aria-labelledby="plan-sequence-title" class="plans-sequence">
-                <h2 id="plan-sequence-title">Sequence <span id="plan-item-count"></span></h2>
-                <p class="plans-muted">Add, edit, move, or remove items without training the model. “Pick for this context” records explicit feedback separately.</p>
+                <p class="workflow-step">Step 2</p>
+                <h2 id="plan-sequence-title">Arrange and trim <span id="plan-item-count"></span></h2>
+                <p class="plans-muted">Preview source clips, set In and Out, and move them into story order. Nothing here renders or changes source media.</p>
+                <div id="project-preview" class="project-preview" hidden aria-label="Source sequence preview">
+                  <div class="project-preview-stage">
+                    <video id="project-preview-video" preload="metadata" playsinline></video>
+                    <img id="project-preview-photo" alt="Project select preview" hidden />
+                    <p id="project-preview-empty" class="plans-muted">Choose a sequence item to preview it.</p>
+                  </div>
+                  <div class="project-preview-controls">
+                    <button id="project-preview-prev" class="button secondary small" type="button" aria-label="Previous item">←</button>
+                    <button id="project-preview-play" class="button primary small" type="button">Play clip</button>
+                    <button id="project-preview-next" class="button secondary small" type="button" aria-label="Next item">→</button>
+                    <input id="project-preview-scrubber" type="range" min="0" max="0" step="0.01" value="0" aria-label="Preview position" />
+                    <span id="project-preview-time" class="mono">0:00 / 0:00</span>
+                    <button id="project-preview-loop" class="button secondary small" type="button" aria-pressed="false">Loop off</button>
+                  </div>
+                  <p id="project-preview-label" class="plans-muted"></p>
+                  <section id="project-photo-export" class="project-photo-export" hidden aria-labelledby="project-photo-export-title">
+                    <div>
+                      <p id="project-photo-export-step" class="workflow-step">Export selected photo</p>
+                      <h3 id="project-photo-export-title">Create a finished copy</h3>
+                      <p id="project-photo-export-copy" class="plans-muted">Your original stays untouched. Crush verifies the new file before showing it here.</p>
+                    </div>
+                    <div class="photo-export-fields">
+                      <label>File type
+                        <select id="project-photo-preset">
+                          <option value="jpeg-srgb-v1">JPEG — smaller, easy to share</option>
+                          <option value="png-srgb-v1">PNG — lossless</option>
+                          <option value="tiff-srgb-v1">TIFF — lossless 8-bit copy</option>
+                        </select>
+                      </label>
+                      <label>Save to
+                        <span class="photo-export-destination">
+                          <input id="project-photo-destination" readonly placeholder="Choose where to save…" />
+                          <button id="project-photo-choose" class="button secondary small" type="button">Choose…</button>
+                        </span>
+                      </label>
+                    </div>
+                    <details id="project-clip-export-options" class="plans-item-options" hidden>
+                      <summary>Sound options</summary>
+                      <label>Sound
+                        <select id="project-clip-audio">
+                          <option value="source">Keep source sound</option>
+                          <option value="mute">Muted</option>
+                        </select>
+                      </label>
+                    </details>
+                    <div class="plans-actions">
+                      <button id="project-photo-render" class="button primary" type="button" disabled>Render photo</button>
+                      <progress id="project-photo-progress" hidden aria-label="Photo render progress"></progress>
+                      <span id="project-photo-status" class="plans-muted" role="status">Choose where to save the finished copy.</span>
+                    </div>
+                    <section id="project-photo-result" class="photo-export-result" hidden aria-label="Verified photo export">
+                      <div><strong id="project-photo-output-label">Finished photo</strong><code id="project-photo-output-path"></code><button id="project-photo-show-output" class="button secondary small" type="button">Show in Finder</button></div>
+                      <div><strong>Verification manifest</strong><code id="project-photo-manifest-path"></code><button id="project-photo-show-manifest" class="button secondary small" type="button">Show in Finder</button></div>
+                      <details>
+                        <summary>Verification details</summary>
+                        <dl id="project-photo-verification" class="photo-export-verification"></dl>
+                      </details>
+                    </section>
+                  </section>
+                </div>
                 <div id="plan-items" class="plans-stack"></div>
-                <p id="plan-items-empty" class="plans-muted">No selects yet. Add a candidate from either column.</p>
+                <p id="plan-items-empty" class="plans-muted">No sequence yet. Add a suggestion above to begin.</p>
               </section>
               <section class="plans-revisions" aria-labelledby="plan-revisions-title">
-                <h2 id="plan-revisions-title">Saved versions</h2>
+                <p class="workflow-step">Step 3</p>
+                <h2 id="plan-revisions-title">Save a version</h2>
                 <form id="plan-revision-form" class="plans-actions">
                   <label>Version note<input id="plan-revision-label" placeholder="First selects" /></label>
                   <button class="button secondary" type="submit">Save version</button>
                 </form>
                 <div id="plan-revisions" class="plans-stack"></div>
-                <p class="plans-muted">Rendering and export arrive in Task 021. This plan is not a rendered file or a publication approval.</p>
+                <p class="plans-muted">A saved version preserves this edit document. It is not a rendered file or publication approval. Exports snapshot their sequence automatically for the render manifest; those audit snapshots stay out of this list.</p>
+              </section>
+              <section id="project-reel-export" class="project-reel-export" aria-labelledby="project-reel-export-title">
+                <p class="workflow-step">Step 4</p>
+                <h2 id="project-reel-export-title">Export the reel</h2>
+                <p class="plans-muted">Render the saved clip order into one verified video. Originals stay untouched. Photo selects can still be exported individually while photo-hold timing is finalized.</p>
+                <div class="photo-export-fields">
+                  <label>File type
+                    <select id="project-reel-preset">
+                      <option value="mp4-h264-sdr-v1">MP4 — compatible H.264</option>
+                      <option value="mov-h264-sdr-v1">MOV — editing-friendly H.264</option>
+                    </select>
+                  </label>
+                  <label>Save to
+                    <span class="photo-export-destination">
+                      <input id="project-reel-destination" readonly placeholder="Choose where to save…" />
+                      <button id="project-reel-choose" class="button secondary small" type="button">Choose…</button>
+                    </span>
+                  </label>
+                </div>
+                <details class="plans-item-options">
+                  <summary>Sound options</summary>
+                  <label>Sound
+                    <select id="project-reel-audio">
+                      <option value="source">Keep source sound</option>
+                      <option value="mute">Muted</option>
+                    </select>
+                  </label>
+                </details>
+                <div class="plans-actions">
+                  <button id="project-reel-render" class="button primary" type="button" disabled>Render reel</button>
+                  <button id="project-reel-cancel" class="button secondary" type="button" hidden>Cancel render</button>
+                  <progress id="project-reel-progress" hidden aria-label="Reel render progress"></progress>
+                  <span id="project-reel-status" class="plans-muted" role="status">Add clips, save their edits, then choose where to export.</span>
+                </div>
+                <section id="project-reel-result" class="photo-export-result" hidden aria-label="Verified reel export">
+                  <div><strong>Finished reel</strong><code id="project-reel-output-path"></code><button id="project-reel-show-output" class="button secondary small" type="button">Show in Finder</button></div>
+                  <div><strong>Verification manifest</strong><code id="project-reel-manifest-path"></code><button id="project-reel-show-manifest" class="button secondary small" type="button">Show in Finder</button></div>
+                  <details>
+                    <summary>Verification details</summary>
+                    <dl id="project-reel-verification" class="photo-export-verification"></dl>
+                  </details>
+                </section>
               </section>
             </section>
           </div>
@@ -195,18 +303,31 @@
           <div class="search-box">
             <span class="search-icon" aria-hidden="true">⌕</span>
             <input id="search-input" type="search" autocomplete="off" spellcheck="false"
-              placeholder="Describe the shot… e.g. wide shot of the storefront at dusk" aria-label="Search footage" />
+              placeholder="Search subjects, actions, places, or mood…" aria-label="Search media" />
             <kbd class="search-kbd" aria-hidden="true">⌘F</kbd>
           </div>
           <div class="search-meta">
             <span id="result-count" class="result-count" aria-live="polite"></span>
-            <label class="top-select"><span class="sr-only">Results to show</span>
+            <label id="top-control" class="top-select" hidden><span class="sr-only">Results to show</span>
               <select id="top-select"><option value="25">Top 25</option><option value="50" selected>Top 50</option><option value="100">Top 100</option></select>
             </label>
           </div>
         </header>
         <h1 id="search-title" class="sr-only">Search</h1>
         <div id="search-message" class="library-message search-message" role="status" hidden></div>
+        <details class="shortcut-help">
+          <summary>Keyboard shortcuts</summary>
+          <dl>
+            <div><dt>⌘F</dt><dd>Focus search</dd></div>
+            <div><dt>Esc</dt><dd>Clear search / close detail</dd></div>
+            <div><dt>↑ ↓ ← →</dt><dd>Move through results</dd></div>
+            <div><dt>Enter</dt><dd>Open detail</dd></div>
+            <div><dt>Space</dt><dd>Play / pause clip</dd></div>
+            <div><dt>L</dt><dd>Loop clip</dd></div>
+            <div><dt>← → (detail)</dt><dd>Previous / next shot</dd></div>
+            <div><dt>p / x / 1–5 (compare)</dt><dd>Pick / reject / rate the focused side</dd></div>
+          </dl>
+        </details>
         <section id="search-content" class="search-content">
           <div id="search-nothing-indexed" class="empty-state" hidden>
             <div class="empty-icon" aria-hidden="true">▦</div>
@@ -215,14 +336,28 @@
             <button id="go-library" class="button primary" type="button">Open Library</button>
           </div>
           <div id="search-idle" class="empty-state muted" hidden>
-            <p>Type what you're looking for and press Enter.</p>
+            <p>Loading your local media library…</p>
+          </div>
+          <div id="search-busy" class="empty-state muted" hidden>
+            <p>Searching your library…</p>
           </div>
           <div id="search-no-matches" class="empty-state muted" hidden>
             <h2>No matches</h2>
             <p>Try broader words — CLIP understands objects, scenes, and actions better than names.</p>
           </div>
           <div id="search-error" class="error-message search-error" role="alert" hidden></div>
-          <div id="results-grid" class="results-grid" role="listbox" aria-label="Search results" hidden></div>
+          <div id="dam-browser-head" class="dam-browser-head" hidden>
+            <div>
+              <p id="dam-context" class="eyebrow">Local library</p>
+              <h2 id="dam-title">All assets</h2>
+            </div>
+            <div class="dam-kind-switch" role="group" aria-label="Media type">
+              <button class="dam-kind active" type="button" data-kind="" aria-pressed="true">All</button>
+              <button class="dam-kind" type="button" data-kind="photo" aria-pressed="false">Photos</button>
+              <button class="dam-kind" type="button" data-kind="video" aria-pressed="false">Video</button>
+            </div>
+          </div>
+          <div id="results-grid" class="results-grid" role="listbox" aria-label="DAM assets" hidden></div>
         </section>
       </main>
 
@@ -230,11 +365,11 @@
         <header class="toolbar">
           <div>
             <p class="eyebrow">Previous work as evidence</p>
-            <h1 id="style-title">Style</h1>
+            <h1 id="style-title">Preferences</h1>
           </div>
           <div class="toolbar-actions">
-            <button id="style-retrain" class="button secondary" type="button">Retrain profile</button>
-            <button id="style-reset" class="button danger" type="button">Reset profile</button>
+            <button id="style-retrain" class="button secondary" type="button">Update recommendations</button>
+            <button id="style-reset" class="button danger" type="button">Reset recommendations</button>
           </div>
         </header>
 
@@ -242,7 +377,7 @@
 
         <section id="style-content" class="library-content style-content" aria-live="polite">
           <div class="style-status-card">
-            <p class="eyebrow">Ranking profile</p>
+            <p class="eyebrow">How recommendations are ordered</p>
             <p id="style-status-line" class="style-status-line general">General model only</p>
             <p id="style-status-meta" class="style-status-meta"></p>
           </div>
@@ -253,7 +388,7 @@
             <input id="style-set-context" type="text" autocomplete="off" spellcheck="false"
               placeholder="Context (default)" aria-label="Context key" />
             <input id="style-set-description" type="text" autocomplete="off"
-              placeholder="What this set says about your style" aria-label="Description" />
+              placeholder="What this set says about your creative taste" aria-label="Description" />
             <label class="style-scope-control"><span class="sr-only">Set scope</span>
               <select id="style-set-scope" aria-label="Set scope">
                 <option value="whole_set">Whole set counts</option>
@@ -287,6 +422,8 @@
 
         <section class="review-controls">
           <form id="review-filters" class="review-filters">
+            <input id="filter-search" type="search" autocomplete="off" spellcheck="false"
+              placeholder="Search file names…" aria-label="Search file names" />
             <label class="filter-control"><span class="sr-only">Kind</span>
               <select id="filter-kind" aria-label="Kind">
                 <option value="">Photos + shots</option>
@@ -294,49 +431,73 @@
                 <option value="shot">Shots</option>
               </select>
             </label>
-            <label class="filter-control"><span class="sr-only">Status</span>
+            <button id="filter-apply" class="button primary small" type="submit">Show results</button>
+            <button id="filter-more" class="button secondary small" type="button" aria-expanded="false" aria-controls="review-advanced-filters">
+              More filters <span id="filter-more-count" aria-hidden="true"></span>
+            </button>
+            <div id="review-advanced-filters" class="review-advanced-filters" hidden>
+              <label class="filter-control"><span class="sr-only">Status</span>
               <select id="filter-status" aria-label="Status">
-                <option value="">Any status</option>
-                <option value="done">Done</option>
-                <option value="pending">Pending</option>
-                <option value="embedded">Embedded</option>
-                <option value="split">Split</option>
-                <option value="transcribed">Transcribed</option>
+                <option value="">Ready any</option>
+                <option value="done">Ready</option>
+                <option value="pending">Waiting</option>
+                <option value="split">Indexing</option>
+                <option value="embedded">Indexing</option>
+                <option value="transcribed">Indexing</option>
                 <option value="failed">Failed</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Usable</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Usable</span>
               <select id="filter-usable" aria-label="Usable">
                 <option value="">Usable any</option>
                 <option value="true">Usable</option>
                 <option value="false">Unusable</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Blur required</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Editorial</span>
+              <select id="filter-feedback" aria-label="Editorial status">
+                <option value="">Editorial any</option>
+                <option value="pick">Picked</option>
+                <option value="reject">Rejected</option>
+                <option value="rating">Rated</option>
+              </select>
+              </label>
+              <label class="filter-control"><span class="sr-only">Minimum rating</span>
+              <select id="filter-min-rating" aria-label="Minimum rating">
+                <option value="">Rating any</option>
+                <option value="1">★ 1 or more</option>
+                <option value="2">★ 2 or more</option>
+                <option value="3">★ 3 or more</option>
+                <option value="4">★ 4 or more</option>
+                <option value="5">★ 5</option>
+              </select>
+              </label>
+              <label class="filter-control"><span class="sr-only">Blur required</span>
               <select id="filter-blur" aria-label="Blur required">
                 <option value="">Blur any</option>
                 <option value="true">Blur required</option>
                 <option value="false">No blur needed</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Collection</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Collection</span>
               <select id="filter-collection" aria-label="Collection">
                 <option value="">Any collection</option>
               </select>
-            </label>
-            <label class="filter-control"><span class="sr-only">Version stack</span>
+              </label>
+              <label class="filter-control"><span class="sr-only">Version stack</span>
               <select id="filter-stack" aria-label="Version stack">
                 <option value="">Any stack</option>
               </select>
-            </label>
-            <input id="filter-context" type="text" autocomplete="off" spellcheck="false"
-              placeholder="Context" aria-label="Context key" />
-            <input id="filter-search" type="search" autocomplete="off" spellcheck="false"
-              placeholder="File name…" aria-label="Search file names" />
-            <button id="filter-apply" class="button secondary" type="submit">Apply</button>
-            <button id="filter-reset" class="button secondary" type="button">Reset</button>
+              </label>
+              <input id="filter-context" type="text" autocomplete="off" spellcheck="false"
+                placeholder="Purpose" aria-label="Purpose key" />
+              <button id="filter-reset" class="button secondary small" type="button">Clear all</button>
+            </div>
           </form>
-          <form id="saved-search-form" class="saved-search-form">
+          <div id="review-active-filters" class="review-active-filters" aria-live="polite" hidden></div>
+          <details id="saved-search-tools" class="saved-search-tools">
+            <summary>Saved searches</summary>
+            <form id="saved-search-form" class="saved-search-form">
             <label class="filter-control"><span class="sr-only">Saved searches</span>
               <select id="saved-search-select" aria-label="Saved searches">
                 <option value="">Saved searches…</option>
@@ -347,7 +508,8 @@
             <input id="saved-search-name" type="text" autocomplete="off" spellcheck="false"
               placeholder="Save current filters as…" aria-label="Saved search name" />
             <button id="saved-search-save" class="button secondary small" type="submit">Save</button>
-          </form>
+            </form>
+          </details>
         </section>
 
         <div id="batch-bar" class="batch-bar" hidden>
@@ -390,6 +552,13 @@
           <img id="detail-photo" alt="Selected photo" hidden />
           <div id="player-hint" class="player-hint" aria-hidden="true">Space play/pause · L loop · ← → shots</div>
         </div>
+        <div id="detail-playback" class="detail-playback" hidden>
+          <button id="detail-play" class="button primary small" type="button">Play</button>
+          <button id="detail-go-in" class="button secondary small" type="button">Go to In</button>
+          <input id="detail-scrubber" type="range" min="0" max="0" step="0.01" value="0" aria-label="Clip position" />
+          <span id="detail-position" class="mono">0:00 / 0:00</span>
+          <button id="detail-loop" class="button secondary small" type="button" aria-pressed="false">Loop off</button>
+        </div>
         <div class="detail-times">
           <span id="detail-timecodes" class="mono"></span>
           <span id="detail-shot-index" class="detail-shot-index"></span>
@@ -397,11 +566,20 @@
         <div class="detail-actions">
           <button id="copy-timecodes" class="button secondary" type="button">Copy path + timecodes</button>
           <button id="export-clip" class="button secondary" type="button">Export clip…</button>
+          <div id="photo-export" class="photo-detail-export" hidden>
+            <select id="photo-export-preset" aria-label="Photo file type">
+              <option value="jpeg-srgb-v1">JPEG — smaller, easy to share</option>
+              <option value="png-srgb-v1">PNG — lossless</option>
+              <option value="tiff-srgb-v1">TIFF — lossless 8-bit copy</option>
+            </select>
+            <button id="export-photo" class="button secondary" type="button">Export photo…</button>
+          </div>
           <button id="reveal-file" class="button secondary" type="button">Reveal in Finder</button>
           <button id="compare-open" class="button secondary" type="button">Compare…</button>
         </div>
+        <p id="photo-export-status" class="detail-export-status" role="status" hidden></p>
         <div class="detail-feedback" aria-label="Editorial feedback">
-          <span class="eyebrow">Teach my style</span>
+          <span class="eyebrow">Editorial feedback</span>
           <button id="feedback-pick" class="button secondary" type="button">Pick</button>
           <button id="feedback-reject" class="button secondary" type="button">Reject</button>
           <label class="rating-control"><span class="sr-only">Quality rating</span>
@@ -410,9 +588,10 @@
               <option value="3">★ 3</option><option value="4">★ 4</option><option value="5">★ 5</option>
             </select>
           </label>
+          <label class="standout-control"><input id="detail-standout" type="checkbox" /> Standout</label>
         </div>
-        <div class="detail-style" aria-label="Style evidence">
-          <span class="eyebrow">Style evidence</span>
+        <div class="detail-style" aria-label="Preference evidence">
+          <span class="eyebrow">Preference evidence</span>
           <select id="detail-style-set" aria-label="Reference set">
             <option value="">No reference sets yet</option>
           </select>
@@ -499,12 +678,73 @@
     </dialog>
 
     <dialog id="plan-confirm" class="doctor-dialog" aria-labelledby="plan-confirm-title">
-      <h2 id="plan-confirm-title">Confirm plan action</h2>
+      <h2 id="plan-confirm-title">Confirm project action</h2>
       <p id="plan-confirm-copy"></p>
       <form method="dialog" class="plans-actions">
         <button class="button secondary" value="cancel" autofocus>Keep editing</button>
         <button class="button danger" value="confirm">Confirm</button>
       </form>
+    </dialog>
+
+    <dialog id="import-dialog" class="doctor-dialog import-dialog" aria-labelledby="import-title">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">Historical evidence</p>
+          <h2 id="import-title">Import Reel Studio catalogue</h2>
+        </div>
+        <button id="import-close" class="icon-button" type="button" aria-label="Close">×</button>
+      </div>
+      <p class="import-copy">Bring your earlier Reel Studio decisions — reviewed segments, quality and safety notes, and exported reels — into this library. Nothing is uploaded and nothing is written until you apply a dry run you have read.</p>
+      <form id="import-form" class="import-form">
+        <div class="import-field">
+          <label for="import-catalogue">Catalogue (clips.db)</label>
+          <div class="import-picker"><input id="import-catalogue" class="mono" type="text" readonly placeholder="Choose the Reel Studio clips.db" /><button id="import-pick-catalogue" class="button secondary small" type="button">Choose…</button></div>
+        </div>
+        <div class="import-field">
+          <label for="import-originals">Original footage folders (already indexed in Crush)</label>
+          <div class="import-picker"><input id="import-originals" class="mono" type="text" readonly placeholder="No folder chosen" /><button id="import-pick-originals" class="button secondary small" type="button">Add folder…</button></div>
+        </div>
+        <div class="import-field">
+          <label for="import-recipes">Exported reel recipes (JSON, optional)</label>
+          <div class="import-picker"><input id="import-recipes" class="mono" type="text" readonly placeholder="No recipes chosen" /><button id="import-pick-recipes" class="button secondary small" type="button">Add files…</button></div>
+        </div>
+        <details class="import-advanced">
+          <summary>More options</summary>
+          <div class="import-field">
+            <label for="import-library">Reel Studio library folder (improves boundary accuracy)</label>
+            <div class="import-picker"><input id="import-library" class="mono" type="text" readonly placeholder="Optional" /><button id="import-pick-library" class="button secondary small" type="button">Choose…</button></div>
+          </div>
+          <div class="import-field">
+            <label for="import-context">Purpose / context key for imported projects</label>
+            <input id="import-context" type="text" value="default" />
+          </div>
+          <label class="import-check"><input id="import-hash" type="checkbox" /> Also match originals by content hash (slow on 4K footage)</label>
+        </details>
+        <div class="import-actions">
+          <button id="import-dry-run" class="button primary" type="submit">Dry run</button>
+          <button id="import-apply" class="button danger" type="button" disabled>Apply this import</button>
+        </div>
+      </form>
+      <div id="import-status" class="import-status" role="status"></div>
+      <section id="import-report" class="import-report" aria-live="polite" hidden>
+        <p id="import-summary" class="import-summary"></p>
+        <p id="import-writes" class="plans-muted"></p>
+        <div id="import-issues" class="import-issues"></div>
+        <details id="import-details"><summary>Every mapping</summary>
+          <table class="import-table"><thead><tr><th>Segment</th><th>Outcome</th><th>Source seconds</th><th>Boundary basis</th><th>Note</th></tr></thead><tbody id="import-segments"></tbody></table>
+          <table class="import-table"><thead><tr><th>Recipe</th><th>Outcome</th><th>Items</th><th>Note</th></tr></thead><tbody id="import-recipes-rows"></tbody></table>
+        </details>
+        <p id="import-candidates" class="plans-muted" hidden></p>
+      </section>
+    </dialog>
+
+    <dialog id="remove-asset-dialog" class="doctor-dialog" aria-labelledby="remove-asset-title">
+      <h2 id="remove-asset-title">Remove from library?</h2>
+      <p id="remove-asset-copy" class="plans-muted"></p>
+      <div class="plans-actions">
+        <button id="remove-asset-cancel" class="button secondary" type="button">Keep it</button>
+        <button id="remove-asset-confirm" class="button danger" type="button">Remove</button>
+      </div>
     </dialog>
 
     <dialog id="doctor-dialog" class="doctor-dialog">

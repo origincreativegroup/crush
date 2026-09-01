@@ -1,4 +1,4 @@
-// Style panel (Task 018b). Loaded after search.js; owns #style-view and the "Style evidence"
+// Preferences panel (Task 018b). Loaded after search.js; owns #style-view and the preference evidence
 // block inside the asset detail drawer. Confirmed sets are evidence, not human acceptance
 // of the model. Automated eval success must not bypass HANDOFF's held-out proof review.
 
@@ -63,11 +63,11 @@
       el.statusLine.classList.remove("learned");
       el.statusLine.classList.add("general");
       el.statusMeta.textContent = status && status.hasActiveProfile
-        ? "The active profile has not beaten the general model on held-out examples yet."
-        : "Ranking uses the general strong-shot model. Confirm a reference set, then retrain.";
+        ? "Your preference examples have not beaten the general model on held-out examples yet."
+        : "Recommendations use the general strong-shot model. Confirm an example set, then update recommendations.";
       return;
     }
-    el.statusLine.textContent = "Experimental profile · human review pending";
+    el.statusLine.textContent = "Experimental preferences · human review pending";
     el.statusLine.classList.remove("learned");
     el.statusLine.classList.add("general");
     const parts = [`Automated pair evaluation ${metric(status.heldOutMetric)} vs baseline ${metric(status.baselineMetric)}`];
@@ -93,7 +93,7 @@
   function disarmReset() {
     clearTimeout(state.resetTimer);
     state.resetArmed = false;
-    el.reset.textContent = "Reset profile";
+    el.reset.textContent = "Reset recommendations";
     el.reset.classList.remove("armed");
   }
 
@@ -143,7 +143,7 @@
       toggle.addEventListener("click", () =>
         withButton(toggle, async () => {
           await invoke("reference_set_disable", { setId: set.id });
-          showMessage(`Disabled “${set.name}” — the trainer ignores it until re-confirmed.`);
+          showMessage(`Disabled “${set.name}” — its examples are ignored until re-confirmed.`);
           await refreshStyle();
         }));
     } else {
@@ -151,7 +151,7 @@
       toggle.addEventListener("click", () =>
         withButton(toggle, async () => {
           await invoke("reference_set_confirm", { setId: set.id });
-          showMessage(`Confirmed “${set.name}” — its examples now count as style evidence.`);
+          showMessage(`Confirmed “${set.name}” — its examples can now shape recommendations.`);
           await refreshStyle();
         }));
     }
@@ -257,22 +257,22 @@
       disarmReset();
       const count = await invoke("style_profile_reset");
       showMessage(count > 0
-        ? "Profile reset — ranking uses the general model."
-        : "No active profile to reset.");
+        ? "Recommendations reset to the general model."
+        : "Recommendations already use the general model.");
       await refreshStyle();
     }));
 
   el.retrain.addEventListener("click", () =>
     withButton(el.retrain, async () => {
-      el.retrain.textContent = "Retraining…";
+      el.retrain.textContent = "Updating…";
       try {
         const outcome = await invoke("style_profile_retrain");
         showMessage(outcome.trained
-          ? "Profile retrained from current evidence."
-          : "Not enough evidence yet — the previous profile is unchanged.");
+          ? "Recommendations updated from your confirmed examples."
+          : "Not enough evidence yet — recommendations are unchanged.");
         await refreshStyle();
       } finally {
-        el.retrain.textContent = "Retrain profile";
+        el.retrain.textContent = "Update recommendations";
       }
     }));
 

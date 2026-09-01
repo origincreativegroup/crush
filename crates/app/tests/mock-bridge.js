@@ -69,12 +69,17 @@
         lastError: "FFmpeg could not decode frame 218 near 00:00:07.08",
       },
     ],
+    // Keep a stale projected error deliberately: the newest successful job is the
+    // authoritative state even if a list refresh arrives out of order.
+    "recovered-row": () => [{ ...video, lastError: "Older failure" }],
     "photo-row": () => [{ ...video }, { ...photo }],
     "search-error": () => [{ ...video }],
+    "dam-home": () => [{ ...video }, { ...photo }],
     feedback: () => [{ ...video }],
     "style-panel": () => [{ ...video }, { ...photo }],
     "style-add-item": () => [{ ...video }],
   }[scenario]?.() ?? [];
+  let libraryList = library;
 
   const pipeline = [];
   const background = [];
@@ -91,6 +96,36 @@
       error: "FFmpeg could not decode frame 218 near 00:00:07.08",
       debug_dir: "/tmp/crush-debug/job-failed",
     });
+  }
+  if (scenario === "recovered-row") {
+    // The real store returns newest first. A successful retry must suppress the older
+    // failure rather than leaving a stale expandable error under a Done row.
+    pipeline.push(
+      {
+        id: "job-recovered",
+        owner_id: "local",
+        video_id: "video-one",
+        stage: "transcribe",
+        status: "done",
+        started_at: "2026-08-28T12:05:00Z",
+        finished_at: "2026-08-28T12:05:10Z",
+        duration_ms: 10000,
+        error: null,
+        debug_dir: null,
+      },
+      {
+        id: "job-older-failure",
+        owner_id: "local",
+        video_id: "video-one",
+        stage: "split",
+        status: "failed",
+        started_at: "2026-08-28T11:55:00Z",
+        finished_at: "2026-08-28T11:55:10Z",
+        duration_ms: 10000,
+        error: "FFmpeg could not decode frame 218 near 00:00:07.08",
+        debug_dir: "/tmp/crush-debug/job-older-failure",
+      },
+    );
   }
   if (scenario === "ingest-cancel") {
     pipeline.push({
@@ -383,7 +418,9 @@
   // where set: photo-two carries the flagged profile (unusable + blur required + faces).
   const reviewScenario = [
     "library-grid",
+    "dam-home",
     "library-bulk",
+    "library-feedback",
     "library-flags",
     "library-saved-search",
     "compare-view",
@@ -478,6 +515,10 @@
       }]
     : [];
   const annotationEdits = new Map();
+  // Latest editorial outcome per media id, keyed by `photo|<id>` / `shot|<id>`. The mock's
+  // review_batch and record_feedback settle these the way the real store appends feedback
+  // events, so the new feedback filter has an observable, stateful target.
+  const feedbackState = new Map();
 
   const findReviewAsset = (assetType, mediaId) => {
     const kind = assetType === "photo" ? "photo" : "shot";
@@ -487,6 +528,9 @@
     if (!asset) throw `No ${kind} ${mediaId}`;
     return asset;
   };
+
+  const reviewFeedback = (asset) =>
+    feedbackState.get(`${asset.mediaKind}|${asset.mediaId}`) || null;
 
   const reviewBrowse = (filter = {}) =>
     reviewAssets
@@ -503,6 +547,10 @@
           && filter.blurRequired !== null
           && asset.blurRequired !== filter.blurRequired
         ) {
+          return false;
+        }
+        if (filter.feedback && reviewFeedback(asset) !== filter.feedback) return false;
+        if (filter.qualityMin != null && (asset.quality == null || asset.quality < filter.qualityMin)) {
           return false;
         }
         if (filter.collectionId && !asset.collectionIds.includes(filter.collectionId)) return false;
@@ -526,10 +574,11 @@
       action: edits.action ?? "",
       tags: edits.tags ?? asset.tags,
       notes: edits.notes ?? "",
-      usable: asset.usable,
-      facesVisible: asset.facesVisible,
-      nametagsVisible: asset.nametagsVisible,
-      blurRequired: asset.blurRequired,
+      standout: edits.standout ?? asset.standout ?? false,
+      usable: edits.usable ?? asset.usable,
+      facesVisible: edits.facesVisible ?? asset.facesVisible,
+      nametagsVisible: edits.nametagsVisible ?? asset.nametagsVisible,
+      blurRequired: edits.blurRequired ?? asset.blurRequired,
     };
   };
 
@@ -545,14 +594,31 @@
     const { items, revisions, ...view } = plan;
     return { ...view, itemCount: items.length };
   };
-  const planKind = (assetType) => assetType === "photo" ? "photo" : "shot";
+  const planKind = (assetType) => assetType === "photo" ? "photo" : assetType === "span" ? "span" : "shot";
+  if (["plans-historical", "plans-span-export"].includes(scenario)) {
+    plans.set("plan-hist", {
+      id: "plan-hist", name: "Reel Studio · Healthy Earth", contextKey: "default",
+      description: "Imported from Reel Studio recipe healthy-earth.json (historical; recipe reel-studio-healthy-earth v1)", brief: "",
+      items: [{
+        mediaKind: "span", mediaId: "span-hist-1", position: 0, startS: 3.45, endS: 4.45, pacing: null, cropX: 0.42, gradeJson: null,
+        reason: "Reel Studio segment V1-0001_S1 (historical choice)",
+        signalsJson: JSON.stringify({ candidate: { kind: "span", path: video.path, start_s: 3.2, end_s: 5.95, boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0 }, historical: { source: "reel_studio", external_id: "V1-0001_S1", used_in: "reel-01" } }),
+        origin: "historical", rank: null, profileVersion: null,
+        provenanceJson: JSON.stringify({ source: "reel_studio", external_id: "V1-0001_S1", boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0 }),
+        addedAt: "2026-08-30T12:00:00Z",
+      }],
+      revisions: [{ revision: 1, label: "imported from Reel Studio", createdAt: "2026-08-30T12:00:00Z" }],
+      createdAt: "2026-08-30T12:00:00Z", updatedAt: "2026-08-30T12:00:00Z",
+    });
+  }
   const planItemFor = (plan, args) => {
     const item = plan.items.find((item) => item.mediaId === args.mediaId && item.mediaKind === planKind(args.assetType));
     if (!item) throw "Plan item not found";
     return item;
   };
   const validatePlanItem = (item) => {
-    if (item.mediaKind === "shot" && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
+    if ((item.mediaKind === "shot" || item.mediaKind === "span") && !(item.startS >= 3.2 && item.endS <= 5.95 && item.endS > item.startS)) throw "Clip must stay inside source shot";
+    if ((item.origin === "historical" || item.origin === "imported") && item.profileVersion != null) throw "Invalid provenance";
     if ((item.origin === "personal") !== (item.profileVersion != null)) throw "Invalid provenance";
   };
 
@@ -620,20 +686,126 @@
         plans.set(plan.id, plan); return clone(planView(plan));
       }
       case "plan_delete": return plans.delete(args.id);
+      case "render_photo": {
+        return {
+          jobId: "render-job-detail-photo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "d".repeat(64),
+          manifestSha256: "e".repeat(64),
+          sizeBytes: 2097152,
+          mediaType: args.preset.startsWith("jpeg") ? "image/jpeg" : args.preset.startsWith("tiff") ? "image/tiff" : "image/png",
+          width: 6000,
+          height: 4000,
+          durationS: null,
+          completedAt: "2026-08-29T12:40:00Z",
+        };
+      }
+      case "render_project_photo": {
+        if (scenario === "plans-errors") throw "Source photo changed after it was selected";
+        return {
+          jobId: "render-job-demo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "a".repeat(64),
+          manifestSha256: "b".repeat(64),
+          sizeBytes: 3145728,
+          mediaType: args.preset.startsWith("jpeg") ? "image/jpeg" : args.preset.startsWith("tiff") ? "image/tiff" : "image/png",
+          width: 2400,
+          height: 1600,
+          durationS: null,
+          completedAt: "2026-08-29T12:30:00Z",
+        };
+      }
+      case "render_project_clip": {
+        const item = planItemFor(planFor(args.projectId), { assetType: "video", mediaId: args.shotId });
+        if (item.pacing != null) throw "saved pacing is not supported by single-clip export yet; remove the pacing value before rendering";
+        if (item.cropX != null) throw "the saved horizontal crop cannot map exactly to this export; remove it before rendering";
+        const grade = JSON.parse(item.gradeJson || "{}");
+        if (Object.keys(grade).length && grade.mode !== "basic" && grade.mode !== "none") {
+          throw "this clip's saved color treatment cannot be rendered exactly yet; remove it or use a supported basic treatment";
+        }
+        return {
+          jobId: "render-job-clip-demo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "c".repeat(64),
+          manifestSha256: "d".repeat(64),
+          sizeBytes: 8388608,
+          mediaType: args.preset.startsWith("mp4") ? "video/mp4" : "video/quicktime",
+          width: 1920,
+          height: 1080,
+          durationS: 1.8,
+          completedAt: "2026-08-29T12:31:00Z",
+        };
+      }
+      case "render_project_reel": {
+        const plan = planFor(args.projectId);
+        if (!plan.items.length) throw "add at least one clip before rendering a reel";
+        if (plan.items.some((item) => item.mediaKind !== "shot")) throw "whole-reel photo holds need a saved duration and framing contract";
+        return {
+          jobId: "render-job-reel-demo",
+          outputPath: args.destination,
+          manifestPath: `${args.destination}.crush-manifest.json`,
+          outputSha256: "e".repeat(64),
+          manifestSha256: "f".repeat(64),
+          sizeBytes: 12582912,
+          mediaType: args.preset.startsWith("mp4") ? "video/mp4" : "video/quicktime",
+          width: 1920,
+          height: 1080,
+          durationS: plan.items.reduce((total, item) => total + (item.endS - item.startS), 0),
+          completedAt: "2026-08-29T12:32:00Z",
+        };
+      }
+      case "cancel_project_render":
+        return true;
       case "models_status":
         return modelsStatus();
       case "models_download":
         return modelsDownload();
       case "list_videos":
-        return library.map((asset) => ({ ...asset }));
+        return libraryList.map((asset) => ({ ...asset }));
+      case "remove_asset": {
+        const index = libraryList.findIndex((asset) => asset.id === args.id);
+        if (index === -1) throw `No asset ${args.id}`;
+        const [removed] = libraryList.splice(index, 1);
+        emit("ingest-progress", snapshot());
+        return { removed: true, kind: removed.assetType };
+      }
       case "job_status":
         return snapshot();
       case "doctor":
         return "Crush doctor\nffmpeg source=Bundled\nmodels=4/4 present";
       case "cancel_ingest":
         return cancelIngest();
+      case "import_reel_studio": {
+        const apply = Boolean(args.request?.apply);
+        if (!args.request?.catalogue) throw "choose the Reel Studio clips.db first";
+        return clone({
+          import_id: apply ? "import-apply" : "import-dry",
+          mode: apply ? "apply" : "dry_run",
+          catalogue_path: args.request.catalogue,
+          catalogue_sha256: "abc123",
+          context_key: args.request.contextKey,
+          sources: [
+            { clip_id: "V1-0001", source_file: "V1-0001.mp4", resolved_path: "/Volumes/Footage/2026/V1-0001.mp4", video_id: "video-one", matched_by: "path" },
+            { clip_id: "V1-0009", source_file: "V1-0009.mp4", resolved_path: null, video_id: null, matched_by: "missing_file" },
+          ],
+          segments: [
+            { segment_id: "V1-0001_S1", clip_id: "V1-0001", video_id: "video-one", start_s: 3.2, end_s: 5.95, boundary_basis: "catalogue_tc", boundary_tolerance_s: 1.0, outcome: apply ? "unchanged" : "new", reason: "no library folder; catalogue timecodes taken literally with keyframe tolerance" },
+            { segment_id: "V1-0009_S1", clip_id: "V1-0009", video_id: null, start_s: 1, end_s: 2, boundary_basis: "catalogue_tc", boundary_tolerance_s: 0, outcome: "skipped", reason: "source clip is not matched to an indexed video" },
+          ],
+          recipes: [{ file: args.request.recipes?.[0] || "healthy-earth.json", recipe_id: "reel-studio-healthy-earth", plan_name: "Reel Studio · Healthy Earth", items: 1, finished_project: true, outcome: apply ? "unchanged" : "new", reason: null }],
+          issues: [{ kind: "missing_source", subject: "V1-0009", detail: "V1-0009.mp4 was not found under the given originals directories" }],
+          planned_writes: { manual_spans_insert: apply ? 0 : 1, manual_spans_update: 0, render_recipes_insert: apply ? 0 : 1, plans_insert: apply ? 0 : 1, plan_items_insert: apply ? 0 : 1, plan_revisions_insert: apply ? 0 : 1, feedback_events_insert: 0, reference_sets_insert: 0 },
+          reference_set_candidates: ["Reel Studio · Healthy Earth"],
+          started_at: "2026-08-30T12:00:00Z",
+          finished_at: "2026-08-30T12:00:01Z",
+        });
+      }
       case "add_folder":
       case "reindex_video":
+      case "reindex_asset":
         return { jobId: "background-test" };
       case "search": {
         const q = String(args.q || "");
@@ -648,8 +820,23 @@
         return photoDetail(args.id);
       case "shot_at_index":
         return `shot-${args.idx}`;
-      case "record_feedback":
+      case "record_feedback": {
+        const asset = reviewAssets.find(
+          (candidate) =>
+            candidate.mediaKind === (args.assetType === "photo" ? "photo" : "shot")
+            && candidate.mediaId === args.id,
+        );
+        if (asset) {
+          const signal =
+            args.signal === "prefer" ? "prefer"
+            : args.signal === "pick" ? "pick"
+            : args.signal === "reject" ? "reject"
+            : args.signal === "rating" ? "rating"
+            : args.signal;
+          feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, signal);
+        }
         return "feedback-test";
+      }
       case "reference_set_list":
         return styleState.sets.map((set) => ({ ...set }));
       case "reference_set_create": {
@@ -818,14 +1005,22 @@
         const ops = Array.isArray(args.ops) ? args.ops : [];
         for (const op of ops) {
           if (op.op === "rate") {
-            findReviewAsset(op.assetType, op.mediaId).quality = op.rating;
+            const asset = findReviewAsset(op.assetType, op.mediaId);
+            asset.quality = op.rating;
+            feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, "rating");
+          } else if (op.op === "pick") {
+            const asset = findReviewAsset(op.assetType, op.mediaId);
+            feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, "pick");
+          } else if (op.op === "reject") {
+            const asset = findReviewAsset(op.assetType, op.mediaId);
+            feedbackState.set(`${asset.mediaKind}|${asset.mediaId}`, "reject");
           } else if (op.op === "add_to_collection") {
             const asset = findReviewAsset(op.assetType, op.mediaId);
             if (!asset.collectionIds.includes(op.collectionId)) {
               asset.collectionIds.push(op.collectionId);
             }
           }
-          // pick/reject/flag append feedback events; the mock records the call itself.
+          // flag appends a feedback event; the mock records the call itself.
         }
         return ops.length;
       }
@@ -854,8 +1049,12 @@
       },
     },
     dialog: {
-      async open() {
-        return null;
+      async open(options = {}) {
+        calls.push({ command: "dialog.open", args: options });
+        if (scenario !== "import-reel-studio") return null;
+        if (options.directory) return options.multiple ? ["/Volumes/Footage/2026"] : "/Volumes/Video Production";
+        if (options.filters?.[0]?.extensions?.includes("json")) return ["/Users/john/Desktop/healthy-earth.json"];
+        return "/Volumes/Video Production/clips.db";
       },
       async save(options) {
         return `/tmp/${options.defaultPath}`;

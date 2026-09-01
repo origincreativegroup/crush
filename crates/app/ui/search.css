@@ -80,6 +80,49 @@
   padding: 20px 26px 40px;
 }
 
+.dam-browser-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+
+.dam-browser-head h2 {
+  font-size: 18px;
+}
+
+.dam-kind-switch {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #303037;
+  border-radius: 8px;
+  background: #1b1b1f;
+}
+
+.dam-kind {
+  min-height: 27px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  color: #8f8f98;
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.dam-kind:hover {
+  color: #d7d7dc;
+}
+
+.dam-kind.active {
+  color: #fff;
+  background: #34343b;
+  box-shadow: inset 0 1px rgb(255 255 255 / 7%);
+}
+
 .empty-state.muted {
   color: #6f6f78;
 }
@@ -98,6 +141,40 @@
   gap: 12px;
 }
 
+.shortcut-help {
+  margin: 0 0 10px;
+  color: #8a8a93;
+  font-size: 11px;
+}
+
+.shortcut-help summary {
+  cursor: pointer;
+  color: #aaaab4;
+}
+
+.shortcut-help dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 18px;
+  margin: 8px 0 0;
+}
+
+.shortcut-help dl > div {
+  display: flex;
+  gap: 8px;
+}
+
+.shortcut-help dt {
+  color: #c0c0cc;
+  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  min-width: 96px;
+}
+
+.shortcut-help dd {
+  margin: 0;
+  color: #8a8a93;
+}
+
 .button.small {
   min-height: 26px;
   padding: 0 10px;
@@ -106,7 +183,7 @@
 
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 16px 14px;
 }
 
@@ -126,6 +203,17 @@
 .result-card.selected {
   border-color: #4f8cff;
   background: #1c1c20;
+}
+
+.result-card.browse-card {
+  border-color: #242429;
+  background: #18181b;
+}
+
+.result-card.browse-card:hover,
+.result-card.browse-card.selected {
+  border-color: #41414a;
+  background: #1e1e23;
 }
 
 .thumb-box {
@@ -176,6 +264,11 @@
 .badge-score {
   right: 6px;
   color: #bdd1ff;
+}
+
+.badge-standout {
+  right: 6px;
+  color: #f0d78d;
 }
 
 .result-name {
@@ -238,6 +331,29 @@
   box-shadow: -24px 0 60px rgb(0 0 0 / 40%);
 }
 
+/* Keep Review/Search usable while inspecting an asset. The detail surface is a real third
+   column on desktop rather than an overlay that hides the candidate grid underneath it. */
+.app-shell.detail-open {
+  grid-template-columns: 220px minmax(360px, 1fr) minmax(400px, 520px);
+}
+
+.app-shell.detail-open .workspace:not([hidden]) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.app-shell.detail-open .detail-panel {
+  position: relative;
+  grid-column: 3;
+  grid-row: 1;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  width: 100%;
+  min-width: 0;
+  height: 100vh;
+}
+
 .detail-head {
   display: flex;
   align-items: flex-start;
@@ -252,6 +368,7 @@
 
 .player-box {
   position: relative;
+  flex: 0 0 auto;
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 9px;
@@ -292,6 +409,24 @@
   font-size: 13px;
 }
 
+.detail-playback {
+  display: grid;
+  grid-template-columns: auto auto minmax(120px, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-playback input[type="range"] {
+  width: 100%;
+  accent-color: #4f8cff;
+}
+
+#detail-position {
+  color: #a8a8b0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .detail-shot-index {
   color: #8a8a93;
   font-size: 11px;
@@ -302,6 +437,27 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
+}
+
+.photo-detail-export {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.photo-detail-export select {
+  min-height: 32px;
+  border: 1px solid #3a3a43;
+  border-radius: 6px;
+  color: #e8e8ea;
+  background: #24242a;
+}
+
+.detail-export-status {
+  margin: 8px 2px 0;
+  color: #c9d8ce;
+  font-size: 12px;
 }
 
 .detail-feedback {
@@ -324,6 +480,19 @@
   border-radius: 6px;
   color: #e8e8ea;
   background: #24242a;
+}
+
+.standout-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #e8e8ea;
+  cursor: pointer;
+}
+
+.standout-control input {
+  accent-color: #4f8cff;
 }
 
 .detail-nav {

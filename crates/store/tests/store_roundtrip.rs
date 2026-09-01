@@ -9,13 +9,14 @@ use crush_core::{
     DEFAULT_OWNER_ID,
 };
 use crush_store::{
-    AestheticAssessment, AssetFilter, Collection, CollectionItem, EditorialAnnotation,
-    EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, MediaKind, NewJob, Photo,
-    PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus, Plan, PlanItem, PlanItemPatch,
-    PlanOrigin, ProblemKind, ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope,
-    ReferenceSetStatus, ReviewOp, SafetyFlags, SavedSearch, Shot, StackItem, StackItemRole,
-    StackMediaKind, Store, StyleProfile, TranscriptSegment, VersionStack, Video,
-    VideoSourceMetadata, VideoStatus,
+    AestheticAssessment, AssetFilter, CatalogueImport, Collection, CollectionItem,
+    EditorialAnnotation, EmbeddingMeta, FeedbackEvent, FeedbackSignal, JobFilter, ManualSpan,
+    MediaKind, NewJob, NewRenderJob, Photo, PhotoProxyProvenance, PhotoSourceMetadata, PhotoStatus,
+    Plan, PlanItem, PlanItemPatch, PlanOrigin, ProblemKind, ReferenceItemRole, ReferenceSet,
+    ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus, RenderJobStatus, RenderOutput,
+    RenderRecipe, RenderRecipeKind, ReviewOp, SafetyFlags, SavedSearch, Shot, SpanBoundaryBasis,
+    StackItem, StackItemRole, StackMediaKind, Store, StyleProfile, TranscriptSegment, VersionStack,
+    Video, VideoSourceMetadata, VideoStatus,
 };
 use rusqlite::Connection;
 
@@ -139,7 +140,7 @@ fn style_profile(id: &str) -> StyleProfile {
 fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     let directory = TestDir::new("migration");
     let store = Store::open(directory.path()).expect("fresh database should open");
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert_eq!(store.db_path(), directory.path().join("library.db"));
 
     let missing_vector = store.put_vector(DEFAULT_OWNER_ID, "missing-shot", &[1.0]);
@@ -150,7 +151,7 @@ fn fresh_database_migrates_once_and_enforces_connection_pragmas() {
     drop(store);
 
     let reopened = Store::open(directory.path()).expect("second open should be a migration no-op");
-    assert_eq!(reopened.schema_version().unwrap(), 9);
+    assert_eq!(reopened.schema_version().unwrap(), 11);
     let audit = Connection::open(reopened.db_path()).unwrap();
     let journal_mode: String = audit
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -207,7 +208,7 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 11);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].id, "legacy-job");
@@ -218,6 +219,113 @@ fn schema_v3_upgrades_to_strong_shot_components_without_losing_jobs() {
         "video job ownership must survive the photo-jobs migration"
     );
     assert!(jobs[0].photo_id.is_none());
+}
+
+#[test]
+fn schema_upgrade_writes_pre_migration_snapshot_and_keeps_data() {
+    // A first run has no database to back up: no snapshot and no backups directory.
+    let fresh = TestDir::new("migration-snapshot-fresh");
+    let fresh_store = Store::open(fresh.path()).unwrap();
+    assert_eq!(fresh_store.schema_version().unwrap(), 11);
+    assert!(
+        !fresh.path().join("backups").exists(),
+        "a first run must not write a pre-migration snapshot"
+    );
+    drop(fresh_store);
+
+    // Build a v3 database in WAL mode, then leak the connection so its committed frames stay
+    // in the `-wal` sidecar — the crashed-writer case a plain file copy must handle by
+    // checkpointing before copying.
+    let directory = TestDir::new("migration-snapshot");
+    let db = directory.path().join("library.db");
+    std::fs::create_dir_all(directory.path()).unwrap();
+    let connection = Connection::open(&db).unwrap();
+    connection
+        .execute_batch("PRAGMA journal_mode = WAL;")
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_version (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL CHECK (version >= 0)
+             ) STRICT;
+             INSERT INTO schema_version VALUES (1, 0);",
+        )
+        .unwrap();
+    for (version, migration) in [
+        (1, include_str!("../migrations/0001_init.sql")),
+        (2, include_str!("../migrations/0002_dam_feedback.sql")),
+        (3, include_str!("../migrations/0003_source_fidelity.sql")),
+    ] {
+        connection.execute_batch(migration).unwrap();
+        connection
+            .execute(
+                "UPDATE schema_version SET version = ?1 WHERE singleton = 1",
+                [version],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO videos (
+                id, owner_id, path, sha256, duration_s, fps, width, height, has_audio, status
+             ) VALUES ('legacy-video', 'local', '/legacy.mov', 'legacy-sha', 1.0, 24.0,
+                       1920, 1080, 1, 'done')",
+            [],
+        )
+        .unwrap();
+    std::mem::forget(connection);
+
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 11);
+    let videos = store.videos(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(videos.len(), 1, "the upgraded database keeps its data");
+    assert_eq!(videos[0].id, "legacy-video");
+    assert_eq!(videos[0].path, "/legacy.mov");
+
+    let backups_dir = directory.path().join("backups");
+    let snapshots: Vec<_> = std::fs::read_dir(&backups_dir)
+        .expect("the upgrade should create the backups directory")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(snapshots.len(), 1, "exactly one pre-migration snapshot");
+    let snapshot_path = snapshots[0].path();
+    let snapshot_name = snapshot_path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        snapshot_name.starts_with("library-pre-v3-") && snapshot_name.ends_with(".db"),
+        "snapshot {snapshot_name} should record the pre-upgrade schema version"
+    );
+
+    // The snapshot is a complete v3 database: the WAL frames were checkpointed before the
+    // copy, so the committed video row is inside the copied file.
+    let snapshot = Connection::open(&snapshot_path).unwrap();
+    let version: i64 = snapshot
+        .query_row(
+            "SELECT version FROM schema_version WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 3);
+    let path: String = snapshot
+        .query_row(
+            "SELECT path FROM videos WHERE id = 'legacy-video'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(path, "/legacy.mov");
+    drop(snapshot);
+
+    // Reopening with no pending migrations must not add another snapshot.
+    drop(store);
+    let reopened = Store::open(directory.path()).unwrap();
+    assert_eq!(reopened.schema_version().unwrap(), 11);
+    let snapshots_after = std::fs::read_dir(&backups_dir).unwrap().count();
+    assert_eq!(
+        snapshots_after, 1,
+        "no new snapshot without pending migrations"
+    );
 }
 
 #[test]
@@ -270,7 +378,7 @@ fn schema_v4_jobs_gain_photo_support_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 11);
     let jobs = store.jobs(DEFAULT_OWNER_ID, &JobFilter::default()).unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].stage, Stage::Split);
@@ -1700,7 +1808,7 @@ fn schema_v4_upgrades_to_hardened_feedback_without_losing_data() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert!(store
         .photo_by_id(DEFAULT_OWNER_ID, "legacy-photo")
         .unwrap()
@@ -2267,6 +2375,7 @@ fn plan_item(plan_id: &str, media_kind: MediaKind, media_id: &str) -> PlanItem {
         origin: PlanOrigin::General,
         rank: None,
         profile_version: None,
+        provenance_json: "{}".to_owned(),
         added_at: Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap(),
     }
 }
@@ -3356,7 +3465,7 @@ fn schema_v7_upgrades_to_collections_without_losing_rows() {
     drop(connection);
 
     let store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(
         store
@@ -3974,7 +4083,7 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
     drop(connection);
 
     let mut store = Store::open(directory.path()).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert_eq!(store.videos(DEFAULT_OWNER_ID).unwrap().len(), 1);
     assert_eq!(store.feedback_events(DEFAULT_OWNER_ID).unwrap().len(), 1);
     // The v9 plan surfaces are live on the upgraded database.
@@ -3994,4 +4103,981 @@ fn schema_v8_upgrades_to_plans_without_losing_rows() {
         .plan_save_revision(DEFAULT_OWNER_ID, "plan-upgrade", "after upgrade")
         .unwrap();
     assert_eq!(revision.revision, 1);
+}
+
+#[test]
+fn reel_recipe_v2_round_trips_reel_studio_intent_and_keeps_v1_compatible() {
+    let directory = TestDir::new("reel-recipe-v2");
+    let store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 20, 0, 0).unwrap();
+    let schema = serde_json::json!({
+        "schema_version": 2,
+        "kind": "reel",
+        "provenance": {
+            "origin": "historical",
+            "source": "reel_studio",
+            "external_id": "healthy-earth-final",
+            "profile_version": null
+        },
+        "theme": "Healthy Earth",
+        "vibe": "bright",
+        "music": "music/bright/example-track.mp3",
+        "target_seconds": 30.0,
+        "beat_snap": true,
+        "format": "9:16",
+        "music_volume": 82.0,
+        "watermark": "br",
+        "cover": {"id": "V1-0001_S1", "time": 2.4},
+        "sequence": [
+            {
+                "id": "V1-0001_S1",
+                "in": 1.0,
+                "out": 4.0,
+                "crop_x": 0.42,
+                "crop_kf": [{"t": 1.0, "x": 0.42}, {"t": 3.4, "x": 0.61}],
+                "caption": "A short warm opening line",
+                "cap_pos": "low",
+                "transition": "mix",
+                "speed": 1.0,
+                "motion": "in",
+                "clip_volume": 12.0,
+                "grade": {"b": 103, "c": 104, "s": 106, "t": 26, "h": 0,
+                          "v": 14, "sh": 8, "hl": 0}
+            },
+            {
+                "id": "V1-0002_S1",
+                "in": 2.0,
+                "out": 5.0,
+                "crop_x": 0.34,
+                "crop_kf": [],
+                "caption": null,
+                "cap_pos": "mid",
+                "transition": "cut",
+                "speed": 0.75,
+                "motion": "none",
+                "clip_volume": 0,
+                "grade": {"b": 100, "c": 100, "s": 100, "t": 0, "h": 0,
+                          "v": 0, "sh": 0, "hl": 0}
+            }
+        ],
+        "crops": {"V1-0001_S1": 0.42, "V1-0002_S1": 0.34},
+        "output": {"preset": "mp4-h264-sdr-v1"}
+    });
+    let recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "historical-reel".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Reel,
+        name: "Healthy Earth final".to_owned(),
+        schema_json: schema.to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+    assert_eq!(
+        store
+            .render_recipe_get(DEFAULT_OWNER_ID, "historical-reel", 1)
+            .unwrap(),
+        Some(recipe)
+    );
+
+    // Schema v1 remains valid and frozen rather than being reinterpreted as the richer v2 shape.
+    let v1 = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "legacy-reel".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Reel,
+        name: "Legacy reel".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "reel",
+            "transition": {"kind": "cut"},
+            "audio": {"mode": "source"},
+            "output": {"preset": "mov-h264-sdr-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store.render_recipe_create(DEFAULT_OWNER_ID, &v1).unwrap();
+}
+
+#[test]
+fn ordered_reel_v1_rejects_photo_sources_before_queueing() {
+    let directory = TestDir::new("reel-v1-photo-source");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 30, 10, 0, 0).unwrap();
+    let source_hash = "a".repeat(64);
+    let source_photo = reference_photo("photo-hold", &source_hash);
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("photo-reel", "Photo reel"))
+        .unwrap();
+    store
+        .plan_add_item(
+            DEFAULT_OWNER_ID,
+            &plan_item("photo-reel", MediaKind::Photo, "photo-hold"),
+        )
+        .unwrap();
+    let revision = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "photo-reel", "photo hold")
+        .unwrap();
+    let recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "ordered-reel-v1".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Reel,
+        name: "Ordered reel v1".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "reel",
+            "transition": {"kind": "cut"},
+            "audio": {"mode": "mute"},
+            "output": {"preset": "mp4-h264-sdr-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+
+    let error = store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "photo-reel-job".to_owned(),
+                recipe_id: recipe.id,
+                recipe_version: 1,
+                plan_id: Some("photo-reel".to_owned()),
+                plan_revision: Some(revision.revision),
+                source_snapshot_json: serde_json::json!({
+                    "schema_version": 1,
+                    "context_key": "test",
+                    "selection_provenance": {"origin": "general"},
+                    "sources": [{
+                        "media_kind": "photo",
+                        "media_id": source_photo.id,
+                        "source_id": source_photo.id,
+                        "sha256": source_photo.sha256,
+                        "path": source_photo.path,
+                    }]
+                })
+                .to_string(),
+                model_versions_json: serde_json::json!({
+                    "schema_version": 1,
+                    "models": {
+                        "clip": "not_used",
+                        "aesthetic": "not_used",
+                        "personal_style": "not_used"
+                    }
+                })
+                .to_string(),
+                destination_path: directory
+                    .path()
+                    .join("photo-reel.mp4")
+                    .to_string_lossy()
+                    .into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("photo holds need a versioned duration"));
+    assert!(store
+        .render_job_by_id(DEFAULT_OWNER_ID, "photo-reel-job")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn reel_recipe_v2_rejects_unknown_or_incoherent_historical_intent() {
+    let directory = TestDir::new("reel-recipe-v2-invalid");
+    let store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 20, 0, 0).unwrap();
+    let valid = serde_json::json!({
+        "schema_version": 2,
+        "kind": "reel",
+        "provenance": {
+            "origin": "imported",
+            "source": "reel_studio",
+            "external_id": "reel-1",
+            "profile_version": null
+        },
+        "theme": null,
+        "vibe": null,
+        "music": null,
+        "target_seconds": null,
+        "beat_snap": false,
+        "format": "4:5",
+        "music_volume": 100,
+        "watermark": null,
+        "cover": null,
+        "sequence": [{
+            "id": "V1-0001_S1",
+            "in": 1.0,
+            "out": 4.0,
+            "crop_x": 0.5,
+            "crop_kf": [{"t": 1.0, "x": 0.5}, {"t": 4.0, "x": 0.6}],
+            "caption": null,
+            "cap_pos": "low",
+            "transition": "cut",
+            "speed": 1.0,
+            "motion": "none",
+            "clip_volume": 0,
+            "grade": {"b": 100, "c": 100, "s": 100, "t": 0, "h": 0,
+                      "v": 0, "sh": 0, "hl": 0}
+        }],
+        "crops": {"V1-0001_S1": 0.5},
+        "output": {"preset": "mp4-h264-sdr-v1"}
+    });
+    let rejected = |id: &str, schema: serde_json::Value| {
+        store
+            .render_recipe_create(
+                DEFAULT_OWNER_ID,
+                &RenderRecipe {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    id: id.to_owned(),
+                    version: 1,
+                    kind: RenderRecipeKind::Reel,
+                    name: id.to_owned(),
+                    schema_json: schema.to_string(),
+                    created_at: now,
+                },
+            )
+            .is_err()
+    };
+
+    let mut unknown_root = valid.clone();
+    unknown_root["renderer_guess"] = serde_json::json!(true);
+    assert!(rejected("unknown-root", unknown_root));
+
+    let mut unknown_item = valid.clone();
+    unknown_item["sequence"][0]["filter"] = serde_json::json!("cinematic");
+    assert!(rejected("unknown-item", unknown_item));
+
+    let mut bad_grade = valid.clone();
+    bad_grade["sequence"][0]["grade"]["lut"] = serde_json::json!("mystery.cube");
+    assert!(rejected("unknown-grade", bad_grade));
+
+    let mut bad_keyframes = valid.clone();
+    bad_keyframes["sequence"][0]["crop_kf"] =
+        serde_json::json!([{"t": 3.0, "x": 0.5}, {"t": 2.0, "x": 0.6}]);
+    assert!(rejected("bad-keyframes", bad_keyframes));
+
+    let mut bad_crop = valid.clone();
+    bad_crop["crops"]["V1-0001_S1"] = serde_json::json!(0.75);
+    assert!(rejected("mismatched-crop", bad_crop));
+
+    let mut windows_traversal = valid.clone();
+    windows_traversal["music"] = serde_json::json!(r#"music\..\private\track.mp3"#);
+    assert!(rejected("windows-music-traversal", windows_traversal));
+
+    let mut forged_profile = valid.clone();
+    forged_profile["provenance"]["profile_version"] = serde_json::json!(4);
+    assert!(rejected("forged-profile", forged_profile));
+
+    let mut missing_external_id = valid.clone();
+    missing_external_id["provenance"]["external_id"] = serde_json::Value::Null;
+    assert!(rejected("missing-external-id", missing_external_id));
+
+    let mut wrong_cover = valid.clone();
+    wrong_cover["cover"] = serde_json::json!({"id": "V1-missing", "time": 2.0});
+    assert!(rejected("wrong-cover", wrong_cover));
+
+    let clip_v2 = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "clip-v2".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::VideoClip,
+        name: "Not a reel".to_owned(),
+        schema_json: valid.to_string(),
+        created_at: now,
+    };
+    assert!(store
+        .render_recipe_create(DEFAULT_OWNER_ID, &clip_v2)
+        .is_err());
+}
+
+#[test]
+fn render_jobs_freeze_portable_inputs_and_verified_outputs() {
+    let directory = TestDir::new("render-contract");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 19, 0, 0).unwrap();
+    let source_hash = "a".repeat(64);
+    let output_hash = "b".repeat(64);
+    let manifest_hash = "c".repeat(64);
+    let source_path = directory.path().join("original.jpg");
+    let destination = directory.path().join("exports/hero.jpg");
+    let staging = directory.path().join("exports/.crush-render/job-1.partial");
+    let mut source_photo = reference_photo("photo-hero", &source_hash);
+    source_photo.path = source_path.to_string_lossy().into_owned();
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+
+    let recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "photo-web".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Photo,
+        name: "Web JPEG".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "photo",
+            "crop": {"x": 0.1, "y": 0.0, "width": 0.8, "height": 1.0},
+            "rotation_degrees": 90,
+            "grade": {"mode": "none"},
+            "output": {"preset": "jpeg-srgb-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+    assert_eq!(
+        store
+            .render_recipe_get(DEFAULT_OWNER_ID, "photo-web", 1)
+            .unwrap(),
+        Some(recipe.clone())
+    );
+
+    let source_snapshot = serde_json::json!({
+        "schema_version": 1,
+        "context_key": "campaign",
+        "selection_provenance": {"origin": "general", "rank": 0.91},
+        "sources": [{
+            "media_kind": "photo",
+            "media_id": "photo-hero",
+            "source_id": "photo-hero",
+            "sha256": source_hash,
+            "path": source_path
+        }]
+    })
+    .to_string();
+    let model_versions = serde_json::json!({
+        "schema_version": 1,
+        "models": {
+            "clip": "models-v1",
+            "aesthetic": "strong-shot-v1",
+            "personal_style": "not_used"
+        }
+    })
+    .to_string();
+    let job = store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "render-photo-1".to_owned(),
+                recipe_id: recipe.id.clone(),
+                recipe_version: recipe.version,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: source_snapshot.clone(),
+                model_versions_json: model_versions.clone(),
+                destination_path: destination.to_string_lossy().into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+    assert_eq!(job.status, RenderJobStatus::Queued);
+    assert_eq!(job.source_snapshot_json, source_snapshot);
+    assert_eq!(job.model_versions_json, model_versions);
+    assert!(job.frozen_recipe_json.contains("photo-web"));
+    assert!(job.frozen_recipe_json.contains("jpeg-srgb-v1"));
+
+    // A legitimate relink happens after queueing: the job keeps the original audit path while
+    // execution will resolve the current owner-scoped row by ID and verify its stored/file hash.
+    source_photo.path = "/relinked/library/original.jpg".to_owned();
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+    assert_eq!(
+        store
+            .photo_by_id(DEFAULT_OWNER_ID, "photo-hero")
+            .unwrap()
+            .unwrap()
+            .path,
+        source_photo.path
+    );
+
+    assert!(audit
+        .execute(
+            "UPDATE render_recipes SET name = 'rewritten' WHERE id = 'photo-web'",
+            [],
+        )
+        .is_err());
+    assert!(audit
+        .execute(
+            "UPDATE render_jobs SET destination_path = '/tmp/stolen.jpg' WHERE id = 'render-photo-1'",
+            [],
+        )
+        .is_err());
+
+    let attempt = store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-photo-1",
+            &staging.to_string_lossy(),
+            now + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+    assert_eq!(attempt.attempt, 1);
+    store
+        .render_attempt_set_commands(
+            DEFAULT_OWNER_ID,
+            "render-photo-1",
+            1,
+            r#"[{"program":"photo-renderer","backend":"cpu"}]"#,
+        )
+        .unwrap();
+    store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-photo-1", 0.75)
+        .unwrap();
+    assert!(store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-photo-1", 0.5)
+        .is_err());
+    assert!(store
+        .render_job_set_progress(DEFAULT_OWNER_ID, "render-photo-1", 1.0)
+        .is_err());
+    store
+        .render_job_mark_verifying(DEFAULT_OWNER_ID, "render-photo-1")
+        .unwrap();
+    let output = RenderOutput {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "output-photo-1".to_owned(),
+        job_id: "render-photo-1".to_owned(),
+        attempt: 1,
+        output_path: destination.to_string_lossy().into_owned(),
+        output_sha256: output_hash,
+        size_bytes: 42,
+        media_type: "image/jpeg".to_owned(),
+        width: Some(1200),
+        height: Some(1500),
+        duration_s: None,
+        verification_json: r#"{"dimensions":true,"orientation":true,"color":"srgb"}"#.to_owned(),
+        manifest_path: destination
+            .with_extension("jpg.manifest.json")
+            .to_string_lossy()
+            .into_owned(),
+        manifest_json: r#"{"schema_version":1,"verified":true}"#.to_owned(),
+        manifest_sha256: manifest_hash,
+        created_at: now + chrono::Duration::seconds(2),
+    };
+    store.render_job_finish(DEFAULT_OWNER_ID, &output).unwrap();
+    let finished = store
+        .render_job_by_id(DEFAULT_OWNER_ID, "render-photo-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, RenderJobStatus::Done);
+    assert_eq!(finished.progress, 1.0);
+    assert_eq!(
+        store
+            .render_output_by_job(DEFAULT_OWNER_ID, "render-photo-1")
+            .unwrap(),
+        Some(output)
+    );
+    assert!(store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-photo-1",
+            &staging.to_string_lossy(),
+            now + chrono::Duration::seconds(3),
+        )
+        .is_err());
+    assert!(audit
+        .execute("DELETE FROM render_jobs WHERE id = 'render-photo-1'", [])
+        .is_err());
+}
+
+#[test]
+fn atomic_recipe_and_job_queue_rolls_back_recipe_when_job_insert_fails() {
+    let directory = TestDir::new("atomic-render-queue");
+    let mut store = Store::open(directory.path()).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 30, 11, 0, 0).unwrap();
+    let source_hash = "a".repeat(64);
+    let source_photo = reference_photo("atomic-photo", &source_hash);
+    store.upsert_photo(DEFAULT_OWNER_ID, &source_photo).unwrap();
+    let recipe_schema = serde_json::json!({
+        "schema_version": 1,
+        "kind": "photo",
+        "crop": null,
+        "rotation_degrees": 0,
+        "grade": {"mode": "none"},
+        "output": {"preset": "jpeg-srgb-v1"}
+    })
+    .to_string();
+    let source_snapshot = serde_json::json!({
+        "schema_version": 1,
+        "context_key": "test",
+        "selection_provenance": {"origin": "general"},
+        "sources": [{
+            "media_kind": "photo",
+            "media_id": source_photo.id,
+            "source_id": source_photo.id,
+            "sha256": source_photo.sha256,
+            "path": source_photo.path,
+        }]
+    })
+    .to_string();
+    let model_versions = serde_json::json!({
+        "schema_version": 1,
+        "models": {
+            "clip": "not_used",
+            "aesthetic": "not_used",
+            "personal_style": "not_used"
+        }
+    })
+    .to_string();
+    let existing_recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "existing-recipe".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Photo,
+        name: "Existing".to_owned(),
+        schema_json: recipe_schema.clone(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &existing_recipe)
+        .unwrap();
+    store
+        .render_job_create(
+            DEFAULT_OWNER_ID,
+            &NewRenderJob {
+                id: "duplicate-job-id".to_owned(),
+                recipe_id: existing_recipe.id,
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: source_snapshot.clone(),
+                model_versions_json: model_versions.clone(),
+                destination_path: directory
+                    .path()
+                    .join("existing.jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap();
+
+    let one_off = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "one-off-recipe".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::Photo,
+        name: "One-off".to_owned(),
+        schema_json: recipe_schema,
+        created_at: now,
+    };
+    let error = store
+        .render_recipe_and_job_create(
+            DEFAULT_OWNER_ID,
+            &one_off,
+            &NewRenderJob {
+                id: "duplicate-job-id".to_owned(),
+                recipe_id: one_off.id.clone(),
+                recipe_version: 1,
+                plan_id: None,
+                plan_revision: None,
+                source_snapshot_json: source_snapshot,
+                model_versions_json: model_versions,
+                destination_path: directory
+                    .path()
+                    .join("one-off.jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                created_at: now,
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("failed to queue render job"));
+    assert!(store
+        .render_recipe_get(DEFAULT_OWNER_ID, "one-off-recipe", 1)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn render_contract_rejects_unsupported_or_cross_owner_intent_and_retries_safely() {
+    const OWNER_B: &str = "render-owner-b";
+    let directory = TestDir::new("render-validation");
+    let mut store = Store::open(directory.path()).unwrap();
+    let audit = Connection::open(store.db_path()).unwrap();
+    audit
+        .execute(
+            "INSERT INTO owners (id, name, created_at) VALUES (?1, ?2, ?3)",
+            [OWNER_B, "Other renderer", "2026-08-29T19:00:00Z"],
+        )
+        .unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 8, 29, 19, 0, 0).unwrap();
+    let mut recipe = RenderRecipe {
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        id: "clip-safe".to_owned(),
+        version: 1,
+        kind: RenderRecipeKind::VideoClip,
+        name: "Portable clip".to_owned(),
+        schema_json: serde_json::json!({
+            "schema_version": 1,
+            "kind": "video_clip",
+            "in_s": 1.0,
+            "out_s": 3.0,
+            "crop": null,
+            "grade": {"mode": "none"},
+            "transition": {"kind": "cut"},
+            "audio": {"mode": "source"},
+            "output": {"preset": "mp4-h264-sdr-v1"}
+        })
+        .to_string(),
+        created_at: now,
+    };
+    store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .unwrap();
+    let mut owned_video = video("video-1", &"d".repeat(64));
+    owned_video.path = directory
+        .path()
+        .join("source.mov")
+        .to_string_lossy()
+        .into_owned();
+    store.upsert_video(DEFAULT_OWNER_ID, &owned_video).unwrap();
+    recipe.id = "unsupported".to_owned();
+    recipe.schema_json = recipe
+        .schema_json
+        .replace(r#"{"mode":"none"}"#, r#"{"mode":"mystery"}"#);
+    assert!(store
+        .render_recipe_create(DEFAULT_OWNER_ID, &recipe)
+        .is_err());
+
+    let request = NewRenderJob {
+        id: "render-retry".to_owned(),
+        recipe_id: "clip-safe".to_owned(),
+        recipe_version: 1,
+        plan_id: None,
+        plan_revision: None,
+        source_snapshot_json: serde_json::json!({
+            "schema_version": 1,
+            "context_key": "default",
+            "selection_provenance": {"origin": "general"},
+            "sources": [{
+                "media_kind": "video",
+                "media_id": "video-1",
+                "source_id": "video-1",
+                "sha256": "d".repeat(64),
+                "path": directory.path().join("source.mov")
+            }]
+        })
+        .to_string(),
+        model_versions_json: serde_json::json!({
+            "schema_version": 1,
+            "models": {"clip": "not_used", "aesthetic": "not_used", "personal_style": "not_used"}
+        })
+        .to_string(),
+        destination_path: directory
+            .path()
+            .join("clip.mp4")
+            .to_string_lossy()
+            .into_owned(),
+        created_at: now,
+    };
+    // A recipe owned by another owner still cannot bind a local owner's source row.
+    let mut owner_b_recipe = recipe.clone();
+    owner_b_recipe.owner_id = OWNER_B.to_owned();
+    owner_b_recipe.id = "clip-owner-b".to_owned();
+    owner_b_recipe.schema_json = serde_json::json!({
+        "schema_version": 1,
+        "kind": "video_clip",
+        "in_s": 1.0,
+        "out_s": 3.0,
+        "crop": null,
+        "grade": {"mode": "none"},
+        "transition": {"kind": "cut"},
+        "audio": {"mode": "source"},
+        "output": {"preset": "mp4-h264-sdr-v1"}
+    })
+    .to_string();
+    store
+        .render_recipe_create(OWNER_B, &owner_b_recipe)
+        .unwrap();
+    let mut cross_owner = request.clone();
+    cross_owner.id = "render-cross-owner".to_owned();
+    cross_owner.recipe_id = owner_b_recipe.id;
+    assert!(store.render_job_create(OWNER_B, &cross_owner).is_err());
+
+    // Snapshot JSON alone cannot invent an arbitrary source or substitute another content hash.
+    let mut arbitrary_source = request.clone();
+    arbitrary_source.id = "render-arbitrary-source".to_owned();
+    let mut arbitrary_json: serde_json::Value =
+        serde_json::from_str(&arbitrary_source.source_snapshot_json).unwrap();
+    arbitrary_json["sources"][0]["media_id"] = serde_json::json!("video-missing");
+    arbitrary_json["sources"][0]["source_id"] = serde_json::json!("video-missing");
+    arbitrary_source.source_snapshot_json = arbitrary_json.to_string();
+    assert!(store
+        .render_job_create(DEFAULT_OWNER_ID, &arbitrary_source)
+        .is_err());
+
+    let mut forged_hash = request.clone();
+    forged_hash.id = "render-forged-hash".to_owned();
+    let mut forged_json: serde_json::Value =
+        serde_json::from_str(&forged_hash.source_snapshot_json).unwrap();
+    forged_json["sources"][0]["sha256"] = serde_json::json!("e".repeat(64));
+    forged_hash.source_snapshot_json = forged_json.to_string();
+    assert!(store
+        .render_job_create(DEFAULT_OWNER_ID, &forged_hash)
+        .is_err());
+
+    let mut forged_path = request.clone();
+    forged_path.id = "render-forged-path".to_owned();
+    let mut forged_path_json: serde_json::Value =
+        serde_json::from_str(&forged_path.source_snapshot_json).unwrap();
+    forged_path_json["sources"][0]["path"] =
+        serde_json::json!(directory.path().join("not-the-library-source.mov"));
+    forged_path.source_snapshot_json = forged_path_json.to_string();
+    assert!(store
+        .render_job_create(DEFAULT_OWNER_ID, &forged_path)
+        .is_err());
+
+    store.render_job_create(DEFAULT_OWNER_ID, &request).unwrap();
+    let first_staging = directory.path().join(".render-retry-1/clip.partial");
+    store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            &first_staging.to_string_lossy(),
+            now,
+        )
+        .unwrap();
+    store
+        .render_job_fail(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            "encoder unavailable",
+            now + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+    let second_staging = directory.path().join(".render-retry-2/clip.partial");
+    let second = store
+        .render_job_start(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            &second_staging.to_string_lossy(),
+            now + chrono::Duration::seconds(2),
+        )
+        .unwrap();
+    assert_eq!(second.attempt, 2);
+    store
+        .render_job_cancel(
+            DEFAULT_OWNER_ID,
+            "render-retry",
+            now + chrono::Duration::seconds(3),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .render_attempts(DEFAULT_OWNER_ID, "render-retry")
+            .unwrap()
+            .iter()
+            .map(|attempt| attempt.status)
+            .collect::<Vec<_>>(),
+        vec![RenderJobStatus::Failed, RenderJobStatus::Cancelled]
+    );
+    assert!(audit
+        .execute(
+            "UPDATE render_attempts SET progress = 0.0 WHERE job_id = 'render-retry' AND attempt = 2",
+            [],
+        )
+        .is_err());
+}
+
+fn manual_span(
+    id: &str,
+    video_id: &str,
+    external_id: &str,
+    start_s: f64,
+    end_s: f64,
+) -> ManualSpan {
+    ManualSpan {
+        id: id.to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        video_id: video_id.to_owned(),
+        source: "reel_studio".to_owned(),
+        external_id: external_id.to_owned(),
+        start_s,
+        end_s,
+        boundary_basis: SpanBoundaryBasis::CatalogueTc,
+        boundary_tolerance_s: 0.5,
+        library_relative_offset_s: 0.0,
+        description: "girl laughing at the water table".to_owned(),
+        shot_type: "medium".to_owned(),
+        camera_move: "static".to_owned(),
+        subjects: "child".to_owned(),
+        action: "laughing".to_owned(),
+        tags: "water,exhibit".to_owned(),
+        quality: Some(4),
+        standout: true,
+        usable: true,
+        faces_visible: true,
+        nametags_visible: false,
+        blur_required: false,
+        used_in: "reel-01".to_owned(),
+        crop_x: Some(0.42),
+        notes: String::new(),
+        import_id: Some("import-1".to_owned()),
+        imported_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+        updated_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+    }
+}
+
+#[test]
+fn imported_spans_survive_resplit_and_carry_historical_plan_provenance() {
+    let directory = TestDir::new("imported-spans");
+    let mut store = Store::open(directory.path()).unwrap();
+    store
+        .upsert_video(DEFAULT_OWNER_ID, &video("video-rs", "rs-sha"))
+        .unwrap();
+    store
+        .insert_shots(DEFAULT_OWNER_ID, &[shot("shot-rs-0", "video-rs", 0)])
+        .unwrap();
+
+    // A segment that crosses Crush's own scene cut is stored on the original timeline.
+    let stored = store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-a", "video-rs", "V1-0001_S1", 2.0, 9.0),
+        )
+        .unwrap();
+    assert_eq!(stored.id, "span-a");
+    assert_eq!(stored.boundary_basis, SpanBoundaryBasis::CatalogueTc);
+
+    // Re-importing the same external id keeps the id and refreshes evidence.
+    let mut refreshed = manual_span("span-ignored", "video-rs", "V1-0001_S1", 2.0, 9.5);
+    refreshed.quality = Some(5);
+    let refreshed = store
+        .manual_span_upsert(DEFAULT_OWNER_ID, &refreshed)
+        .unwrap();
+    assert_eq!(refreshed.id, "span-a");
+    assert_eq!(refreshed.quality, Some(5));
+    assert_eq!(
+        store
+            .manual_spans_for_video(DEFAULT_OWNER_ID, "video-rs")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Spans cannot exceed the known source duration (12.5 s) and must be well-formed.
+    assert!(store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-late", "video-rs", "V1-0001_S9", 10.0, 13.0),
+        )
+        .is_err());
+    assert!(store
+        .manual_span_upsert(
+            DEFAULT_OWNER_ID,
+            &manual_span("span-bad", "video-rs", "V1-0001_S8", 3.0, 3.0),
+        )
+        .is_err());
+
+    // A plan may sequence the span with honest historical provenance.
+    store
+        .plan_create(DEFAULT_OWNER_ID, &plan("plan-rs", "imported reel"))
+        .unwrap();
+    let mut item = plan_item("plan-rs", MediaKind::Span, "span-a");
+    item.start_s = Some(2.5);
+    item.end_s = Some(6.0);
+    item.origin = PlanOrigin::Historical;
+    item.provenance_json = serde_json::json!({
+        "source": "reel_studio",
+        "external_id": "V1-0001_S1",
+        "import_id": "import-1",
+        "boundary_basis": "catalogue_tc",
+        "boundary_tolerance_s": 0.5,
+    })
+    .to_string();
+    store.plan_add_item(DEFAULT_OWNER_ID, &item).unwrap();
+
+    // Historical/imported items need provenance and never a profile version.
+    let mut bare = plan_item("plan-rs", MediaKind::Span, "span-a");
+    bare.media_id = "span-a".to_owned();
+    bare.start_s = Some(2.5);
+    bare.end_s = Some(3.0);
+    bare.origin = PlanOrigin::Imported;
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &bare).is_err());
+    let mut profiled = item.clone();
+    profiled.profile_version = Some(1);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &profiled).is_err());
+    // Outside the span is refused.
+    let mut wide = item.clone();
+    wide.end_s = Some(11.0);
+    assert!(store.plan_add_item(DEFAULT_OWNER_ID, &wide).is_err());
+
+    // Revisions carry the provenance through a restore.
+    let revision = store
+        .plan_save_revision(DEFAULT_OWNER_ID, "plan-rs", "imported")
+        .unwrap();
+    store
+        .plan_restore_revision(DEFAULT_OWNER_ID, "plan-rs", revision.revision)
+        .unwrap();
+    let items = store.plan_items(DEFAULT_OWNER_ID, "plan-rs").unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].origin, PlanOrigin::Historical);
+    assert_eq!(items[0].media_kind, MediaKind::Span);
+    assert!(items[0].provenance_json.contains("V1-0001_S1"));
+
+    // Rebuilding shots (resplit) must not erase the imported span or its plan item.
+    store
+        .replace_shots(
+            DEFAULT_OWNER_ID,
+            "video-rs",
+            &[shot("shot-rs-new", "video-rs", 0)],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .manual_spans_for_video(DEFAULT_OWNER_ID, "video-rs")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.plan_items(DEFAULT_OWNER_ID, "plan-rs").unwrap().len(),
+        1
+    );
+
+    // Owner isolation.
+    assert!(store
+        .manual_span_by_id("someone-else", "span-a")
+        .unwrap()
+        .is_none());
+
+    // Ledger is append-only.
+    let import = CatalogueImport {
+        id: "import-1".to_owned(),
+        owner_id: DEFAULT_OWNER_ID.to_owned(),
+        source: "reel_studio".to_owned(),
+        mode: "apply".to_owned(),
+        catalogue_path: "/private/clips.db".to_owned(),
+        catalogue_sha256: "abc".to_owned(),
+        recipes_json: "[]".to_owned(),
+        report_json: "{}".to_owned(),
+        started_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap(),
+        finished_at: Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 1).unwrap(),
+    };
+    store
+        .catalogue_import_append(DEFAULT_OWNER_ID, &import)
+        .unwrap();
+    assert_eq!(store.catalogue_imports(DEFAULT_OWNER_ID).unwrap().len(), 1);
+    let connection = Connection::open(store.db_path()).unwrap();
+    assert!(connection
+        .execute("UPDATE catalogue_imports SET mode = 'dry_run'", [])
+        .is_err());
+
+    // Deleting the video cascades spans and their plan items.
+    store
+        .delete_video_cascade(DEFAULT_OWNER_ID, "video-rs")
+        .unwrap();
+    assert!(store.manual_spans(DEFAULT_OWNER_ID).unwrap().is_empty());
+    assert!(store
+        .plan_items(DEFAULT_OWNER_ID, "plan-rs")
+        .unwrap()
+        .is_empty());
 }

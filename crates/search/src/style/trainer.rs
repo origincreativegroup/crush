@@ -217,6 +217,7 @@ fn media_kind_tag(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Photo => "photo",
         MediaKind::Shot => "shot",
+        MediaKind::Span => "span",
     }
 }
 

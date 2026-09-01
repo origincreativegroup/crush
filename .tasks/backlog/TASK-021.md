@@ -15,4 +15,6 @@ Depends: Task 020.
       versions, output checksum, and verification results.
 - [ ] Golden tests verify dimensions, duration, frame boundary, audio, color/orientation, and that
       source files remain byte-identical.
-
+- [ ] Recipe/preset semantics are platform-neutral. Hardware/runtime choices are capability
+      results recorded in manifests; CPU/software fallbacks remain correctness baselines and no
+      recipe embeds CoreML, CUDA, VideoToolbox, NVENC, or DirectML as user intent.

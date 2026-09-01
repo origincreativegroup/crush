@@ -22,13 +22,19 @@
     navPlans: $("#nav-plans"),
     input: $("#search-input"),
     top: $("#top-select"),
+    topControl: $("#top-control"),
     count: $("#result-count"),
     message: $("#search-message"),
     nothingIndexed: $("#search-nothing-indexed"),
     idle: $("#search-idle"),
+    busy: $("#search-busy"),
     noMatches: $("#search-no-matches"),
     error: $("#search-error"),
     grid: $("#results-grid"),
+    damHead: $("#dam-browser-head"),
+    damContext: $("#dam-context"),
+    damTitle: $("#dam-title"),
+    damKinds: [...document.querySelectorAll(".dam-kind")],
     goLibrary: $("#go-library"),
     detail: $("#detail"),
     detailKind: $("#detail-kind"),
@@ -37,10 +43,20 @@
     video: $("#detail-video"),
     photo: $("#detail-photo"),
     playerHint: $("#player-hint"),
+    playback: $("#detail-playback"),
+    play: $("#detail-play"),
+    goIn: $("#detail-go-in"),
+    scrubber: $("#detail-scrubber"),
+    position: $("#detail-position"),
+    loop: $("#detail-loop"),
     timecodes: $("#detail-timecodes"),
     shotIndex: $("#detail-shot-index"),
     copy: $("#copy-timecodes"),
     exportClip: $("#export-clip"),
+    photoExport: $("#photo-export"),
+    photoExportPreset: $("#photo-export-preset"),
+    exportPhoto: $("#export-photo"),
+    photoExportStatus: $("#photo-export-status"),
     reveal: $("#reveal-file"),
     prev: $("#prev-shot"),
     next: $("#next-shot"),
@@ -55,6 +71,12 @@
     view: "library",
     query: "",
     results: [],
+    browseResults: [],
+    searchResults: [],
+    mode: "browse",
+    assetKind: "",
+    browseLoaded: false,
+    browsing: false,
     selected: -1,
     searching: false,
     searched: false,
@@ -89,6 +111,12 @@
   const fileName = (path) => path.split(/[\\/]/).at(-1) || path;
   const displayScore = (score) => Math.round(Math.min(1, Math.max(0, score)) * 100);
   const signedPercent = (value) => `${value >= 0 ? "+" : ""}${Math.round(value * 100)}`;
+  const shortTime = (seconds) => {
+    const total = Math.max(0, Number(seconds) || 0);
+    const minutes = Math.floor(total / 60);
+    const remainder = Math.floor(total % 60);
+    return `${minutes}:${pad(remainder)}`;
+  };
 
   function showMessage(text, { error = false, action = null } = {}) {
     clearTimeout(state.messageTimer);
@@ -126,6 +154,7 @@
       el.input.focus();
       el.input.select();
       refreshIndexedState();
+      if (!el.input.value.trim()) refreshBrowse();
     } else if (view === "review") {
       // library.js owns the review panel contents; it refreshes on this event. The shared
       // detail drawer stays usable from the review grid, so the detail is not closed here.
@@ -165,10 +194,13 @@
     const hasResults = state.results.length > 0;
     const nothing = state.hasIndexedShots === false;
     el.nothingIndexed.hidden = !nothing;
-    el.idle.hidden = nothing || hasResults || state.query.length > 0;
+    el.idle.hidden = nothing || hasResults || state.query.length > 0 || !state.browsing;
+    el.busy.hidden = !state.searching || state.query.length === 0;
     el.noMatches.hidden = nothing || hasResults || !state.query || !state.searched;
     el.grid.hidden = !hasResults;
-    if (!hasResults) el.count.textContent = "";
+    el.damHead.hidden = nothing || (!hasResults && !state.query);
+    el.topControl.hidden = state.mode !== "search";
+    if (!hasResults && !state.query && !state.browsing) el.count.textContent = "";
   }
 
   // ---------- search ----------
@@ -181,9 +213,7 @@
     const query = el.input.value.trim();
     state.query = query;
     if (!query) {
-      state.results = [];
-      state.searched = false;
-      renderResults();
+      refreshBrowse();
       return;
     }
     if (state.searching) {
@@ -192,17 +222,20 @@
     }
     state.searching = true;
     el.error.hidden = true;
+    renderStates();
     const started = performance.now();
     try {
       const results = await invoke("search", { q: query, top: Number(el.top.value) });
       if (el.input.value.trim() === query) {
-        state.results = results;
+        state.mode = "search";
+        state.searchResults = results;
+        state.results = filterByKind(results);
         state.searched = true;
-        state.selected = results.length ? Math.min(Math.max(state.selected, 0), results.length - 1) : -1;
+        state.selected = state.results.length ? Math.min(Math.max(state.selected, 0), state.results.length - 1) : -1;
         renderResults();
         const ms = Math.round(performance.now() - started);
-        el.count.textContent = results.length
-          ? `${results.length} result${results.length === 1 ? "" : "s"} · ${ms} ms`
+        el.count.textContent = state.results.length
+          ? `${state.results.length} match${state.results.length === 1 ? "" : "es"} · ${ms} ms`
           : "";
       }
     } catch (error) {
@@ -210,6 +243,7 @@
       el.error.hidden = false;
     } finally {
       state.searching = false;
+      renderStates();
       if (state.pendingQuery && state.pendingQuery !== query) {
         state.pendingQuery = null;
         runSearch();
@@ -219,13 +253,81 @@
     }
   }
 
+  const browseResult = (asset) => ({
+    asset_type: asset.mediaKind === "photo" ? "photo" : "video",
+    asset_id: asset.mediaId,
+    path: asset.path,
+    start_s: asset.startS,
+    end_s: asset.endS,
+    thumb_path: asset.thumbPath,
+    editorial_quality: asset.quality,
+    browse: true,
+    width: asset.width,
+    height: asset.height,
+    tags: asset.tags,
+    standout: asset.standout,
+    usable: asset.usable,
+  });
+
+  function filterByKind(results) {
+    if (!state.assetKind) return [...results];
+    return results.filter((result) => result.asset_type === state.assetKind);
+  }
+
+  function updateDamHeading() {
+    const kindLabel = state.assetKind === "photo" ? "Photos" : state.assetKind === "video" ? "Video" : "All assets";
+    el.damContext.textContent = state.mode === "search" ? "Semantic search" : "Local library";
+    el.damTitle.textContent = state.mode === "search" ? `Results for “${state.query}”` : kindLabel;
+    for (const button of el.damKinds) {
+      const active = button.dataset.kind === state.assetKind;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    el.grid.setAttribute("aria-label", state.mode === "search" ? "Search results" : "DAM assets");
+  }
+
+  async function refreshBrowse(force = false) {
+    state.query = "";
+    state.mode = "browse";
+    state.searched = false;
+    el.error.hidden = true;
+    if (state.browseLoaded && !force) {
+      state.results = filterByKind(state.browseResults);
+      state.selected = state.results.length ? Math.min(Math.max(state.selected, 0), state.results.length - 1) : -1;
+      renderResults();
+      el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+      return;
+    }
+    if (state.browsing) return;
+    state.browsing = true;
+    state.results = [];
+    renderResults();
+    try {
+      const assets = await invoke("library_browse", { filter: {} });
+      if (el.input.value.trim()) return;
+      state.browseResults = assets.map(browseResult);
+      state.browseLoaded = true;
+      state.results = filterByKind(state.browseResults);
+      state.selected = state.results.length ? 0 : -1;
+      if (!assets.length) state.hasIndexedShots = false;
+      renderResults();
+      el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+    } catch (error) {
+      el.error.textContent = String(error);
+      el.error.hidden = false;
+    } finally {
+      state.browsing = false;
+      renderStates();
+    }
+  }
+
   function resultBreakdownRows(result) {
     const breakdown = result.score_breakdown || {};
     return [
       ["semantic match", breakdown.semantic],
       ["transcript match", breakdown.transcript_boost],
       ["general quality", breakdown.general_aesthetic],
-      ["your style", breakdown.personal_affinity],
+      ["creative fit", breakdown.personal_affinity],
       ["context fit", breakdown.context_fit],
       ["safety penalty", breakdown.penalties],
       [breakdown.editorial < 0 ? "editorial penalty" : "editorial context", breakdown.editorial],
@@ -261,7 +363,7 @@
     el.grid.replaceChildren();
     state.results.forEach((result, index) => {
       const card = document.createElement("div");
-      card.className = "result-card";
+      card.className = `result-card${result.browse ? " browse-card" : ""}`;
       card.dataset.index = String(index);
       card.tabIndex = -1;
       card.setAttribute("role", "option");
@@ -288,11 +390,19 @@
       duration.textContent = result.asset_type === "photo"
         ? (result.editorial_quality ? `★ ${result.editorial_quality}` : "STILL")
         : durationBadge(result.end_s - result.start_s);
-      const score = document.createElement("span");
-      score.className = "badge badge-score mono";
-      score.textContent = String(displayScore(result.score));
-      score.title = breakdownSummary(result);
-      thumb.append(play, duration, score);
+      thumb.append(play, duration);
+      if (result.browse && result.standout) {
+        const standout = document.createElement("span");
+        standout.className = "badge badge-standout";
+        standout.textContent = "Standout";
+        thumb.append(standout);
+      } else if (!result.browse) {
+        const score = document.createElement("span");
+        score.className = "badge badge-score mono";
+        score.textContent = String(displayScore(result.score));
+        score.title = breakdownSummary(result);
+        thumb.append(score);
+      }
 
       const name = document.createElement("div");
       name.className = "file-name result-name";
@@ -302,24 +412,33 @@
       transcript.className = "result-snippet";
       transcript.textContent = result.transcript_snippet || "";
       transcript.hidden = !result.transcript_snippet;
+      const browseMeta = result.browse
+        ? [
+            result.asset_type === "photo" && result.width && result.height ? `${result.width} × ${result.height}` : "",
+            result.tags || "",
+            result.usable === false ? "Needs review" : "",
+          ].filter(Boolean).join(" · ")
+        : "";
       const aesthetic = Number.isFinite(result.aesthetic_score)
         ? `Strong ${Math.round(result.aesthetic_score * 100)}`
         : "";
       const personal = Number.isFinite(result.personal_style_score)
-        ? `Style ${signedPercent(result.personal_style_score)}`
+        ? `Preference fit ${signedPercent(result.personal_style_score)}`
         : "";
       const styleLine = document.createElement("div");
       styleLine.className = "result-style";
-      styleLine.textContent = [personal, aesthetic].filter(Boolean).join(" · ");
+      styleLine.textContent = browseMeta || [personal, aesthetic].filter(Boolean).join(" · ");
       styleLine.hidden = !styleLine.textContent;
 
-      card.append(thumb, name, transcript, styleLine, buildBreakdown(result));
+      card.append(thumb, name, transcript, styleLine);
+      if (!result.browse) card.append(buildBreakdown(result));
       card.addEventListener("click", () => {
         selectResult(index);
         openAssetDetail(result);
       });
       el.grid.append(card);
     });
+    updateDamHeading();
     renderStates();
   }
 
@@ -366,9 +485,11 @@
     if (el.detail.hidden) return;
     el.video.pause();
     el.video.removeAttribute("src");
+    el.video.removeAttribute("data-src");
     el.video.load();
     el.photo.removeAttribute("src");
     el.detail.hidden = true;
+    el.shell.classList.remove("detail-open");
     state.detail = null;
     notifyDetailChanged();
     if (state.view === "search") el.input.focus();
@@ -377,13 +498,17 @@
   function renderDetail() {
     const d = state.detail;
     el.detail.hidden = false;
+    el.shell.classList.add("detail-open");
     el.detail.focus();
     const isPhoto = d.kind === "photo";
     el.detailKind.textContent = isPhoto ? "Photo detail" : "Shot detail";
     el.video.hidden = isPhoto;
     el.photo.hidden = !isPhoto;
     el.playerHint.hidden = isPhoto;
+    el.playback.hidden = isPhoto;
     el.exportClip.hidden = isPhoto;
+    el.photoExport.hidden = !isPhoto;
+    el.photoExportStatus.hidden = true;
     el.prev.hidden = isPhoto;
     el.next.hidden = isPhoto;
     el.notesLabel.textContent = isPhoto ? "Editorial context" : "Transcript";
@@ -398,7 +523,7 @@
       if (Number.isFinite(d.technicalScore)) scores.push(`technical ${Math.round(d.technicalScore * 100)}`);
       if (Number.isFinite(d.compositionScore)) scores.push(`design ${Math.round(d.compositionScore * 100)}`);
       if (Number.isFinite(d.momentScore)) scores.push(`moment ${Math.round(d.momentScore * 100)}`);
-      if (Number.isFinite(d.personalStyleScore)) scores.push(`your style ${signedPercent(d.personalStyleScore)}`);
+      if (Number.isFinite(d.personalStyleScore)) scores.push(`preference fit ${signedPercent(d.personalStyleScore)}`);
       el.shotIndex.textContent = scores.join(" · ") || "Unreviewed";
       el.photo.src = fileSrc(d.photoPath);
       renderPhotoContext(d);
@@ -413,7 +538,7 @@
     if (Number.isFinite(d.technicalScore)) analysis.push(`technical ${Math.round(d.technicalScore * 100)}`);
     if (Number.isFinite(d.compositionScore)) analysis.push(`design ${Math.round(d.compositionScore * 100)}`);
     if (Number.isFinite(d.momentScore)) analysis.push(`moment ${Math.round(d.momentScore * 100)}`);
-    if (Number.isFinite(d.personalStyleScore)) analysis.push(`your style ${signedPercent(d.personalStyleScore)}`);
+    if (Number.isFinite(d.personalStyleScore)) analysis.push(`preference fit ${signedPercent(d.personalStyleScore)}`);
     el.shotIndex.textContent = [`shot ${d.idx + 1} of ${d.shotCount}`, ...analysis].join(" · ");
     el.prev.disabled = d.idx <= 0;
     el.next.disabled = d.idx + 1 >= d.shotCount;
@@ -431,6 +556,10 @@
       el.video.src = src;
       el.video.load();
     }
+    el.scrubber.max = String(length);
+    el.scrubber.value = "0";
+    el.position.textContent = `${shortTime(0)} / ${shortTime(length)}`;
+    updatePlayButton();
     seekAndPlay();
   }
 
@@ -454,9 +583,39 @@
     else el.video.addEventListener("loadedmetadata", start, { once: true });
   }
 
+  function updatePlayButton() {
+    el.play.textContent = el.video.paused ? "Play" : "Pause";
+    el.play.setAttribute("aria-label", el.video.paused ? "Play clip" : "Pause clip");
+  }
+
+  function updatePlaybackPosition() {
+    const d = state.detail;
+    if (!d || d.kind !== "video") return;
+    const length = Math.max(0, d.endS - d.startS);
+    const relative = Math.max(0, Math.min(length, el.video.currentTime - d.startS));
+    el.scrubber.value = String(relative);
+    el.position.textContent = `${shortTime(relative)} / ${shortTime(length)}`;
+  }
+
+  function setLoop(loop) {
+    state.loop = loop;
+    el.loop.setAttribute("aria-pressed", String(loop));
+    el.loop.textContent = loop ? "Loop on" : "Loop off";
+  }
+
+  function toggleDetailPlayback() {
+    const d = state.detail;
+    if (!d || d.kind !== "video") return;
+    if (el.video.paused) {
+      if (el.video.currentTime < d.startS || el.video.currentTime >= d.endS - 0.02) el.video.currentTime = d.startS;
+      el.video.play().catch(() => {});
+    } else el.video.pause();
+  }
+
   el.video.addEventListener("timeupdate", () => {
     const d = state.detail;
     if (!d) return;
+    if (el.video.currentTime < d.startS) el.video.currentTime = d.startS;
     if (el.video.currentTime >= d.endS - 0.02) {
       if (state.loop) {
         el.video.currentTime = d.startS;
@@ -465,7 +624,10 @@
         el.video.currentTime = Math.max(d.startS, d.endS - 0.04);
       }
     }
+    updatePlaybackPosition();
   });
+  el.video.addEventListener("play", updatePlayButton);
+  el.video.addEventListener("pause", updatePlayButton);
   el.video.addEventListener("error", () => {
     showMessage(`Could not play ${fileName(state.detail?.videoPath || "")}. Is the drive mounted?`, { error: true });
   });
@@ -567,6 +729,46 @@
     }
   }
 
+  async function exportPhoto() {
+    const d = state.detail;
+    if (!d || d.kind !== "photo") return;
+    const preset = photoPresetFor(el.photoExportPreset.value);
+    const stem = fileName(d.photoPath).replace(/\.[^.]+$/, "") || "photo";
+    try {
+      const out = await bridge.dialog.save({
+        title: "Export photo",
+        defaultPath: `${stem}_export.${preset.extension}`,
+        filters: [preset.filter],
+      });
+      if (!out) return;
+      el.exportPhoto.disabled = true;
+      el.exportPhoto.textContent = "Exporting…";
+      el.photoExportStatus.hidden = true;
+      const exported = await invoke("render_photo", {
+        photoId: d.id,
+        preset: el.photoExportPreset.value,
+        destination: out,
+      });
+      el.photoExportStatus.hidden = false;
+      el.photoExportStatus.textContent = `Exported and verified · ${exported.outputSha256.slice(0, 12)}…`;
+      showMessage("Photo exported and verified. Your original was not changed.", {
+        action: { label: "Reveal", run: () => invoke("open_in_finder", { path: out }).catch(() => {}) },
+      });
+    } catch (error) {
+      el.photoExportStatus.hidden = false;
+      el.photoExportStatus.textContent = `Photo export failed: ${String(error)}`;
+    } finally {
+      el.exportPhoto.disabled = false;
+      el.exportPhoto.textContent = "Export photo…";
+    }
+  }
+
+  const photoPresetFor = (value) => ({
+    "jpeg-srgb-v1": { extension: "jpg", filter: { name: "JPEG image", extensions: ["jpg", "jpeg"] } },
+    "png-srgb-v1": { extension: "png", filter: { name: "PNG image", extensions: ["png"] } },
+    "tiff-srgb-v1": { extension: "tif", filter: { name: "TIFF image", extensions: ["tif", "tiff"] } },
+  }[value]);
+
   async function revealFile() {
     const d = state.detail;
     if (!d) return;
@@ -604,10 +806,12 @@
       el.input.select();
       return;
     }
-    if (state.view !== "search") return;
-    const inInput = event.target === el.input;
+    const inInput = event.target instanceof HTMLInputElement
+      || event.target instanceof HTMLTextAreaElement
+      || event.target instanceof HTMLSelectElement;
     const detailOpen = !el.detail.hidden;
 
+    if (state.view !== "search") return;
     if (event.key === "Escape") {
       event.preventDefault();
       if (detailOpen) closeDetail();
@@ -618,15 +822,15 @@
       return;
     }
     if (detailOpen) {
+      if (inInput) return;
       if (state.detail?.kind === "photo") return;
       if (event.key === "ArrowLeft") { event.preventDefault(); stepShot(-1); }
       else if (event.key === "ArrowRight") { event.preventDefault(); stepShot(1); }
       else if (event.key === " " && !inInput) {
         event.preventDefault();
-        if (el.video.paused) el.video.play().catch(() => {}); else el.video.pause();
+        toggleDetailPlayback();
       } else if (event.key.toLowerCase() === "l" && !inInput) {
-        state.loop = !state.loop;
-        showMessage(state.loop ? "Loop on" : "Loop off");
+        setLoop(!state.loop);
       }
       return;
     }
@@ -667,9 +871,34 @@
     }
   });
   el.top.addEventListener("change", () => state.query && runSearch());
+  for (const button of el.damKinds) {
+    button.addEventListener("click", () => {
+      state.assetKind = button.dataset.kind || "";
+      const source = state.mode === "search" ? state.searchResults : state.browseResults;
+      state.results = filterByKind(source);
+      state.selected = state.results.length ? 0 : -1;
+      renderResults();
+      el.count.textContent = state.mode === "search"
+        ? `${state.results.length} match${state.results.length === 1 ? "" : "es"}`
+        : `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+    });
+  }
   el.detailClose.addEventListener("click", closeDetail);
+  el.play.addEventListener("click", toggleDetailPlayback);
+  el.goIn.addEventListener("click", () => {
+    if (state.detail?.kind !== "video") return;
+    el.video.currentTime = state.detail.startS;
+    updatePlaybackPosition();
+  });
+  el.scrubber.addEventListener("input", () => {
+    if (state.detail?.kind !== "video") return;
+    el.video.currentTime = state.detail.startS + Number(el.scrubber.value);
+    updatePlaybackPosition();
+  });
+  el.loop.addEventListener("click", () => setLoop(!state.loop));
   el.copy.addEventListener("click", copyTimecodes);
   el.exportClip.addEventListener("click", exportClip);
+  el.exportPhoto.addEventListener("click", exportPhoto);
   el.reveal.addEventListener("click", revealFile);
   el.feedbackPick.addEventListener("click", () => recordFeedback("pick", 1));
   el.feedbackReject.addEventListener("click", () => recordFeedback("reject", -1));
@@ -689,7 +918,11 @@
 
   // Search is the launch view once the shell is visible (app.js shows it after model checks).
   bridge.event.listen("ingest-progress", () => {
-    if (state.view === "search" && state.hasIndexedShots === false) refreshIndexedState();
+    if (state.view === "search" && !el.input.value.trim()) {
+      state.browseLoaded = false;
+      refreshIndexedState();
+      refreshBrowse(true);
+    }
   });
   const observer = new MutationObserver(() => {
     if (!el.shell.hidden) {

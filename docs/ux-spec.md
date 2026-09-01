@@ -9,7 +9,7 @@ One window, four views, one HTML file. Dark, dense, editor-tool feel. The user i
 - Keyboard: Cmd-F focus search, Esc clears/closes detail, ↑↓ move through results, Enter opens detail, Space play/pause in detail.
 
 ## 1. First-run
-Shown when any model is missing. Centered card: "Downloading models (about 700 MB, one time)". One row per file: name, size, progress bar, state. Retry button on failure with the error text. "Continue" enabled when all present. Never skippable — the app is useless without them.
+Shown when any model is missing. Centered card: "Downloading models (about 1.2 GB, one time)". One row per file: name, size, progress bar, state. Retry button on failure with the error text. "Continue" enabled when all present. Never skippable — the app is useless without them.
 
 ## 2. Library
 Toolbar: **Add Folder…** (native picker; drag-drop onto the list also works), Re-index selected, Cancel (only while indexing).

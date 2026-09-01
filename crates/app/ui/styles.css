@@ -844,6 +844,54 @@ nav {
   gap: 8px;
 }
 
+.review-filters > #filter-search {
+  flex: 1 1 280px;
+  max-width: 520px;
+}
+
+.review-advanced-filters {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.review-active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: #8a8a93;
+  font-size: 11px;
+}
+
+.active-filter-chip {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid #41557a;
+  border-radius: 999px;
+  color: #cfe0ff;
+  background: #202b3e;
+  cursor: pointer;
+}
+
+.active-filter-chip:hover {
+  background: #293954;
+}
+
+.saved-search-tools summary {
+  width: max-content;
+  color: #92929b;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.saved-search-tools[open] summary {
+  margin-bottom: 8px;
+}
+
 .filter-control select,
 .review-filters input,
 .saved-search-form input {

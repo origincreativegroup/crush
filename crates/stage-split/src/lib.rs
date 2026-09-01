@@ -1,4 +1,5 @@
 //! Video splitting primitives. Stage orchestration lands in later blueprint tasks.
 
 pub mod ffmpeg;
+pub mod reel;
 pub mod scene;
