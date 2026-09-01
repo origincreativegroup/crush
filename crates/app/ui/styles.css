@@ -26,6 +26,17 @@ button {
   user-select: none;
 }
 
+/* One visible keyboard-focus ring for every interactive element (Task 039 A3). Only
+   three focus rules existed across the stylesheets before this. The ring is the accent
+   blue, which clears the 3:1 non-text bar on every surface it can appear on (4.68:1 on
+   the lightest control fill #26262b, 5.72:1 on #141416). :focus-visible keeps mouse
+   clicks quiet; #search-input and the Projects inputs keep their stronger existing
+   treatments (higher-specificity rules below/overleaf). */
+:focus-visible {
+  outline: 2px solid #4f8cff;
+  outline-offset: 1px;
+}
+
 body {
   min-width: 1100px;
   min-height: 720px;
@@ -1286,4 +1297,22 @@ nav {
   color: #8a8a93;
   font-size: 11px;
   text-align: center;
+}
+
+/* ---- reduced motion (Task 039 A5) ----
+   The app's motion exposure is small (progress fill, chevron rotate, two opacity
+   fades, the review-grid refresh dim) but this is app-wide so nothing added later
+   needs remembering. Transitions collapse to effectively zero instead of none so
+   end-state styles still apply deterministically. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }
