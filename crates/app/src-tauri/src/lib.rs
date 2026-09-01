@@ -86,9 +86,12 @@ mod macos {
         detail: Option<String>,
         error: Option<String>,
         /// Structured relink counts, set only for finished ingest tasks so the Library
-        /// can report "moved/renamed → relinked" without parsing the detail text.
+        /// can report "moved/renamed/duplicate → relinked" without parsing the detail
+        /// text. `moved`/`renamed` count only files whose old copy is really gone; a
+        /// same-content file whose old path still exists is a duplicate copy.
         moved: Option<usize>,
         renamed: Option<usize>,
+        duplicated: Option<usize>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -431,6 +434,7 @@ mod macos {
                 error: None,
                 moved: None,
                 renamed: None,
+                duplicated: None,
             },
         )?;
         let models_dir = state.paths.models();
@@ -507,6 +511,7 @@ mod macos {
                 error: None,
                 moved: None,
                 renamed: None,
+                duplicated: None,
             },
         )
         .inspect_err(|_| release_ingest_slot(&state.active_ingest, &job_id))?;
@@ -761,6 +766,7 @@ mod macos {
                     error: None,
                     moved: None,
                     renamed: None,
+                    duplicated: None,
                 },
             )
             .map_err(anyhow::Error::msg)
@@ -3590,7 +3596,7 @@ mod macos {
 
     fn ingest_summary(summary: &IngestSummary) -> String {
         format!(
-            "discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} moved={} renamed={} recovered={} vectors={}",
+            "discovered={} photos={} indexed={} indexed_photos={} skipped={} failed={} moved={} renamed={} duplicated={} recovered={} vectors={}",
             summary.discovered,
             summary.discovered_photos,
             summary.indexed,
@@ -3599,6 +3605,7 @@ mod macos {
             summary.failed,
             summary.moved,
             summary.renamed,
+            summary.duplicated,
             summary.recovered_jobs,
             summary.search_vectors
         )
@@ -3676,44 +3683,41 @@ mod macos {
         Ok(task.clone())
     }
 
-    /// Ingest tasks carry the moved/renamed counts as structured fields alongside the
-    /// summary text, so the Library can report relinked files without string parsing.
-    /// Mirrors `complete_background` exactly, plus the two count fields.
+    /// Ingest tasks carry the moved/renamed/duplicate counts as structured fields
+    /// alongside the summary text, so the Library can report relinked files without
+    /// string parsing. The status/detail/error transitions are exactly
+    /// [`complete_background`]'s: the summary is flattened to its text first, the count
+    /// fields are written onto the stored task while it is still running, and
+    /// [`complete_background`] then flips the task to its terminal state and returns a
+    /// clone that already carries the counts.
     fn complete_ingest_background(
         tasks: &Arc<Mutex<BTreeMap<String, BackgroundTask>>>,
         job_id: &str,
         result: anyhow::Result<IngestSummary>,
         cancelled: bool,
     ) -> CommandResult<BackgroundTask> {
-        let mut tasks = lock(tasks)?;
-        let task = tasks
-            .get_mut(job_id)
-            .ok_or_else(|| format!("background task {job_id} disappeared"))?;
-        match result {
-            Ok(summary) => {
-                task.status = if cancelled {
-                    BackgroundStatus::Cancelled
-                } else {
-                    BackgroundStatus::Done
-                };
-                task.detail = Some(ingest_summary(&summary));
-                task.moved = Some(summary.moved);
-                task.renamed = Some(summary.renamed);
-            }
-            Err(error) if cancelled => {
-                task.status = BackgroundStatus::Cancelled;
-                task.error = Some(format!("{error:#}"));
-                task.moved = None;
-                task.renamed = None;
-            }
-            Err(error) => {
-                task.status = BackgroundStatus::Failed;
-                task.error = Some(format!("{error:#}"));
-                task.moved = None;
-                task.renamed = None;
-            }
+        let (detail, counts) = match result {
+            Ok(summary) => (
+                Ok(ingest_summary(&summary)),
+                (
+                    Some(summary.moved),
+                    Some(summary.renamed),
+                    Some(summary.duplicated),
+                ),
+            ),
+            Err(error) => (Err(error), (None, None, None)),
+        };
+        {
+            let mut stored = lock(tasks)?;
+            let stored = stored
+                .get_mut(job_id)
+                .ok_or_else(|| format!("background task {job_id} disappeared"))?;
+            let (moved, renamed, duplicated) = counts;
+            stored.moved = moved;
+            stored.renamed = renamed;
+            stored.duplicated = duplicated;
         }
-        Ok(task.clone())
+        complete_background(tasks, job_id, detail, cancelled)
     }
 
     fn background_snapshot(
