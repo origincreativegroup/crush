@@ -165,6 +165,7 @@ fn photo_ingest_is_idempotent_and_searchable() {
             &mut |text: &str| embedder.embed_text(text),
             "warm geometric portrait",
             5,
+            crush_search::SearchKind::All,
         )
         .unwrap();
     assert_eq!(results.len(), 1);

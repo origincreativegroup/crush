@@ -180,6 +180,49 @@ pub(crate) fn media_vector(
     }
 }
 
+/// The optional `kind` argument of the search contract (Task 040, proposal C8): which result
+/// families a search may return. `All` preserves the original mixed-media contract; a
+/// specific kind selects one family AT THE SOURCE, so a filtered search really returns
+/// `top` of that kind — never "top overall, then filtered down client-side".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKind {
+    /// Photos and shots ranked together, with span catalogue hits appended after the
+    /// semantic ranking (Task 034). The default.
+    All,
+    /// Photo semantic results only. No shots, no spans.
+    Photo,
+    /// Shot semantic results only (the UI's "video" family). No photos, no spans.
+    Video,
+    /// Span catalogue text matches only (Task 034), bm25-ordered among themselves. No
+    /// embedding runs and no semantic pass exists to displace.
+    Span,
+}
+
+impl SearchKind {
+    /// Parses the wire form of the search `kind` argument. Unknown values are refused
+    /// honestly — a typo must error, never silently widen to `all`.
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "all" => Ok(Self::All),
+            "photo" => Ok(Self::Photo),
+            "video" => Ok(Self::Video),
+            "span" => Ok(Self::Span),
+            other => anyhow::bail!(
+                "unsupported search kind {other:?} — expected \"all\", \"photo\", \"video\", or \"span\""
+            ),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Photo => "photo",
+            Self::Video => "video",
+            Self::Span => "span",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VectorIndex {
     owner_id: String,
@@ -422,49 +465,82 @@ impl SearchEngine {
         embedder: &mut E,
         query: &str,
         top_k: usize,
+        kind: SearchKind,
     ) -> anyhow::Result<Vec<AssetSearchResult>> {
-        self.search_assets_in_context(store, embedder, query, top_k, None)
+        self.search_assets_in_context(store, embedder, query, top_k, kind, None)
     }
 
-    /// Mixed-media search with an optional context key: a per-context profile adjusts ranking
-    /// on top of the default-context profile (see [`ScoreBreakdown::context_fit`]). Without a
-    /// context key the ranking is identical to [`SearchEngine::search_assets`].
+    /// Mixed-media search with a result-kind filter and an optional context key: a
+    /// per-context profile adjusts ranking on top of the default-context profile (see
+    /// [`ScoreBreakdown::context_fit`]). Without a context key the ranking is identical to
+    /// [`SearchEngine::search_assets`].
+    ///
+    /// Kind semantics (Task 040, proposal C8): `All` is the unchanged contract — shots and
+    /// photos ranked together, span catalogue hits appended after the semantic top-k so
+    /// they never displace a semantic result. A specific kind filters at the source: the
+    /// excluded families are never fetched or ranked, so a filtered search returns the top
+    /// `top_k` OF THAT KIND. A `span` search is pure catalogue text (bm25 order preserved —
+    /// spans share score 0.0, so they must never go through the score sort) and skips the
+    /// text embedding entirely, because spans carry no vectors.
     pub fn search_assets_in_context<E: TextEmbedder>(
         &self,
         store: &Store,
         embedder: &mut E,
         query: &str,
         top_k: usize,
+        kind: SearchKind,
         context_key: Option<&str>,
     ) -> anyhow::Result<Vec<AssetSearchResult>> {
         ensure!(!query.trim().is_empty(), "search query must not be empty");
         ensure!(top_k > 0, "top must be greater than zero");
 
+        if kind == SearchKind::Span {
+            return Self::search_span_text(store, &self.owner_id, query, top_k);
+        }
+
+        let fts_query = transcript_fts_query(query);
+
+        let want_shots = kind == SearchKind::All || kind == SearchKind::Video;
+        let want_photos = kind == SearchKind::All || kind == SearchKind::Photo;
+
         let mut transcript_hits = HashMap::new();
-        if let Some(fts_query) = transcript_fts_query(query) {
-            for hit in store.transcript_shot_hits(&self.owner_id, &fts_query)? {
-                transcript_hits.entry(hit.shot_id).or_insert(hit.text);
+        if want_shots {
+            if let Some(fts_query) = &fts_query {
+                for hit in store.transcript_shot_hits(&self.owner_id, fts_query)? {
+                    transcript_hits.entry(hit.shot_id).or_insert(hit.text);
+                }
             }
         }
         // Task 034: the same query words run against the span catalogue FTS index. Spans
         // carry no vectors, so these hits are text-match-only results appended after the
-        // semantic ranking — never mixed into the cosine score.
-        let fts_query = transcript_fts_query(query);
-        let span_hits = match &fts_query {
-            Some(fts_query) => store.span_text_hits(&self.owner_id, fts_query, top_k)?,
-            None => Vec::new(),
+        // semantic ranking — never mixed into the cosine score. Only the unfiltered
+        // contract appends them; the kind-filtered passes exclude spans by construction.
+        let span_hits = if kind == SearchKind::All {
+            match &fts_query {
+                Some(fts_query) => store.span_text_hits(&self.owner_id, fts_query, top_k)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
         };
         let query_vector = embedder.embed_text(query)?;
-        let shot_matches = self.index.search_with_boosts(
-            &query_vector,
-            top_k,
-            &self.owner_id,
-            &transcript_hits,
-            self.transcript_hit_boost,
-        )?;
-        let photo_matches = self
-            .photo_index
-            .search(&query_vector, top_k, &self.owner_id)?;
+        let shot_matches = if want_shots {
+            self.index.search_with_boosts(
+                &query_vector,
+                top_k,
+                &self.owner_id,
+                &transcript_hits,
+                self.transcript_hit_boost,
+            )?
+        } else {
+            Vec::new()
+        };
+        let photo_matches = if want_photos {
+            self.photo_index
+                .search(&query_vector, top_k, &self.owner_id)?
+        } else {
+            Vec::new()
+        };
         let personal = PersonalScorer::load(store, &self.owner_id, context_key)?;
         let mut results = Vec::with_capacity(shot_matches.len() + photo_matches.len());
 
@@ -578,6 +654,7 @@ impl SearchEngine {
         // distinct text-match-only kind. They carry score 0.0 (no comparable score exists
         // — fabricating one would be dishonest), are bm25-ordered among themselves, never
         // displace a semantic result, and never claim a thumbnail spans do not have.
+        // `span_hits` is empty for every kind-filtered pass, so only `All` appends.
         if !span_hits.is_empty() {
             results.extend(span_text_results(&span_hits));
         }
@@ -586,9 +663,43 @@ impl SearchEngine {
             stage = "search",
             owner_id = self.owner_id,
             query,
+            kind = kind.as_str(),
             indexed_assets = self.len(),
             results = results.len(),
             "mixed-media search complete"
+        );
+        Ok(results)
+    }
+
+    /// Span catalogue text search with no engine, no embedder, and no model files (Task 040
+    /// review fix): the `span` branch of [`SearchEngine::search_assets_in_context`] is pure
+    /// SQLite FTS — spans carry no vectors — so a library whose models are missing, removed,
+    /// or changed after indexing can still search its imported clips by text. An associated
+    /// function on purpose: building a [`SearchEngine`] validates embedding metadata that
+    /// this path must not need. bm25 order is preserved (no score sort — spans share score
+    /// 0.0).
+    pub fn search_span_text(
+        store: &Store,
+        owner_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> anyhow::Result<Vec<AssetSearchResult>> {
+        ensure!(!query.trim().is_empty(), "search query must not be empty");
+        ensure!(top_k > 0, "top must be greater than zero");
+        let fts_query = transcript_fts_query(query);
+        let span_hits = match &fts_query {
+            Some(fts_query) => store.span_text_hits(owner_id, fts_query, top_k)?,
+            None => Vec::new(),
+        };
+        let results = span_text_results(&span_hits);
+        tracing::info!(
+            job_id = "search",
+            stage = "search",
+            owner_id,
+            query,
+            kind = SearchKind::Span.as_str(),
+            results = results.len(),
+            "span catalogue search complete"
         );
         Ok(results)
     }
@@ -942,9 +1053,17 @@ pub fn selects_candidates<E: TextEmbedder>(
             ensure!(!brief.trim().is_empty(), "brief must not be empty");
             // Span catalogue hits are text-match-only (no vectors, no composed score), so
             // they stay out of the brief-driven plan candidate ordering: plan candidates
-            // must come from the composed ranker. They surface in search only.
-            let mut results =
-                engine.search_assets_in_context(store, embedder, brief, top_k, context_key)?;
+            // must come from the composed ranker. They surface in search only. The
+            // unfiltered contract is used here (kind All) and the retain below is the
+            // belt-and-braces exclusion.
+            let mut results = engine.search_assets_in_context(
+                store,
+                embedder,
+                brief,
+                top_k,
+                SearchKind::All,
+                context_key,
+            )?;
             results.retain(|result| result.asset_type != "span");
             results
         }
@@ -1368,7 +1487,7 @@ mod tests {
         let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
         let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
         let results = engine
-            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .search_assets(&store, &mut embedder, "same semantics", 12, SearchKind::All)
             .unwrap();
         assert!(results[0].asset_id.starts_with("shot-good"));
         assert!(results[11].asset_id.starts_with("shot-bad"));
@@ -1616,7 +1735,7 @@ mod tests {
         let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
         let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
         let results = engine
-            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .search_assets(&store, &mut embedder, "same semantics", 12, SearchKind::All)
             .unwrap();
         for result in &results {
             let breakdown = result.score_breakdown.expect("breakdown exported");
@@ -1773,7 +1892,7 @@ mod tests {
         let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
         let mut embedder = |_text: &str| Ok([0.0_f32; EMBEDDING_DIM]);
         let general = engine
-            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .search_assets(&store, &mut embedder, "same semantics", 12, SearchKind::All)
             .unwrap();
 
         append_default_picks_and_rejects(&mut store);
@@ -1781,13 +1900,13 @@ mod tests {
             .unwrap()
             .is_some());
         let personalized = engine
-            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .search_assets(&store, &mut embedder, "same semantics", 12, SearchKind::All)
             .unwrap();
         assert_ne!(general, personalized, "a learned profile must move ranking");
 
         assert_eq!(store.reset_style_profiles(DEFAULT_OWNER_ID).unwrap(), 1);
         let after_reset = engine
-            .search_assets(&store, &mut embedder, "same semantics", 12)
+            .search_assets(&store, &mut embedder, "same semantics", 12, SearchKind::All)
             .unwrap();
         assert_eq!(
             general, after_reset,
@@ -2141,7 +2260,7 @@ mod tests {
         };
 
         let results = engine
-            .search_assets(&store, &mut embedder, "neutral query", 2)
+            .search_assets(&store, &mut embedder, "neutral query", 2, SearchKind::All)
             .unwrap();
         assert_eq!(results[0].asset_id, "shot-a");
         assert_eq!(results[1].asset_id, "shot-b");
@@ -2178,7 +2297,7 @@ mod tests {
             .upsert_aesthetic_assessment(DEFAULT_OWNER_ID, &aesthetic_assessment("shot-b", 1.0))
             .unwrap();
         let results = engine
-            .search_assets(&store, &mut embedder, "neutral query", 2)
+            .search_assets(&store, &mut embedder, "neutral query", 2, SearchKind::All)
             .unwrap();
         assert_eq!(results[0].asset_id, "shot-b");
         assert_eq!(results[1].asset_id, "shot-a");
@@ -3004,7 +3123,7 @@ mod tests {
             Ok(vector)
         };
         let without_span = engine
-            .search_assets(&store, &mut embedder, "zeppelin harbor", 5)
+            .search_assets(&store, &mut embedder, "zeppelin harbor", 5, SearchKind::All)
             .unwrap();
         assert!(without_span
             .iter()
@@ -3017,7 +3136,7 @@ mod tests {
             "zeppelin over the harbor at dusk",
         );
         let results = engine
-            .search_assets(&store, &mut embedder, "zeppelin harbor", 5)
+            .search_assets(&store, &mut embedder, "zeppelin harbor", 5, SearchKind::All)
             .unwrap();
         let spans = results
             .iter()
@@ -3095,6 +3214,188 @@ mod tests {
             .general
             .iter()
             .all(|result| result.asset_type != "span"));
+    }
+
+    // ---- Task 040: search kind filter (proposal C8) ----
+
+    /// A kind-filtered search filters AT THE SOURCE: each kind returns only its own family
+    /// and really yields the top `top_k` of that family (a truncated shared ranking that is
+    /// filtered afterwards would return fewer — the exact dishonesty C8 calls out). Spans
+    /// are excluded from the photo/video passes and semantic results from the span pass.
+    #[test]
+    fn search_kind_selects_one_family_server_side() {
+        let (_directory, mut store) = populated_store();
+        store
+            .upsert_photo(
+                DEFAULT_OWNER_ID,
+                &Photo {
+                    id: "photo-kind".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: "/photos/photo-kind.jpg".to_owned(),
+                    sha256: "photo-kind-sha".to_owned(),
+                    width: 6000,
+                    height: 4000,
+                    format: "jpeg".to_owned(),
+                    orientation: None,
+                    captured_at: None,
+                    camera_make: None,
+                    camera_model: None,
+                    lens: None,
+                    thumb_rel: None,
+                    status: PhotoStatus::Done,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        let mut vector = [0.0_f32; EMBEDDING_DIM];
+        vector[0] = 1.0;
+        store
+            .put_photo_vector(DEFAULT_OWNER_ID, "photo-kind", &vector)
+            .unwrap();
+        span_fixture(
+            &mut store,
+            "span-kind",
+            "V1-0001_S9",
+            "rocket clear of the tower",
+        );
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| {
+            let mut vector = [0.0_f32; EMBEDDING_DIM];
+            vector[0] = 1.0;
+            Ok(vector)
+        };
+
+        // `all` keeps the mixed contract: shots + photos ranked together, span appended.
+        // The query words match the span catalogue text so the appended span is observable.
+        let all = engine
+            .search_assets(&store, &mut embedder, "rocket tower", 12, SearchKind::All)
+            .unwrap();
+        assert!(all.iter().any(|result| result.asset_type == "video"));
+        assert!(all.iter().any(|result| result.asset_type == "photo"));
+        assert!(all.iter().any(|result| result.asset_type == "span"));
+
+        let photos = engine
+            .search_assets(&store, &mut embedder, "rocket tower", 12, SearchKind::Photo)
+            .unwrap();
+        assert_eq!(photos.len(), 1, "only the photo family survives");
+        assert_eq!(photos[0].asset_type, "photo");
+        assert_eq!(photos[0].asset_id, "photo-kind");
+
+        // The video family is shots; top 1 really means the single best shot — not the
+        // best shot of a shared top-1 that then lost its photos.
+        let videos = engine
+            .search_assets(&store, &mut embedder, "rocket tower", 1, SearchKind::Video)
+            .unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].asset_type, "video");
+        assert!(videos[0].start_s.is_some(), "shots carry their interval");
+
+        let spans = engine
+            .search_assets(&store, &mut embedder, "rocket tower", 12, SearchKind::Span)
+            .unwrap();
+        assert_eq!(spans.len(), 1, "only the span family survives");
+        assert_eq!(spans[0].asset_type, "span");
+        assert_eq!(spans[0].asset_id, "span-kind");
+        assert_eq!(spans[0].score, 0.0);
+        assert!(spans[0].score_breakdown.as_ref().unwrap().text_match_only);
+
+        // A query whose words match no catalogue text returns an honest empty list.
+        let no_spans = engine
+            .search_assets(&store, &mut embedder, "unmatched", 12, SearchKind::Span)
+            .unwrap();
+        assert!(no_spans.is_empty());
+    }
+
+    /// A `span` search never touches the text embedder: spans carry no vectors and the
+    /// catalogue FTS pass is text-only, so the (possibly slow) encoder must not run.
+    #[test]
+    fn span_kind_search_skips_the_embedder() {
+        let (_directory, mut store) = populated_store();
+        span_fixture(
+            &mut store,
+            "span-kind",
+            "V1-0001_S9",
+            "rocket clear of the tower",
+        );
+        let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).unwrap();
+        let mut embedder = |_text: &str| -> anyhow::Result<[f32; EMBEDDING_DIM]> {
+            Err(anyhow::anyhow!("embedder must not run for a span search"))
+        };
+        let spans = engine
+            .search_assets(&store, &mut embedder, "rocket tower", 12, SearchKind::Span)
+            .unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].asset_type, "span");
+    }
+
+    /// Task 040 review fix: `--kind span` must work with no usable models. The catalogue
+    /// pass is pure SQLite FTS — no vectors, no embedding metadata, no model files — so
+    /// `search_span_text` runs on a store that would refuse `SearchEngine::load`
+    /// (exactly the situation the CLI's span early-return exists for: models missing,
+    /// removed, or changed after indexing) and still returns honest bm25-ordered text
+    /// matches. The video row is catalogue data the span trigger requires; what is
+    /// deliberately absent is every model-dependent artifact.
+    #[test]
+    fn span_text_search_needs_no_models_or_engine() {
+        let directory = TempDir::new().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        store
+            .upsert_video(
+                DEFAULT_OWNER_ID,
+                &Video {
+                    id: "video-1".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: "/footage/video.mov".to_owned(),
+                    sha256: "video-sha".to_owned(),
+                    duration_s: Some(2.0),
+                    fps: Some(24.0),
+                    width: Some(1920),
+                    height: Some(1080),
+                    has_audio: true,
+                    status: VideoStatus::Embedded,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        // Deliberately NO embedding metadata and NO vectors: the engine path really is
+        // closed on this store, which is why the standalone function exists.
+        assert!(SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).is_err());
+        span_fixture(
+            &mut store,
+            "span-fresh",
+            "V1-0001_S1",
+            "zeppelin over the harbor at dusk",
+        );
+        let results =
+            SearchEngine::search_span_text(&store, DEFAULT_OWNER_ID, "zeppelin harbor", 5).unwrap();
+        assert_eq!(results.len(), 1);
+        let span = &results[0];
+        assert_eq!(span.asset_type, "span");
+        assert_eq!(span.asset_id, "span-fresh");
+        assert_eq!(span.score, 0.0);
+        assert_eq!(span.cosine, 0.0);
+        assert_eq!(span.thumb_path, None, "spans have no thumbnail — ever");
+        assert!(span
+            .catalogue_snippet
+            .as_deref()
+            .unwrap()
+            .contains("zeppelin"));
+        assert!(span.score_breakdown.as_ref().unwrap().text_match_only);
+        // A query whose words match no catalogue text returns an honest empty list.
+        let no_matches =
+            SearchEngine::search_span_text(&store, DEFAULT_OWNER_ID, "unmatched", 5).unwrap();
+        assert!(no_matches.is_empty());
+    }
+
+    #[test]
+    fn search_kind_parse_refuses_unknown_values() {
+        assert_eq!(SearchKind::parse("all").unwrap(), SearchKind::All);
+        assert_eq!(SearchKind::parse("photo").unwrap(), SearchKind::Photo);
+        assert_eq!(SearchKind::parse("video").unwrap(), SearchKind::Video);
+        assert_eq!(SearchKind::parse("span").unwrap(), SearchKind::Span);
+        let error = SearchKind::parse("clips").unwrap_err().to_string();
+        assert!(error.contains("unsupported search kind"), "{error}");
+        assert!(error.contains("photo"), "{error}");
     }
 
     /// Confirmed span reference sets are inert for the current trainer: spans have no

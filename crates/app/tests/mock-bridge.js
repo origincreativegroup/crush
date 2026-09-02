@@ -55,6 +55,9 @@
   }
 
   const photoPreview = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='800'%3E%3Crect width='1200' height='800' fill='%2322304e'/%3E%3Ccircle cx='760' cy='360' r='180' fill='%23e6a648'/%3E%3Cpath d='M0 650 L420 280 L760 650 Z' fill='%234f8cff'/%3E%3C/svg%3E";
+  // Task 040 (C7): a loadable stand-in for video posters — asset:// URLs do not resolve
+  // in the harness (no Tauri protocol), so thumbs are inline SVGs like the photo preview.
+  const thumbPreview = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='360'%3E%3Crect width='640' height='360' fill='%23141416'/%3E%3Ccircle cx='320' cy='180' r='60' fill='%234f8cff'/%3E%3C/svg%3E";
 
   const listeners = new Map();
   const calls = [];
@@ -83,6 +86,10 @@
     shots: 12,
     lastError: null,
     sourceMissing: false,
+    // Task 040 (C7): the video's poster — the first shot's thumb, resolved to an
+    // absolute path by the real command. A video still indexing (no shots) carries
+    // null and the Library keeps the placeholder.
+    thumbPath: "/Users/editor/Library/Application Support/dev.crush.app/thumbs/rocket-launch-0000.jpg",
   };
   const photo = {
     assetType: "photo",
@@ -98,6 +105,7 @@
     shots: 0,
     lastError: null,
     sourceMissing: false,
+    thumbPath: "/Volumes/Photos/Campaign/select.jpg",
   };
   const photoTwo = {
     ...photo,
@@ -150,6 +158,15 @@
     "relocate-moved-file": () => [{ ...video, sourceMissing: true }],
     "ingest-relinked": () => [{ ...video }],
     "search-span-text": () => [{ ...video }],
+    "search-kind-filter": () => [{ ...video }],
+    // Task 040 (C7): a video WITH a poster (shot thumb resolved), a video still indexing
+    // with no shots (honest null → placeholder), and a photo with its own thumb. Rows are
+    // path-sorted like the real backend: rocket-launch, still-indexing, select.jpg.
+    "library-thumbnails": () => [
+      { ...video },
+      { ...video, thumbPath: null, id: "video-no-shots", path: "/Volumes/Footage/Launch Day/still-indexing.mov", status: "split", shots: 0 },
+      { ...photo },
+    ],
   }[scenario]?.() ?? [];
   let libraryList = library;
 
@@ -330,8 +347,27 @@
     return true;
   }
 
-  const searchResults = (q) => {
+  // Task 040 review fix: the in-flight window must be observable. The harness arms this
+  // gate (holdNextSearch), the next `search` invoke stays pending until releaseSearch()
+  // resolves it with the results captured at invoke time, so a kind/Top-N click can land
+  // while a search is genuinely in flight. Pure promise parking — no timers — so the
+  // frozen clock cannot close the window. Inert unless armed.
+  let heldSearch = null;
+  const holdNextSearch = () => {
+    heldSearch = {};
+  };
+  const releaseSearch = () => {
+    const gate = heldSearch;
+    heldSearch = null;
+    gate?.resolve?.();
+  };
+
+  const searchResults = (q, kind = "all") => {
     if (scenario === "empty" || q === "zzz") return [];
+    // Task 040 (C8): the mock honors the search command's kind argument the way the real
+    // backend does — each kind returns only its own family, so the harness can assert the
+    // server-side filter rather than a client-side post-filter.
+    const matchesKind = (result) => kind === "all" || result.asset_type === kind;
     return [
       {
         asset_type: "video",
@@ -381,7 +417,9 @@
         : []),
       // Task 034: an imported-clip text-match result — no thumbnail, no cosine, the
       // matched catalogue text plus verbatim provenance, and the text-match-only marker.
-      ...(scenario === "search-span-text"
+      // Task 040: also present for the search-kind-filter scenario so the span kind
+      // filter has a span to return.
+      ...(scenario === "search-span-text" || scenario === "search-kind-filter"
         ? [{
             asset_type: "span",
             asset_id: "span-search-1",
@@ -442,7 +480,7 @@
         },
         provenance: null,
       },
-    ];
+    ].filter(matchesKind);
   };
 
   const shotDetail = (id) => {
@@ -663,6 +701,9 @@
     // scenario also needs a genuinely indexed browse pool behind the DAM browser.
     "review-spans",
     "search-span-text",
+    // Task 040: the kind-filter scenario needs the same indexed browse pool behind the
+    // DAM browser (refreshBrowse clears hasIndexedShots on an empty pool otherwise).
+    "search-kind-filter",
   ].includes(scenario);
 
   const reviewAssets = reviewScenario
@@ -1245,7 +1286,16 @@
         if (scenario === "search-error" && q === "boom") {
           throw "The vector store is unavailable.";
         }
-        return searchResults(q);
+        const results = searchResults(q, String(args.kind || "all"));
+        if (heldSearch && !heldSearch.resolve) {
+          // Park this search in flight; releaseSearch() resolves it with the results
+          // captured HERE — i.e. the kind/top the search was ISSUED with, which is
+          // exactly the stale batch the app must not leave on screen.
+          return new Promise((resolve) => {
+            heldSearch.resolve = () => resolve(results);
+          });
+        }
+        return results;
       }
       case "shot_detail":
         return shotDetail(args.id);
@@ -1516,10 +1566,11 @@
 
   window.__TAURI__ = {
     core: {
-      convertFileSrc: (path) =>
-        String(path).endsWith("select.jpg")
-          ? photoPreview
-          : `asset://localhost/${encodeURIComponent(String(path))}`,
+      convertFileSrc: (path) => {
+        if (String(path).endsWith("select.jpg")) return photoPreview;
+        if (String(path).includes("/thumbs/")) return thumbPreview;
+        return `asset://localhost/${encodeURIComponent(String(path))}`;
+      },
       invoke,
     },
     event: { listen },
@@ -1566,5 +1617,5 @@
     },
   };
 
-  window.__crushMock = { calls, emit };
+  window.__crushMock = { calls, emit, holdNextSearch, releaseSearch };
 })();

@@ -1,5 +1,6 @@
 const bridge = window.__TAURI__;
 const invoke = bridge?.core?.invoke;
+const fileSrc = (path) => bridge.core.convertFileSrc(path);
 
 // Task 039 B8 — error-language pass. Backend failures used to surface verbatim
 // ("Disk full", "The vector store is unavailable."); this maps the common ones into
@@ -402,6 +403,24 @@ function renderVideos() {
     selectDot.className = "select-dot";
     selectCell.append(selectDot);
 
+    // Task 040 (C7): 16:9 poster cell so photos and videos are distinguishable at a
+    // glance. The backend sends a thumb only when one really exists (a video's poster is
+    // its first shot's thumb); `null` keeps the placeholder — nothing is fabricated, and
+    // a thumb that fails to load falls back to the placeholder too.
+    const thumbCell = cell("thumb-column");
+    const thumb = document.createElement("div");
+    thumb.className = "library-thumb";
+    if (video.thumbPath) {
+      const img = document.createElement("img");
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.alt = "";
+      img.src = fileSrc(video.thumbPath);
+      img.addEventListener("error", () => img.remove());
+      thumb.append(img);
+    }
+    thumbCell.append(thumb);
+
     const nameCell = cell("");
     const name = document.createElement("div");
     name.className = "file-name";
@@ -468,14 +487,14 @@ function renderVideos() {
       expandCell.append(expand);
     }
 
-    row.append(selectCell, nameCell, durationCell, resolutionCell, statusCell, shotsCell, expandCell);
+    row.append(selectCell, thumbCell, nameCell, durationCell, resolutionCell, statusCell, shotsCell, expandCell);
     elements.videoRows.append(row);
 
     if (details && expanded) {
       const errorRow = document.createElement("tr");
       errorRow.className = "error-row";
       const errorCell = document.createElement("td");
-      errorCell.colSpan = 7;
+      errorCell.colSpan = 8;
       const panel = document.createElement("div");
       panel.className = "error-panel";
       const copy = document.createElement("div");

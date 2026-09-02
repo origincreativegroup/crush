@@ -156,6 +156,12 @@ mod macos {
         /// The recorded source file is not present on disk right now — the honest
         /// "missing source" state that enables the "Locate moved file…" action.
         source_missing: bool,
+        /// Task 040 (C7): absolute thumbnail path for the Library table, resolved through
+        /// the same `store.thumbnail_path` discipline the Review grid and search results
+        /// use. `None` is honest — a video with no shots yet (still indexing) or a first
+        /// shot without a recorded thumb, a photo that never produced one — and the UI
+        /// keeps its placeholder instead of fabricating an image Crush does not have.
+        thumb_path: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -618,9 +624,17 @@ mod macos {
                 } else {
                     None
                 };
+                let shots = store.shots_for_video(DEFAULT_OWNER_ID, &video.id)?;
                 output.push(VideoView {
                     asset_type: "video".to_owned(),
-                    shots: store.shots_for_video(DEFAULT_OWNER_ID, &video.id)?.len(),
+                    shots: shots.len(),
+                    // Task 040 (C7): the representative frame of the FIRST shot (idx
+                    // order) is the video's poster. Strictly the first shot — a later
+                    // shot's thumb must not stand in for a missing one.
+                    thumb_path: first_shot_thumb_rel(&shots)
+                        .map(|relative| store.thumbnail_path(relative))
+                        .transpose()?
+                        .map(|path| path.display().to_string()),
                     id: video.id,
                     source_missing: !Path::new(&video.path).exists(),
                     path: video.path,
@@ -649,6 +663,12 @@ mod macos {
                     indexed_at: photo.indexed_at.map(|value| value.to_rfc3339()),
                     shots: 0,
                     last_error: None,
+                    thumb_path: photo
+                        .thumb_rel
+                        .as_deref()
+                        .map(|relative| store.thumbnail_path(relative))
+                        .transpose()?
+                        .map(|path| path.display().to_string()),
                 });
             }
             output.sort_by(|left, right| left.path.cmp(&right.path));
@@ -923,6 +943,7 @@ mod macos {
     async fn search(
         q: String,
         top: usize,
+        kind: Option<String>,
         state: State<'_, RuntimeState>,
     ) -> CommandResult<Vec<AssetSearchResult>> {
         let config = state.config.clone();
@@ -933,6 +954,11 @@ mod macos {
             command_result((|| {
                 ensure!(!q.trim().is_empty(), "search query must not be empty");
                 ensure!(top > 0, "top must be greater than zero");
+                // Task 040 (C8): the optional kind argument filters server-side — "all"
+                // (the absent default) preserves the original mixed-media contract, a
+                // specific kind returns the top `top` of that family. Unknown values are
+                // refused here, never silently widened.
+                let kind = crush_search::SearchKind::parse(kind.as_deref().unwrap_or("all"))?;
                 let mut store = Store::open(&paths.root)?;
                 let mut runtime = lock_anyhow(&cache)?;
                 if runtime.is_none() {
@@ -971,7 +997,13 @@ mod macos {
                 let SearchRuntime {
                     engine, embedder, ..
                 } = runtime;
-                engine.search_assets(&store, &mut |text: &str| embedder.embed_text(text), &q, top)
+                engine.search_assets(
+                    &store,
+                    &mut |text: &str| embedder.embed_text(text),
+                    &q,
+                    top,
+                    kind,
+                )
             })())
         })
         .await
@@ -1847,6 +1879,15 @@ mod macos {
             "derived" => Ok(StackItemRole::Derived),
             other => anyhow::bail!("unsupported stack item role {other:?}"),
         }
+    }
+
+    /// Task 040 (C7): a video's Library poster is the FIRST shot's thumb (idx order —
+    /// `shots_for_video` returns shots ordered by idx). Strictly the first shot: a later
+    /// shot's thumb must not stand in for a missing one. `None` for a still-indexing
+    /// video (no shots) or a first shot without a recorded thumb — the Library keeps the
+    /// honest placeholder, never fabricates an image Crush does not have.
+    fn first_shot_thumb_rel(shots: &[crush_store::Shot]) -> Option<&str> {
+        shots.first().and_then(|shot| shot.thumb_rel.as_deref())
     }
 
     fn library_asset_view(asset: LibraryAsset, thumb_path: Option<String>) -> LibraryAssetView {
@@ -4428,6 +4469,34 @@ mod macos {
                     media_kind: MediaKind::Shot,
                     media_id: "shot-1".to_owned(),
                 }]
+            );
+        }
+
+        #[test]
+        fn video_poster_is_strictly_the_first_shots_thumb() {
+            let shot = |idx: i64, thumb: Option<&str>| crush_store::Shot {
+                id: format!("shot-{idx}"),
+                video_id: "video-1".to_owned(),
+                owner_id: "local".to_owned(),
+                idx,
+                start_s: 0.0,
+                end_s: 1.0,
+                rep_frame_s: 0.0,
+                thumb_rel: thumb.map(str::to_owned),
+                scene_score: None,
+            };
+            // The first shot's thumb is the poster.
+            assert_eq!(
+                first_shot_thumb_rel(&[shot(0, Some("a.jpg")), shot(1, Some("b.jpg"))]),
+                Some("a.jpg")
+            );
+            // A still-indexing video has no shots — no poster, no fabrication.
+            assert_eq!(first_shot_thumb_rel(&[]), None);
+            // A first shot without a thumb stays None even when a later shot has one:
+            // a later frame must not stand in for the missing poster.
+            assert_eq!(
+                first_shot_thumb_rel(&[shot(0, None), shot(1, Some("b.jpg"))]),
+                None
             );
         }
 

@@ -13,13 +13,15 @@ Shown when any model is missing. Centered card: "Downloading models (about 1.2 G
 
 ## 2. Library
 Toolbar: **Add Folder…** (native picker; drag-drop onto the list also works), Re-index selected, Cancel (only while indexing).
-Table rows: filename · duration · resolution · status pill (Pending / Splitting / Embedding / Transcribing / Done / Failed / Cancelled) · thin progress bar for the active one · shots count.
+Table rows: thumbnail (16:9 cell) · filename · duration · resolution · status pill (Pending / Splitting / Embedding / Transcribing / Done / Failed / Cancelled) · thin progress bar for the active one · shots count.
+The thumbnail is honest: a video's poster is its first shot's thumb, a photo shows its own thumb, and an asset without one (still indexing) keeps the empty placeholder — nothing is fabricated (`list_videos` returns `thumbPath: null` for it).
 Failed row: chevron expands to show the job error text and a "Copy details" button (job id, stage, error, log path).
 Empty: "No footage yet. Add a folder to start indexing." with the Add button.
 Rule: indexing never blocks the UI; the user can search what's already indexed while more indexes.
 
 ## 3. Search
 Top: search input, placeholder "Describe the shot… e.g. wide shot of the storefront at dusk". Right: result count, Top 25/50/100.
+Kind switch (All / Photos / Video / Clips) is server-side: the `search` command takes an optional `kind` argument (`all` default | `photo` | `video` | `span`), so "Top N" counts that kind — a filtered search returns the top N of the kind, never a shared top N trimmed afterwards. In search mode a kind switch re-runs the search; in browse mode the switch narrows the already-fetched local pool. `video` means shot results; `span` means imported-clip catalogue text matches (text-match-only, appended after the semantic ranking in the `all` contract and never displacing it).
 Grid: 4 columns. Card = thumbnail, bottom-left duration badge, bottom-right score (0–100, rounded), filename line truncated, transcript snippet line (muted, one line) if present.
 Hover: play-icon overlay. Click/Enter: detail.
 Empty (nothing indexed): link to Library. No matches: "No matches. Try broader words — CLIP understands objects, scenes, and actions better than names."

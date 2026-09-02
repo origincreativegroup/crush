@@ -249,6 +249,13 @@
   async function runSearch() {
     const query = el.input.value.trim();
     state.query = query;
+    // Task 040 review fix: snapshot the kind and Top-N in effect when THIS search is
+    // issued. The pending machinery serializes by query text only, so these snapshots
+    // are what let the completion path notice a control that changed mid-flight —
+    // without them the in-flight results (fetched under the old kind/top) would render
+    // as if current and nothing would self-heal.
+    const issuedKind = state.assetKind || "all";
+    const issuedTop = Number(el.top.value);
     if (!query) {
       refreshBrowse();
       return;
@@ -274,11 +281,19 @@
     renderStates();
     const started = performance.now();
     try {
-      const results = await invoke("search", { q: query, top: Number(el.top.value) });
+      // Task 040 (C8): the kind selector is sent to the `search` command, so the kind
+      // filter is server-side and authoritative — "Top N" honestly counts that kind
+      // instead of a shared top-N filtered down afterwards. Results arrive already
+      // filtered; no client-side post-filter runs on search results.
+      const results = await invoke("search", {
+        q: query,
+        top: issuedTop,
+        kind: issuedKind,
+      });
       if (el.input.value.trim() === query) {
         state.mode = "search";
         state.searchResults = results;
-        state.results = filterByKind(results);
+        state.results = results;
         state.searched = true;
         state.selected = state.results.length ? Math.min(Math.max(state.selected, 0), state.results.length - 1) : -1;
         renderResults();
@@ -296,7 +311,22 @@
       el.warmup.hidden = true;
       state.everSearched = true;
       renderStates();
-      if (state.pendingQuery && state.pendingQuery !== query) {
+      // Task 040 review fix: pending searches serialize by query text only, so a kind
+      // or Top-N change landing while a search was in flight used to be dropped — the
+      // in-flight batch (fetched under the old kind/top) rendered as if current, and
+      // post-PR nothing self-healed because the fetched batch is already family-fixed.
+      // If the control in effect changed since this search was issued, re-issue once;
+      // the re-issue goes through the same runSearch, so it snapshots its own kind/top
+      // and a further change re-issues again instead of looping. A kind re-issue also
+      // resets the selection index — it refers to the old family's ordering (same reset
+      // as the browse branch's kind switch below); plain same-kind re-searches keep the
+      // pre-existing clamp.
+      const kindChanged = (state.assetKind || "all") !== issuedKind;
+      const topChanged = Number(el.top.value) !== issuedTop;
+      if (kindChanged || topChanged) {
+        if (kindChanged) state.selected = 0;
+        runSearch();
+      } else if (state.pendingQuery && state.pendingQuery !== query) {
         state.pendingQuery = null;
         runSearch();
       } else {
@@ -330,6 +360,11 @@
       : null,
   });
 
+  // Browse-mode kind filter (proposal C8 kept honest): the DAM browser fetches the
+  // whole local pool once through library_browse and narrows it locally. Search results
+  // do NOT go through this — their kind filter is server-side via the `search` command's
+  // kind argument, so a filtered search is authoritative rather than a truncated
+  // shared top-N trimmed after the fact.
   function filterByKind(results) {
     if (!state.assetKind) return [...results];
     return results.filter((result) => result.asset_type === state.assetKind);
@@ -1088,13 +1123,22 @@
   for (const button of el.damKinds) {
     button.addEventListener("click", () => {
       state.assetKind = button.dataset.kind || "";
-      const source = state.mode === "search" ? state.searchResults : state.browseResults;
-      state.results = filterByKind(source);
+      if (state.mode === "search") {
+        // Task 040 (C8): in search mode the kind filter lives on the server. Changing
+        // the kind re-runs the search with the kind argument. If a search is already in
+        // flight, runSearch parks this request (pendingQuery) and its completion path
+        // re-issues with the new kind — the issued-kind snapshot catches switches that
+        // land mid-flight (Task 040 review fix), so the old kind's batch never stays
+        // on screen under a new-kind button.
+        if (state.query) {
+          runSearch();
+          return;
+        }
+      }
+      state.results = filterByKind(state.browseResults);
       state.selected = state.results.length ? 0 : -1;
       renderResults();
-      el.count.textContent = state.mode === "search"
-        ? `${state.results.length} match${state.results.length === 1 ? "" : "es"}`
-        : `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+      el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
     });
   }
   el.detailClose.addEventListener("click", closeDetail);

@@ -89,6 +89,104 @@ const tests = {
     assert.equal(await frame.locator("#top-control").isHidden(), true);
   },
 
+  // Task 040 (C8): the kind selector is server-side in search mode — each switch re-runs
+  // the search with the kind argument, and the mock (like the real backend) returns only
+  // that family, so "Top N" honestly counts the kind.
+  async "search-kind-filter"(page) {
+    const frame = page.frameLocator("#app-frame");
+    const input = frame.locator("#search-input");
+    await input.waitFor({ state: "visible" });
+    await input.fill("rocket");
+    await input.press("Enter");
+    const cards = frame.locator("#results-grid .result-card");
+    await poll(async () => (await cards.count()) === 3);
+    const lastSearchKind = async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").at(-1).args.kind;
+
+    // Photos: only the photo result survives, and the command carried kind=photo.
+    await frame.locator('.dam-kind[data-kind="photo"]').click();
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await lastSearchKind(), "photo");
+    assert.match(await visibleText(frame.locator("#result-count")), /^1 match/);
+    assert.equal(await cards.filter({ hasText: "select.jpg" }).count(), 1);
+
+    // Video means shot results: the shot card, not the photo.
+    await frame.locator('.dam-kind[data-kind="video"]').click();
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await lastSearchKind(), "video");
+    assert.equal(await cards.filter({ hasText: "rocket-launch.mov" }).count(), 1);
+
+    // Span: only the imported-clip text match, with its provenance pill.
+    await frame.locator('.dam-kind[data-kind="span"]').click();
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await lastSearchKind(), "span");
+    assert.equal(await cards.filter({ hasText: "Imported · Reel Studio" }).count(), 1);
+
+    // All restores the mixed contract.
+    await frame.locator('.dam-kind[data-kind=""]').click();
+    await poll(async () => (await cards.count()) === 3);
+    assert.equal(await lastSearchKind(), "all");
+
+    // ---- Task 040 review fix: kind/Top-N switches landing IN FLIGHT ----
+    // The pending-search machinery serializes by query text only, so a switch made while
+    // a search runs used to be dropped: the in-flight batch (fetched under the OLD
+    // kind/top) rendered as if current and nothing self-healed. The mock's search gate
+    // (holdNextSearch/releaseSearch — pure promise parking, no timers) makes the window
+    // deterministic: the harness parks a search, lands the clicks inside it, then
+    // releases and requires the completion path to re-issue with the clicked kind.
+
+    // Back to browse mode so the first failure path is reachable: the FIRST search is in
+    // flight (mode is still "browse" until it resolves), a kind click filters the browse
+    // pool, and the in-flight batch fetched under the OLD kind must not win.
+    await input.fill("");
+    await poll(async () => (await visibleText(frame.locator("#dam-title"))) === "All assets");
+    await poll(async () => (await cards.count()) === 3);
+    let searches = (await mockCalls(page)).filter((call) => call.command === "search").length;
+    await inAppFrame(page, () => window.__crushMock.holdNextSearch());
+    await input.fill("rocket at dusk");
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 1);
+    const parked = (await mockCalls(page)).filter((call) => call.command === "search").at(-1);
+    assert.equal(parked.args.kind, "all", "the parked search was issued under the old kind");
+    await frame.locator('.dam-kind[data-kind="photo"]').click();
+    await poll(async () => (await cards.count()) === 2);
+    await inAppFrame(page, () => window.__crushMock.releaseSearch());
+    // The stale batch (kind "all") resolves; the completion path must notice the kind
+    // changed and re-issue — the final results match the CLICKED kind, not the issued one.
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 2);
+    assert.equal(await lastSearchKind(), "photo");
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await cards.filter({ hasText: "select.jpg" }).count(), 1);
+    // A kind re-issue resets the selection index (it referred to the old family's
+    // ordering). The mock's kind families return a single result, so reset-vs-clamp is
+    // not distinguishable here — both land on card 0; this asserts the re-issued grid
+    // still carries a valid selection (the reset itself is disclosed in the PR).
+    assert.equal(await cards.nth(0).getAttribute("aria-selected"), "true");
+
+    // Second failure path: a same-text re-search is in flight (the Top-N change triggers
+    // it, so pendingQuery equals the query text and the old machinery would drop
+    // everything), and BOTH the Top-N and the kind change while it runs. The re-issue
+    // must carry the new kind AND the new top.
+    searches = (await mockCalls(page)).filter((call) => call.command === "search").length;
+    await inAppFrame(page, () => window.__crushMock.holdNextSearch());
+    await frame.locator("#top-select").selectOption("100");
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 1);
+    await frame.locator("#top-select").selectOption("25");
+    await frame.locator('.dam-kind[data-kind="video"]').click();
+    await inAppFrame(page, () => window.__crushMock.releaseSearch());
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 2);
+    const reissued = (await mockCalls(page)).filter((call) => call.command === "search").at(-1);
+    assert.equal(reissued.args.kind, "video");
+    assert.equal(reissued.args.top, 25);
+    // Poll on the video card itself: the stale batch also renders a single card, so a
+    // bare count would race the re-issue's render.
+    await poll(async () => (await cards.filter({ hasText: "rocket-launch.mov" }).count()) === 1);
+    assert.equal(await cards.count(), 1);
+  },
+
   async "import-reel-studio"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-library").click();
@@ -538,6 +636,31 @@ const tests = {
       ),
     );
     await poll(async () => (await frame.locator("#video-rows tr.video-row").count()) === 1);
+  },
+
+  // Task 040 (C7): the Library table shows real posters — a video's poster is its first
+  // shot's thumb; a video still indexing (no shots) keeps the honest placeholder, and a
+  // photo shows its own thumb.
+  async "library-thumbnails"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 3);
+    // Rows sort by path: rocket-launch.mov, still-indexing.mov, select.jpg.
+    // The mock serves thumb paths as inline SVGs (asset:// does not resolve in the
+    // harness), so the poster asserts as an img inside the 16:9 box.
+    const withThumb = rows.nth(0).locator(".library-thumb img");
+    await withThumb.waitFor({ state: "attached" });
+    assert.match(await withThumb.getAttribute("src"), /^data:image\/svg/);
+    // A video with no shots yet gets thumbPath null — placeholder box, no image, and
+    // nothing fabricated for the row that would otherwise look empty.
+    assert.equal(await rows.nth(1).locator(".library-thumb").count(), 1);
+    assert.equal(await rows.nth(1).locator(".library-thumb img").count(), 0);
+    // The photo row carries its own thumb (the mock serves the inline preview for it).
+    const photoThumb = rows.nth(2).locator(".library-thumb img");
+    await photoThumb.waitFor({ state: "attached" });
+    assert.match(await photoThumb.getAttribute("src"), /^data:image\/svg/);
   },
 
   async "relocate-moved-file"(page) {
