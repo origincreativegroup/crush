@@ -3739,61 +3739,77 @@ mod macos {
         state: State<'_, RuntimeState>,
     ) -> CommandResult<usize> {
         command_result((|| {
-            let mut review_ops = Vec::with_capacity(ops.len());
-            for op in &ops {
-                let media_kind = match &op.asset_type {
-                    Some(value) => parse_library_kind(value)?,
-                    None => anyhow::bail!("review op {:?} requires assetType", op.op),
-                };
-                let media_id = op
-                    .media_id
-                    .clone()
-                    .with_context(|| format!("review op {:?} requires mediaId", op.op))?;
-                review_ops.push(match op.op.as_str() {
-                    "pick" => ReviewOp::Pick {
-                        media_kind,
-                        media_id,
-                    },
-                    "reject" => ReviewOp::Reject {
-                        media_kind,
-                        media_id,
-                    },
-                    "rate" => ReviewOp::Rate {
-                        media_kind,
-                        media_id,
-                        rating: op.rating.context("rate op requires rating")?,
-                    },
-                    "flag" => ReviewOp::SetFlags {
-                        media_kind,
-                        media_id,
-                        flags: SafetyFlags {
-                            usable: op.usable.context("flag op requires usable")?,
-                            faces_visible: op
-                                .faces_visible
-                                .context("flag op requires facesVisible")?,
-                            nametags_visible: op
-                                .nametags_visible
-                                .context("flag op requires nametagsVisible")?,
-                            blur_required: op
-                                .blur_required
-                                .context("flag op requires blurRequired")?,
-                        },
-                    },
-                    "add_to_collection" => ReviewOp::AddToCollection {
-                        collection_id: op
-                            .collection_id
-                            .clone()
-                            .context("add_to_collection op requires collectionId")?,
-                        media_kind,
-                        media_id,
-                        context_key: op.context_key.clone(),
-                    },
-                    other => anyhow::bail!("unsupported review op {other:?}"),
-                });
-            }
+            let review_ops = build_review_ops(&ops)?;
             let mut store = Store::open(&state.paths.root)?;
             store.bulk_review(DEFAULT_OWNER_ID, &review_ops)
         })())
+    }
+
+    /// Parses and validates the batch before any store write — kind parsing, required
+    /// fields, and the span refusal all happen here so one bad op aborts the whole batch
+    /// with an honest message instead of dying on a raw SQLite CHECK mid-transaction.
+    fn build_review_ops(ops: &[ReviewOpArgs]) -> anyhow::Result<Vec<ReviewOp>> {
+        let mut review_ops = Vec::with_capacity(ops.len());
+        for op in ops {
+            let media_kind = match &op.asset_type {
+                Some(value) => parse_library_kind(value)?,
+                None => anyhow::bail!("review op {:?} requires assetType", op.op),
+            };
+            // Task 034 review fix: spans have no feedback_events rows (v13 schema
+            // decision) and collection_items stays photo/shot, so a bulk pick/reject/
+            // rate/add op on an imported clip would otherwise hit a raw CHECK constraint
+            // partway through the batch. Refuse up front with the same honest message
+            // `record_feedback` uses — imported clips are confirmed as evidence in
+            // Preferences instead.
+            if media_kind == MediaKind::Span {
+                anyhow::bail!(
+                    "imported clips do not take picks or ratings — confirm them as \
+                     preference evidence in Preferences"
+                );
+            }
+            let media_id = op
+                .media_id
+                .clone()
+                .with_context(|| format!("review op {:?} requires mediaId", op.op))?;
+            review_ops.push(match op.op.as_str() {
+                "pick" => ReviewOp::Pick {
+                    media_kind,
+                    media_id,
+                },
+                "reject" => ReviewOp::Reject {
+                    media_kind,
+                    media_id,
+                },
+                "rate" => ReviewOp::Rate {
+                    media_kind,
+                    media_id,
+                    rating: op.rating.context("rate op requires rating")?,
+                },
+                "flag" => ReviewOp::SetFlags {
+                    media_kind,
+                    media_id,
+                    flags: SafetyFlags {
+                        usable: op.usable.context("flag op requires usable")?,
+                        faces_visible: op.faces_visible.context("flag op requires facesVisible")?,
+                        nametags_visible: op
+                            .nametags_visible
+                            .context("flag op requires nametagsVisible")?,
+                        blur_required: op.blur_required.context("flag op requires blurRequired")?,
+                    },
+                },
+                "add_to_collection" => ReviewOp::AddToCollection {
+                    collection_id: op
+                        .collection_id
+                        .clone()
+                        .context("add_to_collection op requires collectionId")?,
+                    media_kind,
+                    media_id,
+                    context_key: op.context_key.clone(),
+                },
+                other => anyhow::bail!("unsupported review op {other:?}"),
+            });
+        }
+        Ok(review_ops)
     }
 
     #[tauri::command]
@@ -4351,6 +4367,59 @@ mod macos {
     mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
+
+        fn review_op_args(op: &str, asset_type: &str, media_id: &str) -> ReviewOpArgs {
+            ReviewOpArgs {
+                op: op.to_owned(),
+                asset_type: Some(asset_type.to_owned()),
+                media_id: Some(media_id.to_owned()),
+                rating: None,
+                faces_visible: None,
+                nametags_visible: None,
+                blur_required: None,
+                usable: None,
+                collection_id: None,
+                context_key: None,
+            }
+        }
+
+        /// Task 034 review fix: a bulk review op on an imported clip is refused up front
+        /// with the exact message `record_feedback` uses — never a raw SQLite CHECK from
+        /// feedback_events/collection_items partway through the batch.
+        #[test]
+        fn review_batch_refuses_span_ops_with_the_record_feedback_message() {
+            for op in ["pick", "reject", "rate", "flag", "add_to_collection"] {
+                let mut args = review_op_args(op, "span", "span-a");
+                if op == "rate" {
+                    args.rating = Some(4);
+                }
+                if op == "flag" {
+                    args.usable = Some(false);
+                    args.faces_visible = Some(false);
+                    args.nametags_visible = Some(false);
+                    args.blur_required = Some(true);
+                }
+                if op == "add_to_collection" {
+                    args.collection_id = Some("col-a".to_owned());
+                }
+                let error = build_review_ops(&[args]).unwrap_err();
+                assert_eq!(
+                    format!("{error:#}"),
+                    "imported clips do not take picks or ratings — confirm them as \
+                     preference evidence in Preferences",
+                    "span {op} must be refused with the record_feedback message"
+                );
+            }
+            // The refusal is span-specific: ordinary shot ops still parse.
+            let parsed = build_review_ops(&[review_op_args("pick", "video", "shot-1")]).unwrap();
+            assert_eq!(
+                parsed,
+                vec![ReviewOp::Pick {
+                    media_kind: MediaKind::Shot,
+                    media_id: "shot-1".to_owned(),
+                }]
+            );
+        }
 
         #[test]
         fn plan_feedback_context_does_not_become_universal_taste() {
