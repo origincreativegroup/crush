@@ -184,3 +184,5 @@ and a future one must export `CRUSH_BUILD_COMMIT` the same way the packaging scr
 Result: tooling gaps closed; verify script PASS with real provenance. Clean-machine route:
 **STILL NOT EXECUTED**. No release claim is made or implied. Reviewer: OpenCode (Lane C
 tooling). Date: 2026-08-31.
+
+## First release-candidate artifact — 2026-09-02, main 7d9b3b5 (TOOLING BUILD — not acceptance): the 0.0.1 DMG, its checksums, verify output, and BUILD-ADHOC.txt are recorded in `docs/release-record-0.0.1.md`; every clean-machine checklist item above remains open for John's acceptance run.
