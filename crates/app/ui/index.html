@@ -386,6 +386,7 @@
               <button class="dam-kind active" type="button" data-kind="" aria-pressed="true">All</button>
               <button class="dam-kind" type="button" data-kind="photo" aria-pressed="false">Photos</button>
               <button class="dam-kind" type="button" data-kind="video" aria-pressed="false">Video</button>
+              <button class="dam-kind" type="button" data-kind="span" aria-pressed="false">Clips</button>
             </div>
           </div>
           <div id="results-grid" class="results-grid" role="listbox" aria-label="DAM assets" hidden></div>
@@ -436,6 +437,34 @@
           </div>
 
           <div id="style-sets" class="style-sets"></div>
+
+          <section id="imported-evidence" class="imported-evidence" aria-labelledby="imported-evidence-title">
+            <div class="plans-actions">
+              <div>
+                <p class="workflow-step">Imported evidence</p>
+                <h2 id="imported-evidence-title">Confirm imported clips</h2>
+                <p class="plans-muted">Clips imported from Reel Studio become preference evidence
+                only when you confirm them here. Confirming creates an example set you can
+                disable or delete later.</p>
+              </div>
+            </div>
+            <p id="imported-evidence-note" class="plans-muted imported-evidence-note">Confirmed
+            clips are catalogued evidence: they do not train recommendations yet — that starts
+            once clip analysis lands. They never show up as “learned” before then.</p>
+            <div id="imported-evidence-actions" class="plans-actions" hidden>
+              <button id="imported-evidence-confirm" class="button primary small" type="button" disabled>
+                Confirm selected as evidence
+              </button>
+              <button id="imported-evidence-skip" class="button secondary small" type="button" disabled>
+                Skip selected
+              </button>
+              <span id="imported-evidence-count" class="plans-muted"></span>
+            </div>
+            <div id="imported-evidence-list" class="style-sets"></div>
+            <p id="imported-evidence-empty" class="plans-muted">No imported clips with catalogue
+            evidence yet. Import a Reel Studio catalogue from the Library to bring your earlier
+            clip decisions in.</p>
+          </section>
         </section>
       </main>
 
@@ -458,9 +487,10 @@
               placeholder="Search file names…" aria-label="Search file names" />
             <label class="filter-control"><span class="sr-only">Kind</span>
               <select id="filter-kind" aria-label="Kind">
-                <option value="">Photos + shots</option>
+                <option value="">Photos + shots + clips</option>
                 <option value="photo">Photos</option>
                 <option value="shot">Shots</option>
+                <option value="span">Imported clips</option>
               </select>
             </label>
             <button id="filter-apply" class="button primary small" type="submit">Show results</button>
@@ -571,7 +601,7 @@
 
         <section id="review-content" class="review-content" aria-live="polite">
           <div id="review-empty" class="empty-state muted" hidden>
-            <p>No photos or shots match these filters.</p>
+            <p>No photos, shots, or imported clips match these filters.</p>
           </div>
           <div id="review-grid" class="review-grid" hidden></div>
         </section>

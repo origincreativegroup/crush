@@ -197,9 +197,15 @@
     state.rejects = 0;
     // advanceHintShown is deliberately NOT reset: the hint is once per app session.
     el.advanceHint.hidden = true;
+    let excludedSpans = 0;
     try {
       const base = window.__crushContext?.reviewFilters || {};
-      state.assets = await invoke("library_browse", { filter: base });
+      const assets = await invoke("library_browse", { filter: base });
+      // Task 034: imported clips cannot enter the pairwise pool — prefer needs
+      // compared-media semantics and vectors, and spans have neither. They are excluded
+      // up front and the pool says so rather than pretending they were judged.
+      excludedSpans = assets.filter((asset) => asset.mediaKind === "span").length;
+      state.assets = assets.filter((asset) => asset.mediaKind !== "span");
     } catch (error) {
       showStatus("a", String(error));
       return;
@@ -213,7 +219,12 @@
       );
     }
     if (state.assets.length < 2) {
-      showStatus("a", "Need at least two assets in this pool to compare.");
+      showStatus(
+        "a",
+        excludedSpans
+          ? "Imported clips cannot be compared yet — compare needs analysed media. Remove the clip filters to compare photos and shots."
+          : "Need at least two assets in this pool to compare.",
+      );
       return;
     }
     fillSelects();

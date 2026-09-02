@@ -903,3 +903,188 @@ fn adjusted_span_item_renders_through_the_reel_executor() {
         "source untouched"
     );
 }
+
+/// Task 034: confirming imported evidence creates a span-keyed reference set, and a
+/// re-import — identical or changed — never duplicates or silently revokes it. The
+/// importer's idempotence keys keep span ids stable and it never deletes spans, so the
+/// removed segment's span row (and with it its confirmed evidence) survives until a
+/// human removes the clip.
+#[test]
+fn confirmed_span_evidence_survives_re_import_without_duplication_or_revocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let mut store = Store::open(&data_dir).unwrap();
+    let speech = fixture("synthetic-speech.mp4");
+    store
+        .upsert_video(
+            DEFAULT_OWNER_ID,
+            &indexed_video("video-speech", &speech, Some(5.0)),
+        )
+        .unwrap();
+    let catalogue = temp.path().join("clips.db");
+    write_catalogue(
+        &catalogue,
+        &[
+            (
+                "V1-0002_S1",
+                "V1-0002",
+                0.0,
+                2.0,
+                "opening",
+                4,
+                1,
+                "reel-01",
+                None,
+            ),
+            (
+                "V1-0002_S2",
+                "V1-0002",
+                3.0,
+                5.0,
+                "closing",
+                4,
+                0,
+                "reel-01",
+                None,
+            ),
+        ],
+    );
+    let mut options = ImportOptions::dry_run(&catalogue);
+    options.originals = vec![speech.parent().unwrap().to_path_buf()];
+    options.apply = true;
+
+    // ---- apply, then confirm both imported clips as previous-work evidence ----
+    let _ = import_reel_studio(&mut store, &options).unwrap();
+    let spans = store.manual_spans(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(spans.len(), 2);
+    use crush_store::{
+        ReferenceItemRole, ReferenceSet, ReferenceSetItem, ReferenceSetScope, ReferenceSetStatus,
+    };
+    store
+        .reference_set_create(
+            DEFAULT_OWNER_ID,
+            &ReferenceSet {
+                id: "set-confirmed-evidence".to_owned(),
+                owner_id: DEFAULT_OWNER_ID.to_owned(),
+                name: "Reel Studio · imported evidence".to_owned(),
+                context_key: "default".to_owned(),
+                description: "Confirmed imported catalogue evidence".to_owned(),
+                scope: ReferenceSetScope::WholeSet,
+                status: ReferenceSetStatus::Unconfirmed,
+                source_collection_id: None,
+                created_at: utc_millis(),
+                confirmed_at: None,
+            },
+        )
+        .unwrap();
+    for span in &spans {
+        store
+            .reference_set_add_item(
+                DEFAULT_OWNER_ID,
+                &ReferenceSetItem {
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    set_id: "set-confirmed-evidence".to_owned(),
+                    media_kind: MediaKind::Span,
+                    media_id: span.id.clone(),
+                    role: ReferenceItemRole::Positive,
+                    added_at: utc_millis(),
+                },
+            )
+            .unwrap();
+    }
+    store
+        .reference_set_confirm(DEFAULT_OWNER_ID, "set-confirmed-evidence")
+        .unwrap();
+    let span_ids_before = spans.iter().map(|span| span.id.clone()).collect::<Vec<_>>();
+
+    // ---- re-apply the identical catalogue: nothing duplicates, nothing revokes ----
+    let again = import_reel_studio(&mut store, &options).unwrap();
+    assert!(again
+        .segments
+        .iter()
+        .filter(|s| s.video_id.is_some())
+        .all(|s| s.outcome == "unchanged"));
+    assert_eq!(again.planned_writes.manual_spans_insert, 0);
+    assert_eq!(again.planned_writes.reference_sets_insert, 0);
+    assert_eq!(again.planned_writes.feedback_events_insert, 0);
+    let spans_after = store.manual_spans(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(spans_after.len(), 2, "no duplicate span rows");
+    assert_eq!(
+        spans_after
+            .iter()
+            .map(|span| span.id.clone())
+            .collect::<Vec<_>>(),
+        span_ids_before,
+        "span ids are stable across re-imports"
+    );
+    let set = store
+        .reference_set_get(DEFAULT_OWNER_ID, "set-confirmed-evidence")
+        .unwrap()
+        .unwrap();
+    assert_eq!(set.status, ReferenceSetStatus::Confirmed);
+    assert_eq!(
+        store
+            .reference_set_items(DEFAULT_OWNER_ID, "set-confirmed-evidence")
+            .unwrap()
+            .len(),
+        2,
+        "the confirmed items are exactly the same two spans, not re-added"
+    );
+
+    // ---- changed catalogue: one segment's evidence updated, one segment removed ----
+    Connection::open(&catalogue)
+        .unwrap()
+        .execute_batch(
+            "UPDATE segments SET description = 'opening, re-described', quality = 5
+              WHERE segment_id = 'V1-0002_S1';
+             DELETE FROM segments WHERE segment_id = 'V1-0002_S2';",
+        )
+        .unwrap();
+    let changed = import_reel_studio(&mut store, &options).unwrap();
+    let opening = changed
+        .segments
+        .iter()
+        .find(|s| s.segment_id == "V1-0002_S1")
+        .unwrap();
+    assert_eq!(opening.outcome, "updated");
+    let removed_reported = changed
+        .segments
+        .iter()
+        .find(|s| s.segment_id == "V1-0002_S2");
+    assert!(
+        removed_reported.is_none(),
+        "a removed catalogue segment is simply absent from the report, never a deletion"
+    );
+
+    // The refreshed span keeps its id and its confirmed item; the removed segment's span
+    // row still exists (the importer never deletes), so its confirmed evidence stays too.
+    let spans_final = store.manual_spans(DEFAULT_OWNER_ID).unwrap();
+    assert_eq!(spans_final.len(), 2);
+    let opening_span = spans_final
+        .iter()
+        .find(|span| span.external_id == "V1-0002_S1")
+        .unwrap();
+    assert_eq!(opening_span.quality, Some(5));
+    assert!(opening_span.description.contains("re-described"));
+    assert_eq!(opening_span.id, span_ids_before[0]);
+    let set = store
+        .reference_set_get(DEFAULT_OWNER_ID, "set-confirmed-evidence")
+        .unwrap()
+        .unwrap();
+    assert_eq!(set.status, ReferenceSetStatus::Confirmed);
+    let items = store
+        .reference_set_items(DEFAULT_OWNER_ID, "set-confirmed-evidence")
+        .unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().any(|item| item.media_id == opening_span.id));
+    assert!(
+        items.iter().any(|item| item.media_id == span_ids_before[1]),
+        "the removed segment's confirmed evidence survives — removing it is a human decision"
+    );
+}
+
+/// Small helper so the reference-set fixtures above can carry distinct timestamps.
+fn utc_millis() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp_millis(1_787_000_000_000).unwrap()
+}

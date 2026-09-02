@@ -265,6 +265,13 @@ mod macos {
         tags: String,
         collection_ids: Vec<String>,
         stack_ids: Vec<String>,
+        /// Catalogue provenance for imported spans (Task 034); `None` for photos and shots.
+        /// The Review grid renders an honest provenance pill from these and never fabricates
+        /// a thumbnail spans do not have.
+        source: Option<String>,
+        external_id: Option<String>,
+        import_id: Option<String>,
+        imported_at: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -1046,6 +1053,89 @@ mod macos {
         })())
     }
 
+    /// Task 034: read-only detail for an imported/manual span. The drawer shows the
+    /// catalogue evidence with its provenance and plays the SOURCE video at the span
+    /// interval — there is no span thumbnail and no span analysis, and this view never
+    /// pretends otherwise.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SpanDetailView {
+        id: String,
+        video_id: String,
+        video_path: String,
+        start_s: f64,
+        end_s: f64,
+        fps: Option<f64>,
+        source: String,
+        external_id: String,
+        import_id: Option<String>,
+        imported_at: String,
+        boundary_basis: String,
+        boundary_tolerance_s: f64,
+        description: String,
+        subjects: String,
+        action: String,
+        tags: String,
+        shot_type: String,
+        camera_move: String,
+        notes: String,
+        quality: Option<i64>,
+        standout: bool,
+        usable: bool,
+        used_in: String,
+    }
+
+    #[tauri::command]
+    fn span_detail(
+        id: String,
+        app: AppHandle,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<SpanDetailView> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            let span = store
+                .manual_span_by_id(DEFAULT_OWNER_ID, &id)?
+                .with_context(|| format!("imported clip {id} was not found"))?;
+            let video = store
+                .video_by_id(DEFAULT_OWNER_ID, &span.video_id)?
+                .with_context(|| format!("video {} was not found", span.video_id))?;
+            let playback_path = store
+                .video_source_metadata(DEFAULT_OWNER_ID, &video.id)?
+                .and_then(|metadata| metadata.proxy_rel)
+                .map(|relative| store.proxy_path(&relative))
+                .transpose()?
+                .filter(|path| path.is_file())
+                .unwrap_or_else(|| PathBuf::from(&video.path));
+            allow_asset_path(&app, &playback_path).map_err(anyhow::Error::msg)?;
+            Ok(SpanDetailView {
+                id: span.id,
+                video_id: span.video_id,
+                video_path: playback_path.display().to_string(),
+                start_s: span.start_s,
+                end_s: span.end_s,
+                fps: video.fps,
+                source: span.source,
+                external_id: span.external_id,
+                import_id: span.import_id,
+                imported_at: span.imported_at.to_rfc3339(),
+                boundary_basis: crush_store::span_boundary_basis_to_str(span.boundary_basis)
+                    .to_owned(),
+                boundary_tolerance_s: span.boundary_tolerance_s,
+                description: span.description,
+                subjects: span.subjects,
+                action: span.action,
+                tags: span.tags,
+                shot_type: span.shot_type,
+                camera_move: span.camera_move,
+                notes: span.notes,
+                quality: span.quality,
+                standout: span.standout,
+                usable: span.usable,
+                used_in: span.used_in,
+            })
+        })())
+    }
+
     #[tauri::command]
     fn photo_detail(
         id: String,
@@ -1133,6 +1223,14 @@ mod macos {
                 let media_kind = match asset_type.as_str() {
                     "photo" => MediaKind::Photo,
                     "video" => MediaKind::Shot,
+                    // Task 034: span evidence is never feedback. feedback_events stays
+                    // photo/shot by the v13 schema decision (append-only rows cannot be
+                    // withdrawn), so the honest refusal is here — confirm imported clips
+                    // through the Preferences evidence flow instead.
+                    "span" => anyhow::bail!(
+                        "imported clips do not take picks or ratings — confirm them as \
+                         preference evidence in Preferences"
+                    ),
                     _ => anyhow::bail!("unsupported asset type {asset_type:?}"),
                 };
                 let signal = match signal.as_str() {
@@ -1496,6 +1594,197 @@ mod macos {
         })())
     }
 
+    // ---- Imported evidence confirmation flow (Task 034) ----
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ImportedEvidenceView {
+        span_id: String,
+        external_id: String,
+        source: String,
+        import_id: Option<String>,
+        video_path: String,
+        start_s: f64,
+        end_s: f64,
+        description: String,
+        quality: Option<i64>,
+        standout: bool,
+        used_in: String,
+        imported_at: String,
+        sets: Vec<String>,
+        confirmed: bool,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ImportedEvidenceOutcome {
+        set_id: String,
+        set_name: String,
+        /// The target set's lifecycle state, so the UI can speak honestly about what the
+        /// confirmation did — an already-confirmed set must not be described as inert.
+        set_status: String,
+        /// Items newly added by this call (duplicates are reported, never re-added).
+        added: usize,
+        already_present: usize,
+    }
+
+    #[tauri::command]
+    fn imported_evidence_list(
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<Vec<ImportedEvidenceView>> {
+        command_result((|| {
+            let store = Store::open(&state.paths.root)?;
+            Ok(store
+                .imported_evidence_spans(DEFAULT_OWNER_ID)?
+                .into_iter()
+                .map(|span| ImportedEvidenceView {
+                    span_id: span.span_id,
+                    external_id: span.external_id,
+                    source: span.source,
+                    import_id: span.import_id,
+                    video_path: span.video_path,
+                    start_s: span.start_s,
+                    end_s: span.end_s,
+                    description: span.description,
+                    quality: span.quality,
+                    standout: span.standout,
+                    used_in: span.used_in,
+                    imported_at: span.imported_at.to_rfc3339(),
+                    sets: span.sets,
+                    confirmed: span.confirmed,
+                })
+                .collect())
+        })())
+    }
+
+    /// Step one of the two-step confirmation: create (or extend) a named previous-work
+    /// reference set whose items are the given spans. The set starts `unconfirmed` — the
+    /// explicit second click is the existing `reference_set_confirm`, so the whole
+    /// lifecycle (confirm / disable / delete with transactional profile invalidation)
+    /// stays on the one reversible code path. Provenance is retained on the derived
+    /// record through the set's name and description; the span ids themselves are the
+    /// per-item provenance and survive re-imports (the importer never deletes spans).
+    #[tauri::command]
+    fn imported_evidence_confirm(
+        span_ids: Vec<String>,
+        set_name: Option<String>,
+        state: State<'_, RuntimeState>,
+    ) -> CommandResult<ImportedEvidenceOutcome> {
+        command_result((|| {
+            ensure!(
+                !span_ids.is_empty(),
+                "choose at least one imported clip to confirm"
+            );
+            let store = Store::open(&state.paths.root)?;
+            let mut spans = Vec::with_capacity(span_ids.len());
+            for span_id in &span_ids {
+                let span = store
+                    .manual_span_by_id(DEFAULT_OWNER_ID, span_id)?
+                    .with_context(|| format!("imported clip {span_id} was not found"))?;
+                spans.push(span);
+            }
+            let name = match set_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                Some(name) => name.to_owned(),
+                None => {
+                    let all_reel = spans.iter().all(|span| span.source == "reel_studio");
+                    if all_reel {
+                        "Reel Studio · imported evidence".to_owned()
+                    } else {
+                        "Imported evidence".to_owned()
+                    }
+                }
+            };
+            let sources: Vec<String> = spans.iter().map(|span| span.source.clone()).collect();
+            let imports: Vec<String> = spans
+                .iter()
+                .filter_map(|span| span.import_id.clone())
+                .collect();
+            let description = format!(
+                "Confirmed imported catalogue evidence (source {}; import {}). Catalogued \
+                 evidence only: spans do not train the current model until span analysis lands.",
+                if sources.iter().all(|value| value == &sources[0]) {
+                    sources[0].clone()
+                } else {
+                    "mixed".to_owned()
+                },
+                if imports.is_empty() {
+                    "-".to_owned()
+                } else {
+                    imports
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            );
+            let set = match store.reference_set_by_name(DEFAULT_OWNER_ID, &name)? {
+                Some(set) => set,
+                None => {
+                    let set = ReferenceSet {
+                        id: Uuid::new_v4().to_string(),
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        name: name.clone(),
+                        context_key: "default".to_owned(),
+                        description,
+                        scope: ReferenceSetScope::WholeSet,
+                        // Inert until the explicit confirm step — same lifecycle as any set.
+                        status: ReferenceSetStatus::Unconfirmed,
+                        source_collection_id: None,
+                        created_at: chrono::Utc::now(),
+                        confirmed_at: None,
+                    };
+                    store.reference_set_create(DEFAULT_OWNER_ID, &set)?;
+                    set
+                }
+            };
+            let set_status = reference_status_to_str(set.status).to_owned();
+            let existing = store
+                .reference_set_items(DEFAULT_OWNER_ID, &set.id)?
+                .into_iter()
+                .filter(|item| item.media_kind == MediaKind::Span)
+                .map(|item| item.media_id)
+                .collect::<std::collections::HashSet<_>>();
+            let mut added = 0_usize;
+            let mut already_present = 0_usize;
+            // The add-item loop is deliberately NOT one transaction: a mid-loop crash
+            // leaves a partial item list, but the set is unconfirmed (inert) unless it
+            // was already confirmed, and re-running the command heals idempotently —
+            // present spans are counted, never re-added — which is why the loose shape
+            // is safe here.
+            for span in &spans {
+                if existing.contains(&span.id) {
+                    already_present += 1;
+                    continue;
+                }
+                store.reference_set_add_item(
+                    DEFAULT_OWNER_ID,
+                    &ReferenceSetItem {
+                        owner_id: DEFAULT_OWNER_ID.to_owned(),
+                        set_id: set.id.clone(),
+                        media_kind: MediaKind::Span,
+                        media_id: span.id.clone(),
+                        role: ReferenceItemRole::Positive,
+                        added_at: chrono::Utc::now(),
+                    },
+                )?;
+                added += 1;
+            }
+            Ok(ImportedEvidenceOutcome {
+                set_id: set.id,
+                set_name: set.name,
+                set_status,
+                added,
+                already_present,
+            })
+        })())
+    }
+
     #[tauri::command]
     fn style_profile_status(
         state: State<'_, RuntimeState>,
@@ -1586,6 +1875,10 @@ mod macos {
             tags: asset.tags,
             collection_ids: asset.collection_ids,
             stack_ids: asset.stack_ids,
+            source: asset.source,
+            external_id: asset.external_id,
+            import_id: asset.import_id,
+            imported_at: asset.imported_at.map(|value| value.to_rfc3339()),
         }
     }
 
@@ -3456,61 +3749,77 @@ mod macos {
         state: State<'_, RuntimeState>,
     ) -> CommandResult<usize> {
         command_result((|| {
-            let mut review_ops = Vec::with_capacity(ops.len());
-            for op in &ops {
-                let media_kind = match &op.asset_type {
-                    Some(value) => parse_library_kind(value)?,
-                    None => anyhow::bail!("review op {:?} requires assetType", op.op),
-                };
-                let media_id = op
-                    .media_id
-                    .clone()
-                    .with_context(|| format!("review op {:?} requires mediaId", op.op))?;
-                review_ops.push(match op.op.as_str() {
-                    "pick" => ReviewOp::Pick {
-                        media_kind,
-                        media_id,
-                    },
-                    "reject" => ReviewOp::Reject {
-                        media_kind,
-                        media_id,
-                    },
-                    "rate" => ReviewOp::Rate {
-                        media_kind,
-                        media_id,
-                        rating: op.rating.context("rate op requires rating")?,
-                    },
-                    "flag" => ReviewOp::SetFlags {
-                        media_kind,
-                        media_id,
-                        flags: SafetyFlags {
-                            usable: op.usable.context("flag op requires usable")?,
-                            faces_visible: op
-                                .faces_visible
-                                .context("flag op requires facesVisible")?,
-                            nametags_visible: op
-                                .nametags_visible
-                                .context("flag op requires nametagsVisible")?,
-                            blur_required: op
-                                .blur_required
-                                .context("flag op requires blurRequired")?,
-                        },
-                    },
-                    "add_to_collection" => ReviewOp::AddToCollection {
-                        collection_id: op
-                            .collection_id
-                            .clone()
-                            .context("add_to_collection op requires collectionId")?,
-                        media_kind,
-                        media_id,
-                        context_key: op.context_key.clone(),
-                    },
-                    other => anyhow::bail!("unsupported review op {other:?}"),
-                });
-            }
+            let review_ops = build_review_ops(&ops)?;
             let mut store = Store::open(&state.paths.root)?;
             store.bulk_review(DEFAULT_OWNER_ID, &review_ops)
         })())
+    }
+
+    /// Parses and validates the batch before any store write — kind parsing, required
+    /// fields, and the span refusal all happen here so one bad op aborts the whole batch
+    /// with an honest message instead of dying on a raw SQLite CHECK mid-transaction.
+    fn build_review_ops(ops: &[ReviewOpArgs]) -> anyhow::Result<Vec<ReviewOp>> {
+        let mut review_ops = Vec::with_capacity(ops.len());
+        for op in ops {
+            let media_kind = match &op.asset_type {
+                Some(value) => parse_library_kind(value)?,
+                None => anyhow::bail!("review op {:?} requires assetType", op.op),
+            };
+            // Task 034 review fix: spans have no feedback_events rows (v13 schema
+            // decision) and collection_items stays photo/shot, so a bulk pick/reject/
+            // rate/add op on an imported clip would otherwise hit a raw CHECK constraint
+            // partway through the batch. Refuse up front with the same honest message
+            // `record_feedback` uses — imported clips are confirmed as evidence in
+            // Preferences instead.
+            if media_kind == MediaKind::Span {
+                anyhow::bail!(
+                    "imported clips do not take picks or ratings — confirm them as \
+                     preference evidence in Preferences"
+                );
+            }
+            let media_id = op
+                .media_id
+                .clone()
+                .with_context(|| format!("review op {:?} requires mediaId", op.op))?;
+            review_ops.push(match op.op.as_str() {
+                "pick" => ReviewOp::Pick {
+                    media_kind,
+                    media_id,
+                },
+                "reject" => ReviewOp::Reject {
+                    media_kind,
+                    media_id,
+                },
+                "rate" => ReviewOp::Rate {
+                    media_kind,
+                    media_id,
+                    rating: op.rating.context("rate op requires rating")?,
+                },
+                "flag" => ReviewOp::SetFlags {
+                    media_kind,
+                    media_id,
+                    flags: SafetyFlags {
+                        usable: op.usable.context("flag op requires usable")?,
+                        faces_visible: op.faces_visible.context("flag op requires facesVisible")?,
+                        nametags_visible: op
+                            .nametags_visible
+                            .context("flag op requires nametagsVisible")?,
+                        blur_required: op.blur_required.context("flag op requires blurRequired")?,
+                    },
+                },
+                "add_to_collection" => ReviewOp::AddToCollection {
+                    collection_id: op
+                        .collection_id
+                        .clone()
+                        .context("add_to_collection op requires collectionId")?,
+                    media_kind,
+                    media_id,
+                    context_key: op.context_key.clone(),
+                },
+                other => anyhow::bail!("unsupported review op {other:?}"),
+            });
+        }
+        Ok(review_ops)
     }
 
     #[tauri::command]
@@ -3995,6 +4304,7 @@ mod macos {
                 import_reel_studio,
                 search,
                 shot_detail,
+                span_detail,
                 photo_detail,
                 record_feedback,
                 shot_at_index,
@@ -4005,6 +4315,8 @@ mod macos {
                 reference_set_confirm,
                 reference_set_disable,
                 reference_set_delete,
+                imported_evidence_list,
+                imported_evidence_confirm,
                 style_profile_status,
                 style_profile_reset,
                 style_profile_retrain,
@@ -4066,6 +4378,59 @@ mod macos {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
+        fn review_op_args(op: &str, asset_type: &str, media_id: &str) -> ReviewOpArgs {
+            ReviewOpArgs {
+                op: op.to_owned(),
+                asset_type: Some(asset_type.to_owned()),
+                media_id: Some(media_id.to_owned()),
+                rating: None,
+                faces_visible: None,
+                nametags_visible: None,
+                blur_required: None,
+                usable: None,
+                collection_id: None,
+                context_key: None,
+            }
+        }
+
+        /// Task 034 review fix: a bulk review op on an imported clip is refused up front
+        /// with the exact message `record_feedback` uses — never a raw SQLite CHECK from
+        /// feedback_events/collection_items partway through the batch.
+        #[test]
+        fn review_batch_refuses_span_ops_with_the_record_feedback_message() {
+            for op in ["pick", "reject", "rate", "flag", "add_to_collection"] {
+                let mut args = review_op_args(op, "span", "span-a");
+                if op == "rate" {
+                    args.rating = Some(4);
+                }
+                if op == "flag" {
+                    args.usable = Some(false);
+                    args.faces_visible = Some(false);
+                    args.nametags_visible = Some(false);
+                    args.blur_required = Some(true);
+                }
+                if op == "add_to_collection" {
+                    args.collection_id = Some("col-a".to_owned());
+                }
+                let error = build_review_ops(&[args]).unwrap_err();
+                assert_eq!(
+                    format!("{error:#}"),
+                    "imported clips do not take picks or ratings — confirm them as \
+                     preference evidence in Preferences",
+                    "span {op} must be refused with the record_feedback message"
+                );
+            }
+            // The refusal is span-specific: ordinary shot ops still parse.
+            let parsed = build_review_ops(&[review_op_args("pick", "video", "shot-1")]).unwrap();
+            assert_eq!(
+                parsed,
+                vec![ReviewOp::Pick {
+                    media_kind: MediaKind::Shot,
+                    media_id: "shot-1".to_owned(),
+                }]
+            );
+        }
+
         #[test]
         fn plan_feedback_context_does_not_become_universal_taste() {
             let scoped: serde_json::Value = serde_json::from_str(
@@ -4107,7 +4472,7 @@ mod macos {
 
             assert!(report.contains("ffmpeg source=Bundled"));
             assert!(report.contains("ffmpeg version crush-test"));
-            assert!(report.contains("schema=12"));
+            assert!(report.contains("schema=13"));
         }
 
         #[test]

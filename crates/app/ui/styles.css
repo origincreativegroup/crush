@@ -759,6 +759,13 @@ nav {
   background: rgb(var(--danger-rgb) / 12%);
 }
 
+/* Task 034: provenance pill for imported clips in the Review grid — same chrome as the
+   other flag pills, accent tint so provenance reads at a glance without a second glance. */
+.review-flag-pill.provenance {
+  color: var(--accent-text);
+  background: rgb(var(--accent-rgb) / 13%);
+}
+
 .row-progress {
   width: 126px;
 }
@@ -1490,4 +1497,27 @@ nav {
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ---- Task 034: imported evidence (Preferences) ---- */
+.imported-evidence {
+  max-width: 780px;
+  margin-top: var(--space-8);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--border-raised);
+}
+
+.imported-evidence-note {
+  margin: 0 0 var(--space-5);
+}
+
+.span-evidence-note {
+  margin-top: var(--space-4);
+  font-weight: 700;
+}
+
+/* Task 034 review fix: a skipped evidence row stays visible but recedes — greyed,
+   checkbox disabled — with its per-row Unskip as the way back. */
+.style-set-row.evidence-skipped {
+  opacity: 0.55;
 }

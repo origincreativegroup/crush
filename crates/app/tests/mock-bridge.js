@@ -15,6 +15,45 @@
   const scenario = new URLSearchParams(window.location.search).get("scenario");
   if (!scenario) return;
 
+  // Task 034 review fix: observable playback transport. The harness loads no real media,
+  // so the drawer's seek-then-play would otherwise be invisible (readyState stays at 0
+  // and the loadedmetadata path never runs). Two prototype stubs make it assertable:
+  //   1. readyState reports at least HAVE_METADATA (1), so the app takes its immediate
+  //      seek branch instead of waiting for an event that never fires.
+  //   2. currentTime assignments and play/pause calls are recorded on
+  //      window.__mediaCalls for the harness to assert against.
+  // Both are inert unless app code drives a media element (photo paths never do).
+  window.__mediaCalls = [];
+  const mediaCalls = window.__mediaCalls;
+  const mediaProto = HTMLMediaElement.prototype;
+  const currentTimeDescriptor = Object.getOwnPropertyDescriptor(mediaProto, "currentTime");
+  if (currentTimeDescriptor?.set) {
+    Object.defineProperty(mediaProto, "currentTime", {
+      get() {
+        return currentTimeDescriptor.get.call(this);
+      },
+      set(value) {
+        mediaCalls.push({ name: "seek", time: Number(value) });
+        currentTimeDescriptor.set.call(this, value);
+      },
+    });
+  }
+  const readyStateDescriptor = Object.getOwnPropertyDescriptor(mediaProto, "readyState");
+  if (readyStateDescriptor?.get) {
+    Object.defineProperty(mediaProto, "readyState", {
+      get() {
+        return Math.max(readyStateDescriptor.get.call(this), 1);
+      },
+    });
+  }
+  for (const method of ["play", "pause"]) {
+    const original = mediaProto[method];
+    mediaProto[method] = function (...args) {
+      mediaCalls.push({ name: method, currentTime: this.currentTime });
+      return original ? original.apply(this, args) : Promise.resolve();
+    };
+  }
+
   const photoPreview = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='800'%3E%3Crect width='1200' height='800' fill='%2322304e'/%3E%3Ccircle cx='760' cy='360' r='180' fill='%23e6a648'/%3E%3Cpath d='M0 650 L420 280 L760 650 Z' fill='%234f8cff'/%3E%3C/svg%3E";
 
   const listeners = new Map();
@@ -110,6 +149,7 @@
     // "Locate moved file…" affordance must be the way back in.
     "relocate-moved-file": () => [{ ...video, sourceMissing: true }],
     "ingest-relinked": () => [{ ...video }],
+    "search-span-text": () => [{ ...video }],
   }[scenario]?.() ?? [];
   let libraryList = library;
 
@@ -303,6 +343,7 @@
         score: 0.4,
         cosine: 0.29,
         transcript_snippet: "…and then the rocket cleared the tower…",
+        catalogue_snippet: null,
         editorial_quality: null,
         aesthetic_score: 0.81,
         personal_style_score: 0.42,
@@ -315,7 +356,9 @@
           personal_affinity: 0.05,
           context_fit: 0,
           total: 0,
+          text_match_only: false,
         },
+        provenance: null,
       },
       ...(scenario === "plans-sequence"
         ? [{
@@ -328,10 +371,48 @@
             score: 0.38,
             cosine: 0.27,
             transcript_snippet: null,
+            catalogue_snippet: null,
             editorial_quality: null,
             aesthetic_score: 0.79,
             personal_style_score: 0.41,
             score_breakdown: null,
+            provenance: null,
+          }]
+        : []),
+      // Task 034: an imported-clip text-match result — no thumbnail, no cosine, the
+      // matched catalogue text plus verbatim provenance, and the text-match-only marker.
+      ...(scenario === "search-span-text"
+        ? [{
+            asset_type: "span",
+            asset_id: "span-search-1",
+            path: video.path,
+            start_s: 3.2,
+            end_s: 5.95,
+            thumb_path: null,
+            score: 0,
+            cosine: 0,
+            transcript_snippet: null,
+            catalogue_snippet: "rocket clear of the tower, crowd cheering",
+            editorial_quality: null,
+            aesthetic_score: null,
+            personal_style_score: null,
+            score_breakdown: {
+              semantic: 0,
+              transcript_boost: 0,
+              editorial: 0,
+              general_aesthetic: 0,
+              penalties: 0,
+              personal_affinity: 0,
+              context_fit: 0,
+              total: 0,
+              text_match_only: true,
+            },
+            provenance: {
+              source: "reel_studio",
+              external_id: "V1-0001_S1",
+              import_id: "import-1",
+              imported_at: "2026-08-30T12:00:00Z",
+            },
           }]
         : []),
       {
@@ -344,6 +425,7 @@
         score: 0.35,
         cosine: 0.24,
         transcript_snippet: null,
+        catalogue_snippet: null,
         editorial_quality: 5,
         aesthetic_score: 0.89,
         personal_style_score: 0.42,
@@ -356,7 +438,9 @@
           personal_affinity: 0.05,
           context_fit: 0,
           total: 0,
+          text_match_only: false,
         },
+        provenance: null,
       },
     ];
   };
@@ -411,6 +495,72 @@
     tags: "warm, geometric, campaign",
     notes: "Prefer the asymmetry.",
   });
+
+  // Task 034 fixtures: one imported clip for the drawer (read-only catalogue evidence) and
+  // the Preferences evidence population. `sets`/`confirmed` are derived from styleState so
+  // the confirm → confirm-set → disable lifecycle is observable end to end.
+  const spanDetailFixture = (id) => ({
+    id,
+    videoId: "video-one",
+    videoPath: video.path,
+    startS: 3.2,
+    endS: 5.95,
+    fps: 29.97,
+    source: "reel_studio",
+    externalId: "V1-0001_S1",
+    importId: "import-1",
+    importedAt: "2026-08-30T12:00:00Z",
+    boundaryBasis: "catalogue_tc",
+    boundaryToleranceS: 1.0,
+    description: "Rocket clear of the tower, wide shot",
+    subjects: "rocket",
+    action: "launching",
+    tags: "exhibit",
+    shotType: "wide",
+    cameraMove: "static",
+    notes: "",
+    quality: 4,
+    standout: true,
+    usable: true,
+    usedIn: "reel-01",
+  });
+
+  const evidenceSpans = scenario === "preferences-span-evidence"
+    ? [
+        {
+          spanId: "span-ev-1",
+          externalId: "V1-0001_S1",
+          source: "reel_studio",
+          importId: "import-1",
+          videoPath: video.path,
+          startS: 3.2,
+          endS: 5.95,
+          description: "Rocket clear of the tower",
+          quality: 4,
+          standout: true,
+          usedIn: "reel-01",
+          importedAt: "2026-08-30T12:00:00Z",
+          sets: [],
+          confirmed: false,
+        },
+        {
+          spanId: "span-ev-2",
+          externalId: "V1-0001_S5",
+          source: "reel_studio",
+          importId: "import-1",
+          videoPath: video.path,
+          startS: 20.0,
+          endS: 24.0,
+          description: "Crowd cheering",
+          quality: null,
+          standout: false,
+          usedIn: "",
+          importedAt: "2026-08-30T12:00:10Z",
+          sets: [],
+          confirmed: false,
+        },
+      ]
+    : [];
 
   // Task 018b style mock state: one confirmed set (feeding the "learned" profile) and one
   // unconfirmed set (inert until confirmed). style_profile_status reports the Task 018a
@@ -509,6 +659,10 @@
     "compare-view",
     "compare-advance",
     "compare-advance-reduced",
+    // Task 034: Review now lists imported clips beside photos and shots; the search-span
+    // scenario also needs a genuinely indexed browse pool behind the DAM browser.
+    "review-spans",
+    "search-span-text",
   ].includes(scenario);
 
   const reviewAssets = reviewScenario
@@ -581,6 +735,36 @@
           collectionIds: [],
           stackIds: [],
         },
+        // Task 034: an imported clip in the Review grid — catalogue provenance, no
+        // thumbnail (and none may be fabricated), and no batch editorial checkbox.
+        ...(scenario === "review-spans"
+          ? [{
+              mediaKind: "span",
+              mediaId: "span-rev-1",
+              path: video.path,
+              thumbPath: null,
+              status: "done",
+              indexedAt: "2026-08-28T12:00:00Z",
+              videoId: "video-one",
+              startS: 3.2,
+              endS: 5.95,
+              width: 3840,
+              height: 2160,
+              quality: 4,
+              usable: true,
+              standout: true,
+              facesVisible: false,
+              nametagsVisible: false,
+              blurRequired: false,
+              tags: "water,exhibit",
+              collectionIds: [],
+              stackIds: [],
+              source: "reel_studio",
+              externalId: "V1-0001_S1",
+              importId: "import-1",
+              importedAt: "2026-08-30T12:00:00Z",
+            }]
+          : []),
       ]
     : [];
 
@@ -626,7 +810,7 @@
   const reviewBrowse = (filter = {}) =>
     reviewAssets
       .filter((asset) => {
-        if (filter.kind && asset.mediaKind !== (filter.kind === "photo" ? "photo" : "shot")) {
+        if (filter.kind && asset.mediaKind !== filter.kind) {
           return false;
         }
         if (filter.status && asset.status !== filter.status) return false;
@@ -1065,6 +1249,8 @@
       }
       case "shot_detail":
         return shotDetail(args.id);
+      case "span_detail":
+        return spanDetailFixture(args.id);
       case "photo_detail":
         return photoDetail(args.id);
       case "shot_at_index":
@@ -1123,6 +1309,56 @@
         if (index === -1) throw `No reference set ${args.setId}`;
         styleState.sets.splice(index, 1);
         return true;
+      }
+      // Task 034: the imported-evidence confirmation flow. Confirming creates (or extends)
+      // an UNCONFIRMED set — the second click is the ordinary reference_set_confirm above,
+      // and disable/delete withdraw, mirroring the real store.
+      case "imported_evidence_list":
+        return evidenceSpans.map((item) => {
+          const names = [];
+          let confirmed = false;
+          for (const set of styleState.sets) {
+            if (Array.isArray(set.spanIds) && set.spanIds.includes(item.spanId)) {
+              names.push(set.name);
+              if (set.status === "confirmed") confirmed = true;
+            }
+          }
+          return { ...item, sets: names, confirmed };
+        });
+      case "imported_evidence_confirm": {
+        const ids = Array.isArray(args.spanIds) ? args.spanIds : [];
+        if (!ids.length) throw "choose at least one imported clip to confirm";
+        const setName = String(args.setName || "").trim() || "Reel Studio · imported evidence";
+        let set = styleState.sets.find((candidate) => candidate.name === setName);
+        if (!set) {
+          set = {
+            id: `set-ev-${styleState.sets.length + 1}`,
+            name: setName,
+            contextKey: "default",
+            description: "Confirmed imported catalogue evidence",
+            scope: "whole_set",
+            status: "unconfirmed",
+            itemCount: 0,
+            createdAt: "2026-08-28T11:00:00Z",
+            confirmedAt: null,
+            spanIds: [],
+          };
+          styleState.sets.push(set);
+        }
+        if (!Array.isArray(set.spanIds)) set.spanIds = [];
+        let added = 0;
+        let alreadyPresent = 0;
+        for (const id of ids) {
+          if (!evidenceSpans.some((item) => item.spanId === id)) throw `No imported clip ${id}`;
+          if (set.spanIds.includes(id)) {
+            alreadyPresent += 1;
+            continue;
+          }
+          set.spanIds.push(id);
+          set.itemCount += 1;
+          added += 1;
+        }
+        return { setId: set.id, setName: set.name, added, alreadyPresent, setStatus: set.status };
       }
       case "style_profile_status":
         return styleProfileStatus();

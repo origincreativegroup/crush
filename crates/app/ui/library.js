@@ -89,9 +89,10 @@
 
   const fileSrc = (path) => bridge.core.convertFileSrc(path);
   const fileName = (path) => path.split(/[\\/]/).at(-1) || path;
-  // The store talks about photo/shot kinds; the review commands use the UI vocabulary
-  // "photo"/"video" (mirroring record_feedback).
-  const assetType = (kind) => (kind === "photo" ? "photo" : "video");
+  // The store talks about photo/shot/span kinds; the review commands use the UI vocabulary
+  // "photo"/"video" for photos and shots (mirroring record_feedback) and "span" for imported
+  // clips (Task 034) — the one kind with its own evidence flow instead of feedback.
+  const assetType = (kind) => (kind === "photo" ? "photo" : kind === "span" ? "span" : "video");
   const pad = (value) => String(value).padStart(2, "0");
 
   function timecode(seconds) {
@@ -257,7 +258,10 @@
   function tileBadge(asset) {
     const badge = document.createElement("span");
     badge.className = "review-kind";
-    badge.textContent = asset.mediaKind === "photo" ? "PHOTO" : "▶ SHOT";
+    badge.textContent =
+      asset.mediaKind === "photo" ? "PHOTO"
+      : asset.mediaKind === "span" ? "CLIP"
+      : "▶ SHOT";
     return badge;
   }
 
@@ -286,7 +290,7 @@
   function tileMeta(asset) {
     const meta = document.createElement("div");
     meta.className = "review-meta";
-    if (asset.mediaKind === "shot") {
+    if (asset.mediaKind === "shot" || asset.mediaKind === "span") {
       meta.textContent = `${timecode(asset.startS)} → ${timecode(asset.endS)}`;
     } else if (asset.width && asset.height) {
       meta.textContent = `${asset.width} × ${asset.height}`;
@@ -297,6 +301,29 @@
   function tileFlags(asset) {
     const flags = document.createElement("div");
     flags.className = "review-flags";
+    if (asset.mediaKind === "span") {
+      // Task 034: provenance pill per the Historical/Imported discipline — imported clips
+      // always say where they came from, and their honest state is "evidence", never a
+      // claim that they train anything.
+      const pill = document.createElement("span");
+      pill.className = "review-flag-pill provenance";
+      pill.textContent = asset.source === "manual" ? "Manual clip" : "Imported · Reel Studio";
+      pill.title = asset.externalId ? `Catalogue id ${asset.externalId}` : "";
+      flags.append(pill);
+      if (asset.quality) {
+        const quality = document.createElement("span");
+        quality.className = "review-flag-pill quality";
+        quality.textContent = `★ ${asset.quality}`;
+        flags.append(quality);
+      }
+      if (asset.standout) {
+        const standout = document.createElement("span");
+        standout.className = "review-flag-pill member";
+        standout.textContent = "Standout";
+        flags.append(standout);
+      }
+      return flags;
+    }
     if (asset.quality) {
       const pill = document.createElement("span");
       pill.className = "review-flag-pill quality";
@@ -350,7 +377,10 @@
       renderBatchBar();
     });
     selectLabel.append(checkbox);
-    tile.append(selectLabel);
+    // Imported clips are evidence, not review targets: pick/reject/rating and collections
+    // have no honest meaning for them (feedback_events and collection_items stay
+    // photo/shot), so they are not selectable in the batch bar at all.
+    if (asset.mediaKind !== "span") tile.append(selectLabel);
 
     tile.append(tileThumb(asset));
 
@@ -728,6 +758,19 @@
     if (!detail) {
       state.safety = null;
       state.metadata = null;
+      state.stacksForAsset = [];
+      renderSafety();
+      renderMetadata();
+      renderStacks();
+      return;
+    }
+    if (detail.kind === "span") {
+      // Task 034: imported clips have no editable annotation/safety/stack surface — their
+      // catalogue evidence is read-only in the drawer (search.js) and preference evidence
+      // flows through Preferences, so these panels stay empty instead of erroring.
+      state.safety = null;
+      state.metadata = null;
+      state.stacks = await invoke("stack_list").catch(() => []);
       state.stacksForAsset = [];
       renderSafety();
       renderMetadata();
