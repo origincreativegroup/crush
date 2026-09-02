@@ -274,11 +274,19 @@
     renderStates();
     const started = performance.now();
     try {
-      const results = await invoke("search", { q: query, top: Number(el.top.value) });
+      // Task 040 (C8): the kind selector is sent to the `search` command, so the kind
+      // filter is server-side and authoritative — "Top N" honestly counts that kind
+      // instead of a shared top-N filtered down afterwards. Results arrive already
+      // filtered; no client-side post-filter runs on search results.
+      const results = await invoke("search", {
+        q: query,
+        top: Number(el.top.value),
+        kind: state.assetKind || "all",
+      });
       if (el.input.value.trim() === query) {
         state.mode = "search";
         state.searchResults = results;
-        state.results = filterByKind(results);
+        state.results = results;
         state.searched = true;
         state.selected = state.results.length ? Math.min(Math.max(state.selected, 0), state.results.length - 1) : -1;
         renderResults();
@@ -330,6 +338,11 @@
       : null,
   });
 
+  // Browse-mode kind filter (proposal C8 kept honest): the DAM browser fetches the
+  // whole local pool once through library_browse and narrows it locally. Search results
+  // do NOT go through this — their kind filter is server-side via the `search` command's
+  // kind argument, so a filtered search is authoritative rather than a truncated
+  // shared top-N trimmed after the fact.
   function filterByKind(results) {
     if (!state.assetKind) return [...results];
     return results.filter((result) => result.asset_type === state.assetKind);
@@ -1088,13 +1101,19 @@
   for (const button of el.damKinds) {
     button.addEventListener("click", () => {
       state.assetKind = button.dataset.kind || "";
-      const source = state.mode === "search" ? state.searchResults : state.browseResults;
-      state.results = filterByKind(source);
+      if (state.mode === "search") {
+        // Task 040 (C8): in search mode the kind filter lives on the server. Changing
+        // the kind re-runs the search with the kind argument; the in-flight/pending
+        // search machinery already serializes rapid switches.
+        if (state.query) {
+          runSearch();
+          return;
+        }
+      }
+      state.results = filterByKind(state.browseResults);
       state.selected = state.results.length ? 0 : -1;
       renderResults();
-      el.count.textContent = state.mode === "search"
-        ? `${state.results.length} match${state.results.length === 1 ? "" : "es"}`
-        : `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
+      el.count.textContent = `${state.results.length} asset${state.results.length === 1 ? "" : "s"}`;
     });
   }
   el.detailClose.addEventListener("click", closeDetail);

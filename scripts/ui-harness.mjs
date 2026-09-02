@@ -89,6 +89,45 @@ const tests = {
     assert.equal(await frame.locator("#top-control").isHidden(), true);
   },
 
+  // Task 040 (C8): the kind selector is server-side in search mode — each switch re-runs
+  // the search with the kind argument, and the mock (like the real backend) returns only
+  // that family, so "Top N" honestly counts the kind.
+  async "search-kind-filter"(page) {
+    const frame = page.frameLocator("#app-frame");
+    const input = frame.locator("#search-input");
+    await input.waitFor({ state: "visible" });
+    await input.fill("rocket");
+    await input.press("Enter");
+    const cards = frame.locator("#results-grid .result-card");
+    await poll(async () => (await cards.count()) === 3);
+    const lastSearchKind = async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").at(-1).args.kind;
+
+    // Photos: only the photo result survives, and the command carried kind=photo.
+    await frame.locator('.dam-kind[data-kind="photo"]').click();
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await lastSearchKind(), "photo");
+    assert.match(await visibleText(frame.locator("#result-count")), /^1 match/);
+    assert.equal(await cards.filter({ hasText: "select.jpg" }).count(), 1);
+
+    // Video means shot results: the shot card, not the photo.
+    await frame.locator('.dam-kind[data-kind="video"]').click();
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await lastSearchKind(), "video");
+    assert.equal(await cards.filter({ hasText: "rocket-launch.mov" }).count(), 1);
+
+    // Span: only the imported-clip text match, with its provenance pill.
+    await frame.locator('.dam-kind[data-kind="span"]').click();
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await lastSearchKind(), "span");
+    assert.equal(await cards.filter({ hasText: "Imported · Reel Studio" }).count(), 1);
+
+    // All restores the mixed contract.
+    await frame.locator('.dam-kind[data-kind=""]').click();
+    await poll(async () => (await cards.count()) === 3);
+    assert.equal(await lastSearchKind(), "all");
+  },
+
   async "import-reel-studio"(page) {
     const frame = page.frameLocator("#app-frame");
     await frame.locator("#nav-library").click();
@@ -538,6 +577,31 @@ const tests = {
       ),
     );
     await poll(async () => (await frame.locator("#video-rows tr.video-row").count()) === 1);
+  },
+
+  // Task 040 (C7): the Library table shows real posters — a video's poster is its first
+  // shot's thumb; a video still indexing (no shots) keeps the honest placeholder, and a
+  // photo shows its own thumb.
+  async "library-thumbnails"(page) {
+    const frame = page.frameLocator("#app-frame");
+    await frame.locator("#nav-library").click();
+    const rows = frame.locator("#video-rows tr.video-row");
+    await rows.first().waitFor({ state: "visible" });
+    assert.equal(await rows.count(), 3);
+    // Rows sort by path: rocket-launch.mov, still-indexing.mov, select.jpg.
+    // The mock serves thumb paths as inline SVGs (asset:// does not resolve in the
+    // harness), so the poster asserts as an img inside the 16:9 box.
+    const withThumb = rows.nth(0).locator(".library-thumb img");
+    await withThumb.waitFor({ state: "attached" });
+    assert.match(await withThumb.getAttribute("src"), /^data:image\/svg/);
+    // A video with no shots yet gets thumbPath null — placeholder box, no image, and
+    // nothing fabricated for the row that would otherwise look empty.
+    assert.equal(await rows.nth(1).locator(".library-thumb").count(), 1);
+    assert.equal(await rows.nth(1).locator(".library-thumb img").count(), 0);
+    // The photo row carries its own thumb (the mock serves the inline preview for it).
+    const photoThumb = rows.nth(2).locator(".library-thumb img");
+    await photoThumb.waitFor({ state: "attached" });
+    assert.match(await photoThumb.getAttribute("src"), /^data:image\/svg/);
   },
 
   async "relocate-moved-file"(page) {
