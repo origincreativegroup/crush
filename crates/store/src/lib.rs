@@ -4024,6 +4024,12 @@ impl Store {
         // events — per the v13 schema decision, spans have no feedback_events rows
         // (that table stays photo/shot); "editorial" filtering for spans means the span is
         // confirmed evidence in some reference set.
+        //
+        // Task 034 review fix: that arm honors ONLY the 'pick' signal. A confirmed span is
+        // positive evidence and spans have no rejection concept, so mapping any non-null
+        // signal to confirmed membership made the reject/rating filters surface confirmed
+        // imported clips. 'pick' matches confirmed positive membership; every other signal
+        // matches nothing.
         let clause = |owner_col: &str,
                       status_col: &str,
                       path_col: &str,
@@ -4033,12 +4039,12 @@ impl Store {
          -> String {
             let feedback_arm = if feedback_via_reference_set {
                 format!(
-                    "AND (?11 IS NULL OR EXISTS (
+                    "AND (?11 IS NULL OR (?11 = 'pick' AND EXISTS (
            SELECT 1 FROM reference_set_items rsi
            JOIN reference_sets rs ON rs.id = rsi.set_id AND rs.owner_id = rsi.owner_id
            WHERE rsi.owner_id = {owner_col} AND rsi.media_kind = '{media}'
              AND rsi.media_id = {id_col} AND rs.status = 'confirmed'
-             AND rsi.role = 'positive'))"
+             AND rsi.role = 'positive')))"
                 )
             } else {
                 format!(

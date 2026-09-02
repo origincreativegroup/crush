@@ -6712,6 +6712,26 @@ fn browse_assets_returns_imported_spans_with_catalogue_filters() {
         "the editorial filter maps to confirmed evidence membership for spans"
     );
 
+    // Task 034 review fix: a confirmed span is positive evidence and spans have no
+    // rejection concept, so the reject and rating filters must never surface one — only
+    // 'pick' maps to confirmed membership for spans.
+    for signal in ["reject", "rating"] {
+        let filtered = store
+            .browse_assets(
+                DEFAULT_OWNER_ID,
+                &AssetFilter {
+                    kind: Some(MediaKind::Span),
+                    feedback: Some(signal.to_owned()),
+                    ..AssetFilter::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            filtered.is_empty(),
+            "the {signal} filter must not surface a confirmed span"
+        );
+    }
+
     // Collections and stacks never admit spans, so those filters exclude every span.
     let collection_filtered = store
         .browse_assets(
