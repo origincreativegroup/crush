@@ -26,9 +26,9 @@
 | TASK-019 | Mixed-media review and DAM organization | OpenCode | done — 019a PR #30, 019b PR #31 |
 | TASK-020 | Strong-shot recognition + user-style selects and clip/reel planning | OpenCode + Codex | 020a merged (#33/#34); 020b UI merged (#36); automatic sequence/repetition judgment remains open |
 | TASK-020b | Plans UI + selection provenance | Codex (Mac) | done — PR #36; Linux/macOS CI and local/browser acceptance green |
-| TASK-021 | Non-destructive recipes + photo/video render and export | Codex team (Mac) | in progress — photo + single-clip APPROVED (2026-08-30); ordered-reel defect fixed via TASK-036 (PR #41, merged into this branch as `4765ca0`), packet re-rendered and machine-verified; span rendering is executor-level only — app-level span reel/clip export lands with TASK-037; **only the human reel re-review remains** (`docs/task-021-render-review.md` § re-review request) |
-| TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | merged onto the Task 021 branch — schema v11 spans/ledger/provenance, dry-run + idempotent importer, CLI + Library dialog, span rendering at the executor level (app-level span reel/clip export lands with TASK-037); waits behind 021 review |
-| TASK-023 | DAM release packaging, UI CI, and clean-machine acceptance | Codex (Mac) | in progress — `verify-release.sh`, `doctor --deep`, `docs/release.md`, real-language harness + smoke checklist in place; clean-machine human acceptance remains |
+| TASK-021 | Non-destructive recipes + photo/video render and export | Codex team (Mac) | done — merged to main as PR #37 (`d915f3d`); render-golden review PASSED (2026-08-30 review + 2026-08-31 delegated reel re-review, `docs/task-021-render-review.md`); advanced treatment matrix deferred to the unification roadmap as honest capability errors |
+| TASK-022 | Reel Studio catalogue and recipe importer | Codex (Mac) | done — shipped in PR #37; PR #38 closed as fully contained |
+| TASK-023 | DAM release packaging, UI CI, and clean-machine acceptance | Codex (Mac) | in progress — tooling complete (one-command `scripts/package-macos.sh`, build provenance, ad-hoc labeling, fail-closed verify); final DMG cut after the current task flood; **clean-machine human acceptance remains (John)** |
 | TASK-024 | Source-fidelity truthfulness + ranking breakdown export | OpenCode | done — PR #22; orientation truthful, real ICC tests, plain-language breakdown |
 | TASK-025 | Store hardening (feedback immutability, owner-safe upserts, integrity) | OpenCode | done — PR #21; schema v5 triggers, owner isolation tests |
 | TASK-026 | Pipeline ops (analyze staleness, cancellable renders, photo jobs) | OpenCode | done — PR #23; schema v6 photo job lifecycle |
@@ -38,39 +38,35 @@
 | TASK-030 | Portable model runtime and optional Windows acceleration | Codex team | backlog — ONNX CPU/CoreML/CUDA/DirectML; PyTorch training/export only |
 | TASK-031 | Windows packaging and clean-machine parity acceptance | Codex team + John (review) | backlog — after Tasks 023 and 028–030 |
 
-## Current continuation (2026-08-30)
+## Current state (2026-09-01)
 
-Task 022 (Reel Studio importer) is merged onto the Task 021 render branch: schema v11 manual spans
-and an import ledger, dry-run + idempotent importer, `crushctl import`, the Library import dialog,
-and span rendering through the reel executor, with provenance pills that never claim a preference
-profile. Task 023 release tooling landed alongside: `scripts/verify-release.sh`, `crushctl doctor
---deep`, and `docs/release.md` (install/privacy/data-location/backup/relink/uninstall).
+The Mac release candidate is assembled on main: Tasks 021+022+036 (durable photo/clip/ordered-reel
+rendering, schema v11–v12, the Reel Studio importer with adjustable first-class spans), 032/033
+(style-eval remediation, sequence judgment), 035 (render follow-ups), 038 (rename survival + shot
+identity), 039 (full UX/UI pass + compare auto-advance + learned wording), and 040's render-progress
+item are all merged through reviewed PRs. The render-golden review and the 018 style proof are
+RECORDED (delegated reviewer per John's 2026-08-31 directive — see
+`docs/task-021-render-review.md` and `docs/style-proof-review.md`; John may amend either).
+Packaging is one command (`scripts/package-macos.sh`) with build provenance and honest ad-hoc
+labeling.
 
-The editor-facing pass from the 2026-08-30 review is implemented and covered by the browser
-harness: a detail-player reopen fix, a Standout control, Pick/Reject/Min-rating Review filters,
-photo export straight from the detail drawer, photo re-index and remove-from-library (originals
-untouched), an inline "stored intent, not yet renderable" warning for pacing/crop/grade, a visible
-searching state, editor-language status labels, the consumer empty-state copy, hidden export audit
-snapshots, help, and consistent timecodes.
+Remaining before the release: TASK-037 merge (PR #46), TASK-034 (catalogue unification — span text
+into search, confirmation flow, schema v13), TASK-040 (search kind argument, video thumbnails),
+the final DMG from merged main, and John's clean-machine acceptance (`docs/smoke.md`) — the one
+human gate that cannot be delegated. 028–031 remain the additive Windows track.
+`docs/platform-architecture.md`: PyTorch stays training/evaluation-only; the shipped app retains a
+CPU path.
+| TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | done — merged as PR #39 (`2766843`) |
+| TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | done — merged as PR #40 (`cb7f9c6`) |
+| TASK-034 | Catalogue unification — span text in search, first-class spans | OpenCode | in progress — dispatching post-037 (schema v13 serializes after v12) |
+| TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | done — merged as PR #45 (`cfd52c3`): shared duration-tolerance rule, recovery off the setup thread, memoized hashing/probes, real ffmpeg progress, preset single-source; byte-stability proven |
+| TASK-037 | First-class spans — adjustable boundaries, one catalogue (Reel Studio unification step 1) | OpenCode | in review — PR #46: schema v12, all four clamps → source-video range, derived `adjusted` provenance, re-import never reverts, span reel AND clip export unblocked from the app; byte-stable |
+| TASK-038 | Rename survival and shot-identity hardening (key feature) | OpenCode | done — merged as PR #44 (`22e3984`): resplit evidence-loss fix (data-loss class), hash-verified relink (CLI + app), ingest moved/renamed/duplicate reporting, identity audit |
+| TASK-039 | UX/UI enhancement track — full pass (craft + workflow) | Frontend lane | done — merged as PR #42 (`dafdd9d`) + follow-up PR #43: collections, AA contrast, focus, full keyboard, in-place search, reduced motion, design tokens, SF Mono fix, multi-select + batch ops, compare auto-advance (John: yes), learned-profile wording per the recorded verdict |
+| TASK-040 | Backend contracts for UX follow-ups | Backend lane | backlog — search kind argument, video thumbnails; render progress done via #45; video collection membership DECIDED by John 2026-08-31: shot-level (a) — video rows keep the honest hint |
 
-Human hard stops remain exactly where they must: **021 render-golden review** (visual/color/
-boundary/audio/manifest artifacts), **018 held-out style proof**, and **023 clean-machine
-acceptance** (`docs/smoke.md`). No agent test or CI is release approval. 028–031 remain the additive
-Windows track. See `docs/platform-architecture.md`. PyTorch is reserved for training/evaluation and
-validated ONNX export; the shipped app always retains a CPU path.
-| TASK-032 | Preference-learning evaluation remediation (018 prerequisite) | OpenCode | done — merged as PR #39 (`2766843`): media-disjoint split, production-scale composed-ranker gate, transactional withdrawal, netting probes; review fixes applied and confirmed |
-| TASK-033 | Automatic sequence/repetition judgment (020 completion) | OpenCode | in review — PR #40 (`task/33-sequence`, stacked on #37): sequence signals + one-click suggestions + selects duplicate cap; reviewed MERGE, follow-ups applied (clique guard, CLI cap echo, median panic fix), CI green; merges after #37 |
-| TASK-034 | Catalogue unification — span text in search, Review, and the confirmation flow (Reel Studio unification step 2) | OpenCode | done — schema v13 (span-keyed reference sets + `manual_spans_fts`), text-match-only span search results, spans in Review/All-assets, two-step reversible imported-evidence confirmation in Preferences; honest inert-evidence copy; re-import survival proven; gates green |
-| TASK-035 | Render engineering follow-ups from the 2026-08-30 review | OpenCode | backlog — next stretch, after 021 merge; no golden changes |
-| TASK-037 | First-class spans — adjustable boundaries, one catalogue (Reel Studio unification step 1) | OpenCode | backlog — impl plan ready (found: clamp lives in 4 places incl. migration 0011 SQL triggers → schema v12); after 021 merge; byte-stable for approved render paths |
-| TASK-038 | Rename survival and shot-identity hardening (key feature) | OpenCode | implemented — `replace_shots` diffing replace stops resplit evidence loss (data-loss class), verified `crushctl relink` + app "Locate moved file…" flow, ingest `moved`/`renamed` reporting, identity audit recorded (path lookups are dedup/target resolution only); in review |
-| TASK-039 | UX/UI enhancement track — full pass (craft + workflow) | Frontend lane | waves 1–3 done on `task/39-ux-wave1` as PR #42: collections reachable, AA contrast + focus, full keyboard, in-place search, reduced motion, design tokens (0 hex outside :root, 61 tokens), SF Mono actually rendering (latent stack bug), multi-select + batch ops, honest errors; reviewed each wave, review fixes applied, 29/29 harness; merges after #37; release DMG ships after this track (John's call) |
-| TASK-040 | Backend contracts for UX follow-ups (search kind, video thumbs, render progress, video collection membership) | Backend lane | backlog — created 2026-08-31 from the UX track discoveries; one item needs John's decision (whole-video collection membership — recommendation: keep shot-level) |
-| TASK-036 | Ordered-reel boundary-frame drops (021 review rejection) | OpenCode (Lane A idle) | engineering done — PR #41 squash-merged into the 021 branch (`4765ca0`): frame-exact items, exact-cut concat, silence-padded audio, fail-closed VIDEO-stream verification, fixture golden; packet re-rendered + machine-verified (see `docs/task-021-render-review.md`); **human reel re-review pending — gates 021** |
+## Next (2026-09-01)
 
-## OpenCode next stretch (2026-08-30)
-
-Order: 032 → 033 → 034 → 035 (034/035 wait for the 021/022 merge; 032/033 can start from
-`origin/main` conventions now, in their own worktrees). Every task: one branch, one PR, full gates
-(fmt, warnings-denied clippy, workspace tests, `npm run test:ui`), truthful record in the task file.
-Human gates are unchanged and none of these tasks may claim or bypass them.
+Finish TASK-037 (PR #46) → TASK-034 → TASK-040 → final DMG → clean-machine acceptance. Every task:
+one branch, one PR, full gates (fmt, warnings-denied clippy, workspace tests, `npm run test:ui`),
+truthful record in the task file, reviewer pass before merge.
