@@ -7,7 +7,7 @@ foundation that makes those decisions traceable; cataloging is not the product's
 
 **Status:** pre-alpha. Mixed-media ingest/search, capability-gated RAW/HEIF/TIFF support,
 general strong-shot analysis, review tools and editable select plans are implemented. Personal
-profiles are experimental: held-out style proof still requires human review. Full recipe-based
+profiles are experimental: held-out style proof is recorded (delegated, amendable). Full recipe-based
 photo/reel rendering is in progress, the Reel Studio importer is implemented, and release
 acceptance is in progress. See `TASKS.md` for implemented scope and the remaining human gates.
 

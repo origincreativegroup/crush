@@ -16,10 +16,11 @@ Studio provenance as third-party. Until the frozen contracts exist, unsupported 
 honest capability errors. **Key features John named:** *file renaming* and *shot identity*.
 Shot identity is already content-addressed by design (`stable_shot_id` from video sha256 + index
 + start; media keyed by owner+sha256, so renames/moves preserve identity and re-adding a moved
-file updates the path on the same row). First-class renaming (Crush performing renames) and an
-explicit moved-file relink flow do not exist yet; any rename feature must respect the safety
-posture — originals are never modified by Crush today, so renaming is opt-in, previewed, and
-reversible.
+file updates the path on the same row). The moved-file relink flow SHIPPED (TASK-038, PR #44:
+`crushctl relink` with SHA-256 verification + the app's "Locate moved file…" affordance). Crush
+PERFORMING renames does not exist yet (survive-only per John's 2026-08-31 scope decision); any
+future rename feature must respect the safety posture — originals are never modified by Crush
+today, so renaming would be opt-in, previewed, and reversible.
 
 **Source of truth:** `docs/project-blueprint.md` remains the engineering architecture and build
 protocol, with `docs/blueprint-review.md` as its review discipline. The additive product expansion
@@ -49,6 +50,19 @@ render-golden review in Task 021, and clean-machine acceptance before release in
 **Next team:** `docs/next-stretch-team-handoff.md` assigns the 021 closeout, 022 integration, 023
 release and 028–031 Windows lanes, their merge order and human gates. Use it for the next stretch;
 this file remains the deeper implementation history and standing engineering rules.
+
+## Current state (2026-09-02)
+
+**The 0.0.1 release candidate is assembled.** All engineering tasks through TASK-040 are merged to
+main through reviewed PRs (#37–#51): rendering + importer (021/022/036), style-eval + sequence
+judgment (032/033), catalogue unification (034, schema v13), render follow-ups (035), first-class
+adjustable spans (037, schema v12), rename survival + shot identity (038), the full UX/UI pass with
+compare auto-advance and learned wording (039 + follow-up), and search kind + video thumbnails
+(040). The render-golden review and the 018 style proof are recorded under delegated authority
+(John's 2026-08-31 directive; amendable). The DMG is cut and verified:
+`docs/release-record-0.0.1.md` (commit 7d9b3b5, ad-hoc signed, unmistakably labeled). The ONLY
+remaining gate is John's clean-machine acceptance (`docs/smoke.md`). The historical sections below
+are the implementation record.
 
 ## Current implementation state (2026-08-30)
 
@@ -107,7 +121,7 @@ UI), #30 (019a DAM organization), #31 (019b review UI), #33+#34 (020a editorial 
 Schema is at v13 (0009 plans with boundary-safe shot clamps and selection provenance; 0010 durable
 render recipes/jobs/attempts/manifests; 0011 Reel Studio manual spans + import ledger; 0012 span
 plan items clamp to the source video; 0013 span-keyed reference-set items + `manual_spans_fts`).
-App command surface is 73 registered commands.
+App command surface is 78 registered commands.
 
 Branching note for future agents: the app `generate_handler!` list and the big command block in
 `crates/app/src-tauri/src/lib.rs` conflict-prone across parallel branches — rebase onto main before
@@ -118,14 +132,14 @@ Known caveats carried forward:
   round-trip is the enforced coverage.
 - The UI harness passed on the #35 macOS runner; Task 020b makes it blocking and adds native
   app tests/Clippy so Linux-only checks cannot hide macOS-gated bridge regressions.
-- HUMAN HARD STOPS still open: Task 018 held-out style proof (eval output in PR #25 — John reviews
-  before any UI may claim "learned"), Task 021 render-golden review, Task 023 clean-machine
-  acceptance. Plan files and per-task acceptance records live in `.tasks/done/`.
+- HUMAN HARD STOPS: Task 018 style proof and Task 021 render-golden review are RECORDED
+  (2026-08-31, delegated authority — docs/style-proof-review.md, docs/task-021-render-review.md;
+  John may amend). Only Task 023 clean-machine acceptance remains open. Plan files and per-task acceptance records live in `.tasks/done/`.
 
 Current: **TASK-021 + TASK-022 on one branch**, with Task 023 tooling. The render and importer
 engineering is implemented (durable no-clobber photo/clip/ordered-reel jobs, schema v11 spans,
 dry-run importer, span rendering, the editor-review pass listed above) and green on the local gates.
-The `Current implementation state (2026-08-30)` section is the authoritative status. Only the human
+The `Current state (2026-09-02)` section below is the authoritative status. Only the human
 gates remain: 021 render-golden review, 023 clean-machine acceptance, and the 018 held-out style
 proof.
 
