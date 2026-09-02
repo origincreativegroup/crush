@@ -1358,7 +1358,7 @@
           set.itemCount += 1;
           added += 1;
         }
-        return { setId: set.id, setName: set.name, added, alreadyPresent };
+        return { setId: set.id, setName: set.name, added, alreadyPresent, setStatus: set.status };
       }
       case "style_profile_status":
         return styleProfileStatus();

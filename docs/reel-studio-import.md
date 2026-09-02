@@ -56,8 +56,9 @@ Confirming is a two-step, reversible act: the first click adds the clips to a na
 reference set (e.g. `Reel Studio · imported evidence`) that starts **unconfirmed** and therefore
 inert; the second click confirms the set, using the same confirm / disable / delete machinery as
 any other reference set — disabling or deleting it withdraws the evidence and invalidates anything
-it influenced. Skip records a local decision only; nothing is written to the library, and
-re-importing never resurrects a skipped clip as new.
+it influenced. Skip records a decision local to this device only; nothing is written to the library,
+re-importing never resurrects a skipped clip as new, and a skipped clip can be brought back with its
+Unskip button in Preferences.
 
 Honesty note, stated in the panel itself: confirmed imported clips are **catalogued evidence**.
 Spans carry no embedding vectors, so they do not train the current preference model — that starts

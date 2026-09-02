@@ -1641,14 +1641,39 @@ const tests = {
     await poll(async () => (await visibleText(rows.nth(0).locator(".status-pill"))) === "Confirmed");
     assert.match(await visibleText(rows.nth(0).locator(".style-set-sets")), /Confirmed as evidence/);
 
-    // Skip records a local decision only: the clip leaves the list, nothing else moves.
+    // Skip records a local decision only: the row stays in the list, greyed — nothing
+    // else moves.
     await rows.nth(1).getByRole("button", { name: "Skip", exact: true }).click();
-    await poll(async () => (await rows.count()) === 1);
+    await poll(async () => (await visibleText(rows.nth(1).locator(".status-pill"))) === "Skipped");
     assert.match(await visibleText(frame.locator("#imported-evidence-count")), /1 skipped/);
     assert.match(
       await visibleText(frame.locator("#style-message")),
       /Nothing was written to the library/,
     );
+
+    // Task 034 review fix: skip is not a one-way trap — Unskip returns the row to the
+    // confirm/skip choice.
+    await rows.nth(1).getByRole("button", { name: "Unskip", exact: true }).click();
+    await poll(
+      async () => (await visibleText(rows.nth(1).locator(".status-pill"))) === "Awaiting decision",
+    );
+    assert.equal(
+      await rows.nth(1).getByRole("button", { name: "Confirm", exact: true }).isVisible(),
+      true,
+    );
+    assert.equal(
+      await rows.nth(1).getByRole("button", { name: "Skip", exact: true }).isVisible(),
+      true,
+    );
+    assert.equal(
+      ((await frame.locator("#imported-evidence-count").textContent()) ?? "").includes("skipped"),
+      false,
+      "the skipped count clears once the row is unskipped",
+    );
+
+    // …and skipping again greys it in place (the decision persists locally).
+    await rows.nth(1).getByRole("button", { name: "Skip", exact: true }).click();
+    await poll(async () => (await visibleText(rows.nth(1).locator(".status-pill"))) === "Skipped");
 
     // Bulk confirm of an already-confirmed clip is idempotent and says so.
     await rows.nth(0).locator(".review-select input").check();
@@ -1667,10 +1692,31 @@ const tests = {
     assert.equal(await visibleText(remove), "Really delete?");
     await remove.click();
     await poll(async () => (await sets.count()) === 0);
-    // The skipped clip stays hidden (skip is persistent local state); the confirmed-then-
-    // withdrawn clip is back to "Awaiting decision" with its skip/confirm actions intact.
-    await poll(async () => (await rows.count()) === 1);
+    // The skipped clip stays in the list greyed (skip is persistent local state); the
+    // confirmed-then-withdrawn clip is back to "Awaiting decision" with its skip/confirm
+    // actions intact.
+    await poll(async () => (await rows.count()) === 2);
     assert.equal(await visibleText(rows.nth(0).locator(".status-pill")), "Awaiting decision");
+    assert.equal(await visibleText(rows.nth(1).locator(".status-pill")), "Skipped");
+
+    // Task 034 review fix: confirming into an ALREADY-CONFIRMED set speaks honestly —
+    // the message must not claim the set "stays inert until you confirm it".
+    await rows.nth(0).locator(".review-select input").check();
+    await rows.nth(0).getByRole("button", { name: "Confirm", exact: true }).click();
+    await poll(async () => (await sets.count()) === 1);
+    await poll(
+      async () => (await visibleText(sets.nth(0).locator(".status-pill"))) === "Unconfirmed",
+    );
+    await sets.nth(0).locator("button.secondary").click();
+    await poll(async () => (await visibleText(sets.nth(0).locator(".status-pill"))) === "Confirmed");
+    await rows.nth(1).getByRole("button", { name: "Unskip", exact: true }).click();
+    await poll(
+      async () => (await visibleText(rows.nth(1).locator(".status-pill"))) === "Awaiting decision",
+    );
+    await rows.nth(1).getByRole("button", { name: "Confirm", exact: true }).click();
+    await poll(async () =>
+      (await visibleText(frame.locator("#style-message"))).includes("already confirmed"),
+    );
   },
 };
 

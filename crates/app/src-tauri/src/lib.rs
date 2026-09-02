@@ -1620,6 +1620,9 @@ mod macos {
     struct ImportedEvidenceOutcome {
         set_id: String,
         set_name: String,
+        /// The target set's lifecycle state, so the UI can speak honestly about what the
+        /// confirmation did — an already-confirmed set must not be described as inert.
+        set_status: String,
         /// Items newly added by this call (duplicates are reported, never re-added).
         added: usize,
         already_present: usize,
@@ -1740,6 +1743,7 @@ mod macos {
                     set
                 }
             };
+            let set_status = reference_status_to_str(set.status).to_owned();
             let existing = store
                 .reference_set_items(DEFAULT_OWNER_ID, &set.id)?
                 .into_iter()
@@ -1748,6 +1752,11 @@ mod macos {
                 .collect::<std::collections::HashSet<_>>();
             let mut added = 0_usize;
             let mut already_present = 0_usize;
+            // The add-item loop is deliberately NOT one transaction: a mid-loop crash
+            // leaves a partial item list, but the set is unconfirmed (inert) unless it
+            // was already confirmed, and re-running the command heals idempotently —
+            // present spans are counted, never re-added — which is why the loose shape
+            // is safe here.
             for span in &spans {
                 if existing.contains(&span.id) {
                     already_present += 1;
@@ -1769,6 +1778,7 @@ mod macos {
             Ok(ImportedEvidenceOutcome {
                 set_id: set.id,
                 set_name: set.name,
+                set_status,
                 added,
                 already_present,
             })

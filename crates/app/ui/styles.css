@@ -1515,4 +1515,9 @@ nav {
   margin-top: var(--space-4);
   font-weight: 700;
 }
+
+/* Task 034 review fix: a skipped evidence row stays visible but recedes — greyed,
+   checkbox disabled — with its per-row Unskip as the way back. */
+.style-set-row.evidence-skipped {
+  opacity: 0.55;
 }
