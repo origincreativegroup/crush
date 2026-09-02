@@ -126,6 +126,65 @@ const tests = {
     await frame.locator('.dam-kind[data-kind=""]').click();
     await poll(async () => (await cards.count()) === 3);
     assert.equal(await lastSearchKind(), "all");
+
+    // ---- Task 040 review fix: kind/Top-N switches landing IN FLIGHT ----
+    // The pending-search machinery serializes by query text only, so a switch made while
+    // a search runs used to be dropped: the in-flight batch (fetched under the OLD
+    // kind/top) rendered as if current and nothing self-healed. The mock's search gate
+    // (holdNextSearch/releaseSearch — pure promise parking, no timers) makes the window
+    // deterministic: the harness parks a search, lands the clicks inside it, then
+    // releases and requires the completion path to re-issue with the clicked kind.
+
+    // Back to browse mode so the first failure path is reachable: the FIRST search is in
+    // flight (mode is still "browse" until it resolves), a kind click filters the browse
+    // pool, and the in-flight batch fetched under the OLD kind must not win.
+    await input.fill("");
+    await poll(async () => (await visibleText(frame.locator("#dam-title"))) === "All assets");
+    await poll(async () => (await cards.count()) === 3);
+    let searches = (await mockCalls(page)).filter((call) => call.command === "search").length;
+    await inAppFrame(page, () => window.__crushMock.holdNextSearch());
+    await input.fill("rocket at dusk");
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 1);
+    const parked = (await mockCalls(page)).filter((call) => call.command === "search").at(-1);
+    assert.equal(parked.args.kind, "all", "the parked search was issued under the old kind");
+    await frame.locator('.dam-kind[data-kind="photo"]').click();
+    await poll(async () => (await cards.count()) === 2);
+    await inAppFrame(page, () => window.__crushMock.releaseSearch());
+    // The stale batch (kind "all") resolves; the completion path must notice the kind
+    // changed and re-issue — the final results match the CLICKED kind, not the issued one.
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 2);
+    assert.equal(await lastSearchKind(), "photo");
+    await poll(async () => (await cards.count()) === 1);
+    assert.equal(await cards.filter({ hasText: "select.jpg" }).count(), 1);
+    // A kind re-issue resets the selection index (it referred to the old family's
+    // ordering). The mock's kind families return a single result, so reset-vs-clamp is
+    // not distinguishable here — both land on card 0; this asserts the re-issued grid
+    // still carries a valid selection (the reset itself is disclosed in the PR).
+    assert.equal(await cards.nth(0).getAttribute("aria-selected"), "true");
+
+    // Second failure path: a same-text re-search is in flight (the Top-N change triggers
+    // it, so pendingQuery equals the query text and the old machinery would drop
+    // everything), and BOTH the Top-N and the kind change while it runs. The re-issue
+    // must carry the new kind AND the new top.
+    searches = (await mockCalls(page)).filter((call) => call.command === "search").length;
+    await inAppFrame(page, () => window.__crushMock.holdNextSearch());
+    await frame.locator("#top-select").selectOption("100");
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 1);
+    await frame.locator("#top-select").selectOption("25");
+    await frame.locator('.dam-kind[data-kind="video"]').click();
+    await inAppFrame(page, () => window.__crushMock.releaseSearch());
+    await poll(async () =>
+      (await mockCalls(page)).filter((call) => call.command === "search").length === searches + 2);
+    const reissued = (await mockCalls(page)).filter((call) => call.command === "search").at(-1);
+    assert.equal(reissued.args.kind, "video");
+    assert.equal(reissued.args.top, 25);
+    // Poll on the video card itself: the stale batch also renders a single card, so a
+    // bare count would race the re-issue's render.
+    await poll(async () => (await cards.filter({ hasText: "rocket-launch.mov" }).count()) === 1);
+    assert.equal(await cards.count(), 1);
   },
 
   async "import-reel-studio"(page) {

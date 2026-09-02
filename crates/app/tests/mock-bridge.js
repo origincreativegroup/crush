@@ -347,6 +347,21 @@
     return true;
   }
 
+  // Task 040 review fix: the in-flight window must be observable. The harness arms this
+  // gate (holdNextSearch), the next `search` invoke stays pending until releaseSearch()
+  // resolves it with the results captured at invoke time, so a kind/Top-N click can land
+  // while a search is genuinely in flight. Pure promise parking — no timers — so the
+  // frozen clock cannot close the window. Inert unless armed.
+  let heldSearch = null;
+  const holdNextSearch = () => {
+    heldSearch = {};
+  };
+  const releaseSearch = () => {
+    const gate = heldSearch;
+    heldSearch = null;
+    gate?.resolve?.();
+  };
+
   const searchResults = (q, kind = "all") => {
     if (scenario === "empty" || q === "zzz") return [];
     // Task 040 (C8): the mock honors the search command's kind argument the way the real
@@ -1271,7 +1286,16 @@
         if (scenario === "search-error" && q === "boom") {
           throw "The vector store is unavailable.";
         }
-        return searchResults(q, String(args.kind || "all"));
+        const results = searchResults(q, String(args.kind || "all"));
+        if (heldSearch && !heldSearch.resolve) {
+          // Park this search in flight; releaseSearch() resolves it with the results
+          // captured HERE — i.e. the kind/top the search was ISSUED with, which is
+          // exactly the stale batch the app must not leave on screen.
+          return new Promise((resolve) => {
+            heldSearch.resolve = () => resolve(results);
+          });
+        }
+        return results;
       }
       case "shot_detail":
         return shotDetail(args.id);
@@ -1593,5 +1617,5 @@
     },
   };
 
-  window.__crushMock = { calls, emit };
+  window.__crushMock = { calls, emit, holdNextSearch, releaseSearch };
 })();

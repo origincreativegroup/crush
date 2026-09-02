@@ -562,6 +562,14 @@ fn search(
     // Fail fast on an unknown kind before loading models or the store.
     let kind = crush_search::SearchKind::parse(kind)?;
     let store = Store::open(&paths.root)?;
+    // Task 040 review fix: `--kind span` is pure catalogue FTS — no vectors, no model
+    // files, no embedding metadata. Serve it before any model-dependent machinery so a
+    // library whose models are missing, removed, or changed after indexing can still
+    // search its imported clips by text.
+    if kind == crush_search::SearchKind::Span {
+        let results = SearchEngine::search_span_text(&store, DEFAULT_OWNER_ID, query, top)?;
+        return print_search_results(&results, json);
+    }
     let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, cfg.search.transcript_hit_boost)?;
     let preference = ProviderPreference::parse(&cfg.embed.provider)?;
     eprintln!(
@@ -571,6 +579,13 @@ fn search(
     let mut embedder = Embedder::new(paths.models(), preference, cfg.limits.threads)?;
     let mut text_embedder = |text: &str| embedder.embed_text(text);
     let results = engine.search_assets(&store, &mut text_embedder, query, top, kind)?;
+    print_search_results(&results, json)
+}
+
+fn print_search_results(
+    results: &[crush_search::AssetSearchResult],
+    json: bool,
+) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
         return Ok(());

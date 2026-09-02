@@ -494,25 +494,11 @@ impl SearchEngine {
         ensure!(!query.trim().is_empty(), "search query must not be empty");
         ensure!(top_k > 0, "top must be greater than zero");
 
-        let fts_query = transcript_fts_query(query);
-
         if kind == SearchKind::Span {
-            let span_hits = match &fts_query {
-                Some(fts_query) => store.span_text_hits(&self.owner_id, fts_query, top_k)?,
-                None => Vec::new(),
-            };
-            let results = span_text_results(&span_hits);
-            tracing::info!(
-                job_id = "search",
-                stage = "search",
-                owner_id = self.owner_id,
-                query,
-                kind = kind.as_str(),
-                results = results.len(),
-                "span catalogue search complete"
-            );
-            return Ok(results);
+            return Self::search_span_text(store, &self.owner_id, query, top_k);
         }
+
+        let fts_query = transcript_fts_query(query);
 
         let want_shots = kind == SearchKind::All || kind == SearchKind::Video;
         let want_photos = kind == SearchKind::All || kind == SearchKind::Photo;
@@ -681,6 +667,39 @@ impl SearchEngine {
             indexed_assets = self.len(),
             results = results.len(),
             "mixed-media search complete"
+        );
+        Ok(results)
+    }
+
+    /// Span catalogue text search with no engine, no embedder, and no model files (Task 040
+    /// review fix): the `span` branch of [`SearchEngine::search_assets_in_context`] is pure
+    /// SQLite FTS — spans carry no vectors — so a library whose models are missing, removed,
+    /// or changed after indexing can still search its imported clips by text. An associated
+    /// function on purpose: building a [`SearchEngine`] validates embedding metadata that
+    /// this path must not need. bm25 order is preserved (no score sort — spans share score
+    /// 0.0).
+    pub fn search_span_text(
+        store: &Store,
+        owner_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> anyhow::Result<Vec<AssetSearchResult>> {
+        ensure!(!query.trim().is_empty(), "search query must not be empty");
+        ensure!(top_k > 0, "top must be greater than zero");
+        let fts_query = transcript_fts_query(query);
+        let span_hits = match &fts_query {
+            Some(fts_query) => store.span_text_hits(owner_id, fts_query, top_k)?,
+            None => Vec::new(),
+        };
+        let results = span_text_results(&span_hits);
+        tracing::info!(
+            job_id = "search",
+            stage = "search",
+            owner_id,
+            query,
+            kind = SearchKind::Span.as_str(),
+            results = results.len(),
+            "span catalogue search complete"
         );
         Ok(results)
     }
@@ -3307,6 +3326,65 @@ mod tests {
             .unwrap();
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].asset_type, "span");
+    }
+
+    /// Task 040 review fix: `--kind span` must work with no usable models. The catalogue
+    /// pass is pure SQLite FTS — no vectors, no embedding metadata, no model files — so
+    /// `search_span_text` runs on a store that would refuse `SearchEngine::load`
+    /// (exactly the situation the CLI's span early-return exists for: models missing,
+    /// removed, or changed after indexing) and still returns honest bm25-ordered text
+    /// matches. The video row is catalogue data the span trigger requires; what is
+    /// deliberately absent is every model-dependent artifact.
+    #[test]
+    fn span_text_search_needs_no_models_or_engine() {
+        let directory = TempDir::new().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        store
+            .upsert_video(
+                DEFAULT_OWNER_ID,
+                &Video {
+                    id: "video-1".to_owned(),
+                    owner_id: DEFAULT_OWNER_ID.to_owned(),
+                    path: "/footage/video.mov".to_owned(),
+                    sha256: "video-sha".to_owned(),
+                    duration_s: Some(2.0),
+                    fps: Some(24.0),
+                    width: Some(1920),
+                    height: Some(1080),
+                    has_audio: true,
+                    status: VideoStatus::Embedded,
+                    indexed_at: None,
+                },
+            )
+            .unwrap();
+        // Deliberately NO embedding metadata and NO vectors: the engine path really is
+        // closed on this store, which is why the standalone function exists.
+        assert!(SearchEngine::load(&store, DEFAULT_OWNER_ID, 0.0).is_err());
+        span_fixture(
+            &mut store,
+            "span-fresh",
+            "V1-0001_S1",
+            "zeppelin over the harbor at dusk",
+        );
+        let results =
+            SearchEngine::search_span_text(&store, DEFAULT_OWNER_ID, "zeppelin harbor", 5).unwrap();
+        assert_eq!(results.len(), 1);
+        let span = &results[0];
+        assert_eq!(span.asset_type, "span");
+        assert_eq!(span.asset_id, "span-fresh");
+        assert_eq!(span.score, 0.0);
+        assert_eq!(span.cosine, 0.0);
+        assert_eq!(span.thumb_path, None, "spans have no thumbnail — ever");
+        assert!(span
+            .catalogue_snippet
+            .as_deref()
+            .unwrap()
+            .contains("zeppelin"));
+        assert!(span.score_breakdown.as_ref().unwrap().text_match_only);
+        // A query whose words match no catalogue text returns an honest empty list.
+        let no_matches =
+            SearchEngine::search_span_text(&store, DEFAULT_OWNER_ID, "unmatched", 5).unwrap();
+        assert!(no_matches.is_empty());
     }
 
     #[test]

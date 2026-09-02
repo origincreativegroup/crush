@@ -28,8 +28,8 @@ small and independent; land as one PR or split if review prefers.
       path rules follow the existing photo thumb discipline; no thumbnail fabrication for assets
       that have none — honest placeholder stays.
       (Implemented 2026-09-01: `VideoView.thumb_path` (`crates/app/src-tauri/src/lib.rs`) — for
-      videos the FIRST shot's `thumb_rel` in idx order (`first_shot_thumb_rel`; strictly shot 0,
-      a later shot never stands in), resolved through the same `store.thumbnail_path` → absolute
+      videos the FIRST shot's `thumb_rel` in idx order (`first_shot_thumb_rel`; first shot in
+      idx order, a later shot never stands in), resolved through the same `store.thumbnail_path` → absolute
       path → `convertFileSrc` discipline as photo thumbs and the Review grid; photos in the same
       response expose their own `thumb_rel` the same way. A video still indexing (no shots) or
       without a first-shot thumb gets `null` and the Library keeps the placeholder; a thumb that
