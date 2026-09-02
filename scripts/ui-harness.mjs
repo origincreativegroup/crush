@@ -1545,6 +1545,19 @@ const tests = {
     assert.equal(await frame.locator("#compare-open").isHidden(), true);
     // The explicit evidence path stays reachable from the drawer.
     assert.equal(await frame.locator("#detail-style-set").isVisible(), true);
+    // Task 034 review fix: the transport is live for imported clips. The harness has no
+    // real media, so the mock records seeks/plays (mock-bridge.js); the drawer must seek
+    // to the span's start (3.2 s) and play, with play/scrub enabled and the readout
+    // span-relative — the same shot-relative convention shots use.
+    await poll(async () => {
+      const media = await inAppFrame(page, () => window.__mediaCalls);
+      return media.some((call) => call.name === "seek" && call.time === 3.2);
+    });
+    const media = await inAppFrame(page, () => window.__mediaCalls);
+    assert.equal(media.some((call) => call.name === "play"), true, "the drawer plays the span");
+    assert.equal(await frame.locator("#detail-play").isEnabled(), true);
+    assert.equal(await frame.locator("#detail-scrubber").isEnabled(), true);
+    assert.match(await visibleText(frame.locator("#detail-position")), /^0:00 \/ 0:02$/);
     await frame.locator("#detail-close").click();
   },
 
@@ -1577,6 +1590,14 @@ const tests = {
     await frame.locator("#detail").waitFor({ state: "visible" });
     assert.equal(await visibleText(frame.locator("#detail-kind")), "Imported clip detail");
     assert.match(await visibleText(frame.locator("#detail-transcript")), /Catalogued evidence/);
+    // Task 034 review fix: the transport guards admit kind "span" here too — the drawer
+    // seeks to the span start and the play control is live.
+    await poll(async () => {
+      const media = await inAppFrame(page, () => window.__mediaCalls);
+      return media.some((call) => call.name === "seek" && call.time === 3.2)
+        && media.some((call) => call.name === "play");
+    });
+    assert.equal(await frame.locator("#detail-play").isEnabled(), true);
     await frame.locator("#detail-close").click();
     // The pairwise compare pool excludes imported clips — prefer needs compared-media
     // semantics and vectors, and spans have neither.

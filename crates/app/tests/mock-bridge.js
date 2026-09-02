@@ -15,6 +15,45 @@
   const scenario = new URLSearchParams(window.location.search).get("scenario");
   if (!scenario) return;
 
+  // Task 034 review fix: observable playback transport. The harness loads no real media,
+  // so the drawer's seek-then-play would otherwise be invisible (readyState stays at 0
+  // and the loadedmetadata path never runs). Two prototype stubs make it assertable:
+  //   1. readyState reports at least HAVE_METADATA (1), so the app takes its immediate
+  //      seek branch instead of waiting for an event that never fires.
+  //   2. currentTime assignments and play/pause calls are recorded on
+  //      window.__mediaCalls for the harness to assert against.
+  // Both are inert unless app code drives a media element (photo paths never do).
+  window.__mediaCalls = [];
+  const mediaCalls = window.__mediaCalls;
+  const mediaProto = HTMLMediaElement.prototype;
+  const currentTimeDescriptor = Object.getOwnPropertyDescriptor(mediaProto, "currentTime");
+  if (currentTimeDescriptor?.set) {
+    Object.defineProperty(mediaProto, "currentTime", {
+      get() {
+        return currentTimeDescriptor.get.call(this);
+      },
+      set(value) {
+        mediaCalls.push({ name: "seek", time: Number(value) });
+        currentTimeDescriptor.set.call(this, value);
+      },
+    });
+  }
+  const readyStateDescriptor = Object.getOwnPropertyDescriptor(mediaProto, "readyState");
+  if (readyStateDescriptor?.get) {
+    Object.defineProperty(mediaProto, "readyState", {
+      get() {
+        return Math.max(readyStateDescriptor.get.call(this), 1);
+      },
+    });
+  }
+  for (const method of ["play", "pause"]) {
+    const original = mediaProto[method];
+    mediaProto[method] = function (...args) {
+      mediaCalls.push({ name: method, currentTime: this.currentTime });
+      return original ? original.apply(this, args) : Promise.resolve();
+    };
+  }
+
   const photoPreview = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='800'%3E%3Crect width='1200' height='800' fill='%2322304e'/%3E%3Ccircle cx='760' cy='360' r='180' fill='%23e6a648'/%3E%3Cpath d='M0 650 L420 280 L760 650 Z' fill='%234f8cff'/%3E%3C/svg%3E";
 
   const listeners = new Map();

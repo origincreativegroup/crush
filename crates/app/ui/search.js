@@ -746,9 +746,15 @@
     }
   }
 
+  // Task 034 review fix: the transport is shared machinery — a span detail carries
+  // startS/endS just like a shot, and the timeupdate clamp below is already
+  // kind-agnostic, so every playback guard admits both kinds instead of dead-ending
+  // the span drawer's visible transport.
+  const playsInDetail = (d) => Boolean(d) && (d.kind === "video" || d.kind === "span");
+
   function seekAndPlay() {
     const d = state.detail;
-    if (!d || d.kind !== "video") return;
+    if (!playsInDetail(d)) return;
     const start = () => {
       el.video.currentTime = d.startS;
       el.video.play().catch(() => {});
@@ -764,7 +770,7 @@
 
   function updatePlaybackPosition() {
     const d = state.detail;
-    if (!d || d.kind !== "video") return;
+    if (!playsInDetail(d)) return;
     const length = Math.max(0, d.endS - d.startS);
     const relative = Math.max(0, Math.min(length, el.video.currentTime - d.startS));
     el.scrubber.value = String(relative);
@@ -779,7 +785,7 @@
 
   function toggleDetailPlayback() {
     const d = state.detail;
-    if (!d || d.kind !== "video") return;
+    if (!playsInDetail(d)) return;
     if (el.video.paused) {
       if (el.video.currentTime < d.startS || el.video.currentTime >= d.endS - 0.02) el.video.currentTime = d.startS;
       el.video.play().catch(() => {});
@@ -1028,7 +1034,10 @@
     }
     if (detailOpen) {
       if (inInput) return;
-      if (state.detail?.kind !== "video") return;
+      // Same transport as the buttons: space (play/pause) and "l" (loop) work for
+      // imported clips too. Arrow keys keep hitting stepShot, whose own guard stays
+      // shot-only — spans have no sibling shots to step through.
+      if (!playsInDetail(state.detail)) return;
       if (event.key === "ArrowLeft") { event.preventDefault(); stepShot(-1); }
       else if (event.key === "ArrowRight") { event.preventDefault(); stepShot(1); }
       else if (event.key === " " && !inInput) {
@@ -1091,12 +1100,12 @@
   el.detailClose.addEventListener("click", closeDetail);
   el.play.addEventListener("click", toggleDetailPlayback);
   el.goIn.addEventListener("click", () => {
-    if (state.detail?.kind !== "video") return;
+    if (!playsInDetail(state.detail)) return;
     el.video.currentTime = state.detail.startS;
     updatePlaybackPosition();
   });
   el.scrubber.addEventListener("input", () => {
-    if (state.detail?.kind !== "video") return;
+    if (!playsInDetail(state.detail)) return;
     el.video.currentTime = state.detail.startS + Number(el.scrubber.value);
     updatePlaybackPosition();
   });
