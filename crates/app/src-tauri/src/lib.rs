@@ -923,6 +923,7 @@ mod macos {
     async fn search(
         q: String,
         top: usize,
+        kind: Option<String>,
         state: State<'_, RuntimeState>,
     ) -> CommandResult<Vec<AssetSearchResult>> {
         let config = state.config.clone();
@@ -933,6 +934,11 @@ mod macos {
             command_result((|| {
                 ensure!(!q.trim().is_empty(), "search query must not be empty");
                 ensure!(top > 0, "top must be greater than zero");
+                // Task 040 (C8): the optional kind argument filters server-side — "all"
+                // (the absent default) preserves the original mixed-media contract, a
+                // specific kind returns the top `top` of that family. Unknown values are
+                // refused here, never silently widened.
+                let kind = crush_search::SearchKind::parse(kind.as_deref().unwrap_or("all"))?;
                 let mut store = Store::open(&paths.root)?;
                 let mut runtime = lock_anyhow(&cache)?;
                 if runtime.is_none() {
@@ -971,7 +977,13 @@ mod macos {
                 let SearchRuntime {
                     engine, embedder, ..
                 } = runtime;
-                engine.search_assets(&store, &mut |text: &str| embedder.embed_text(text), &q, top)
+                engine.search_assets(
+                    &store,
+                    &mut |text: &str| embedder.embed_text(text),
+                    &q,
+                    top,
+                    kind,
+                )
             })())
         })
         .await

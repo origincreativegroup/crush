@@ -67,6 +67,10 @@ enum Cmd {
         query: String,
         #[arg(long, default_value_t = 10)]
         top: usize,
+        /// Filter results to one family server-side: all (default), photo, video, or span.
+        /// `video` means shot results; `span` means imported-clip catalogue text matches.
+        #[arg(long, default_value = "all")]
+        kind: String,
         #[arg(long)]
         json: bool,
     },
@@ -266,7 +270,12 @@ fn main() -> anyhow::Result<()> {
             command: ModelsCommand::Ensure { manifest_url },
         } => ensure_models(&paths, &manifest_url),
         Cmd::Ingest { path, debug } => ingest(&cfg, &paths, &cancellation, &path, debug),
-        Cmd::Search { query, top, json } => search(&cfg, &paths, &query, top, json),
+        Cmd::Search {
+            query,
+            top,
+            kind,
+            json,
+        } => search(&cfg, &paths, &query, top, &kind, json),
         Cmd::Jobs { failed, video } => jobs(&paths, failed, video.as_deref()),
         Cmd::Resplit { video, debug } => {
             Pipeline::new(cfg, paths, cancellation).resplit(&video, debug)
@@ -546,9 +555,12 @@ fn search(
     paths: &AppPaths,
     query: &str,
     top: usize,
+    kind: &str,
     json: bool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(top > 0, "--top must be greater than zero");
+    // Fail fast on an unknown kind before loading models or the store.
+    let kind = crush_search::SearchKind::parse(kind)?;
     let store = Store::open(&paths.root)?;
     let engine = SearchEngine::load(&store, DEFAULT_OWNER_ID, cfg.search.transcript_hit_boost)?;
     let preference = ProviderPreference::parse(&cfg.embed.provider)?;
@@ -558,7 +570,7 @@ fn search(
     );
     let mut embedder = Embedder::new(paths.models(), preference, cfg.limits.threads)?;
     let mut text_embedder = |text: &str| embedder.embed_text(text);
-    let results = engine.search_assets(&store, &mut text_embedder, query, top)?;
+    let results = engine.search_assets(&store, &mut text_embedder, query, top, kind)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
         return Ok(());
@@ -1452,8 +1464,24 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.cmd,
-            Cmd::Search { query, top: 3, json: true } if query == "a rocket launching"
+            Cmd::Search { query, top: 3, kind, json: true }
+                if query == "a rocket launching" && kind == "all"
         ));
+    }
+
+    #[test]
+    fn search_cli_accepts_a_kind_filter() {
+        let cli = Cli::try_parse_from(["crushctl", "search", "rocket", "--kind", "span"]).unwrap();
+        let Cmd::Search { kind, .. } = cli.cmd else {
+            panic!("expected the search command");
+        };
+        assert_eq!(kind, "span");
+        // The flag parses as a plain string; the honest refusal of unknown values lives in
+        // crush_search::SearchKind::parse (tested there) and runs before any model loads.
+        assert_eq!(
+            crush_search::SearchKind::parse(&kind).unwrap(),
+            crush_search::SearchKind::Span
+        );
     }
 
     #[test]
