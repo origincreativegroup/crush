@@ -1,0 +1,6 @@
+{
+  "description": "A cyclist waits at a rain-slicked intersection, headlights streaking past.",
+  "tags": "Urban, NIGHT, street, rain, cyclist, neon, reflections",
+  "objects": "bicycle, traffic light",
+  "scene": "Urban"
+}

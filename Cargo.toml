@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/ai",
   "crates/core",
   "crates/store",
   "crates/stage-split",
@@ -39,6 +40,9 @@ image = { version = "=0.25.10", default-features = false, features = ["jpeg", "p
 exif = { package = "kamadak-exif", version = "=0.6.1" }
 sha2 = "=0.11.0"
 ureq = { version = "=3.4.0", default-features = false, features = ["rustls"] }
+# base64 inlines image bytes into Ollama /api/chat requests (crates/ai).
+# Boring, pinned, one job: encode bytes.
+base64 = "=0.22.1"
 ort = "=2.0.0-rc.13"
 flate2 = "=1.1.9"
 regex = "=1.12.3"

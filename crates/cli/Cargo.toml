@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 crush-core = { path = "../core" }
+crush-ai = { path = "../ai" }
 crush-stage-split = { path = "../stage-split" }
 crush-stage-embed = { path = "../stage-embed" }
 crush-stage-asr = { path = "../stage-asr" }

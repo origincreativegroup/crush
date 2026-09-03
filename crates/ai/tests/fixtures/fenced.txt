@@ -1,0 +1,9 @@
+```json
+{
+  "description": "A red barn stands in a snow-covered field under a flat grey sky.",
+  "tags": ["winter", "barn", "rural", "snow", "fence", "overcast"],
+  "objects": ["barn", "fence", "field"],
+  "scene": "rural",
+  "mood": "quiet"
+}
+```
