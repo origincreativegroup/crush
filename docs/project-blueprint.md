@@ -141,6 +141,7 @@ crush/
   crates/
     core/        contracts: types, config, errors, job log, tracing setup
     store/       SQLite migrations + queries, vector load/save
+    ai/          vision provider layer (TASK-041): VisionProvider trait, Ollama backend
     stage-split/ ffmpeg wrapper, scene detector, thumbnails
     stage-embed/ ort session, preprocessing, image + text encode
     stage-asr/   whisper-rs wrapper, alignment to shots

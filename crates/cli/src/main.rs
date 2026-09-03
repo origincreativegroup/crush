@@ -1224,6 +1224,55 @@ fn debug_scenes(cfg: &Config, paths: &AppPaths, video: &Path) -> anyhow::Result<
     Ok(())
 }
 
+/// AI provider check — EVIDENCE ONLY. An absent or unreachable Ollama host is
+/// a normal state (ai-srv is not 24/7), so this never fails doctor; it reports
+/// what is configured and what the host answers, in the doctor output shape.
+fn report_ai_provider(cfg: &Config) {
+    match cfg.ai.provider.as_str() {
+        "none" => println!(
+            "  ai provider   none — AI description disabled (describe returns a capability error)"
+        ),
+        "ollama" => {
+            let provider = crush_ai::OllamaProvider::new(
+                cfg.ai.ollama_host.clone(),
+                cfg.ai.ollama_model.clone(),
+            );
+            match provider.list_models() {
+                Ok(models) => {
+                    println!(
+                        "  ai provider   ollama model={} host={} reachable models={}",
+                        cfg.ai.ollama_model,
+                        cfg.ai.ollama_host,
+                        if models.is_empty() {
+                            "-".to_owned()
+                        } else {
+                            models.join(",")
+                        }
+                    );
+                    // Ollama tags carry a variant suffix ("llava:latest") — match on it
+                    // too, case-insensitively (this host lists "LLaVA:latest").
+                    let wanted = cfg.ai.ollama_model.to_lowercase();
+                    let present = models.iter().any(|name| {
+                        let name = name.to_lowercase();
+                        name == wanted || name.starts_with(&format!("{wanted}:"))
+                    });
+                    if !present {
+                        println!(
+                            "  ai provider   note model \"{}\" not in host tag list — `ollama pull {}` may be needed",
+                            cfg.ai.ollama_model, cfg.ai.ollama_model
+                        );
+                    }
+                }
+                Err(error) => println!(
+                    "  ai provider   ollama model={} host={} unreachable ({error})",
+                    cfg.ai.ollama_model, cfg.ai.ollama_host
+                ),
+            }
+        }
+        other => println!("  ai provider   {other} (unknown — valid: none, ollama)"),
+    }
+}
+
 fn doctor(cfg: &Config, paths: &AppPaths, deep: bool) -> anyhow::Result<()> {
     tracing::info!(job_id = "doctor", stage = "doctor", "doctor started");
     println!("Crush doctor");
@@ -1340,6 +1389,7 @@ fn doctor(cfg: &Config, paths: &AppPaths, deep: bool) -> anyhow::Result<()> {
         }
     );
     println!("  threads       {} (0 = cores-2)", cfg.limits.threads);
+    report_ai_provider(cfg);
     if deep {
         let store = Store::open(&paths.root)?;
         let problems = store.integrity()?;

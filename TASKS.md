@@ -63,6 +63,7 @@ CPU path.
 | TASK-038 | Rename survival and shot-identity hardening (key feature) | OpenCode | done — merged as PR #44 (`22e3984`): resplit evidence-loss fix (data-loss class), hash-verified relink (CLI + app), ingest moved/renamed/duplicate reporting, identity audit |
 | TASK-039 | UX/UI enhancement track — full pass (craft + workflow) | Frontend lane | done — merged as PR #42 (`dafdd9d`) + follow-up PR #43: collections, AA contrast, focus, full keyboard, in-place search, reduced motion, design tokens, SF Mono fix, multi-select + batch ops, compare auto-advance (John: yes), learned-profile wording per the recorded verdict |
 | TASK-040 | Backend contracts for UX follow-ups | Backend lane | done — merged as PR #49 (`7d9b3b5`): search kind argument (source-level filter), video thumbnails; render progress done via #45; video collection membership DECIDED by John 2026-08-31: shot-level (a) |
+| TASK-041 | AI provider layer — local Ollama (nodeo port step 1) | OpenCode | done on branch `task/41-ai-provider` — `crates/ai` (`crush-ai`): VisionProvider trait, NoneProvider honest capability error, Ollama backend over pinned ureq (fence-stripping + tags-as-string + ≤10 lowercase normalization, fast method only, no retries), `[ai]` config in core + crush.example.toml with CRUSH_AI_* env overrides, doctor provider check (evidence, never failure), bounded order-preserving batch helper; fixture parse tests + fake provider, no network in CI; PR pending |
 
 ## Next (2026-09-02)
 
