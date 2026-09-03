@@ -74,6 +74,8 @@ pub struct AiConfig {
     /// nodeo's tuned finding: 300 tokens covers the single-call structured response.
     pub max_tokens: u32,
     /// Bounded batch workers so a describe batch never saturates the one Ollama host.
+    /// Consumed by `crush_ai::batch_describe`; TASK-043's describe stage plumbs
+    /// the config value into it. Unused until then.
     pub max_concurrent: usize,
 }
 

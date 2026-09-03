@@ -1,6 +1,6 @@
 # nodeo → crush merge evaluation
 
-**Date:** 2026-09-03 · **Status:** Initial merge evaluation (John's 2026-09-02 directive) — proposal for John's decision
+**Date:** 2026-09-03 · **Status:** Decision made and directed (John, 2026-09-02) — merge evaluation accepted, work sequenced as TASK-041…047
 **Decision being recorded:** crush and nodeo are ONE product. nodeo's capabilities fold into crush as a capability port to Rust — no server, no bridge, no standalone nodeo release. The merge is the substance of crush's **next release (0.1.0)**, after the 0.0.1 release candidate clears clean-machine acceptance.
 **Inputs read:** `docs/HANDOFF.md`, `docs/project-blueprint.md`, `docs/dam-feedback-blueprint.md`, `docs/platform-architecture.md`, `docs/release.md`, `docs/release-record-0.0.1.md`, `docs/smoke.md`, `TASKS.md`, `crates/store/migrations/*`, `crates/core/src/{config,job}.rs`, `crates/pipeline/src/lib.rs`, `crates/store/src/lib.rs` (relink section), `crates/app/src-tauri/src/lib.rs` (command table), `crush.example.toml`, workspace `Cargo.toml`, `tauri.conf.json`; nodeo `CAPABILITY_AUDIT.md`, `LLAVA_IMPROVEMENTS.md`, `app/ai/llava_client.py`, `app/ai/project_classifier.py`, `app/services/{rename_engine,template_parser,folder_watcher}.py`, `app/config.py`; OpenRouter API reference (fetched 2026-09-03).
 

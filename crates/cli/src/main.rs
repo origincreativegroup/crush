@@ -1238,7 +1238,7 @@ fn report_ai_provider(cfg: &Config) {
                 cfg.ai.ollama_model.clone(),
             );
             match provider.list_models() {
-                Ok(models) => {
+                Ok(crush_ai::ModelListing::Parsed(models)) => {
                     println!(
                         "  ai provider   ollama model={} host={} reachable models={}",
                         cfg.ai.ollama_model,
@@ -1263,6 +1263,13 @@ fn report_ai_provider(cfg: &Config) {
                         );
                     }
                 }
+                // The host answered but the body was not a tags payload —
+                // report the evidence and suggest nothing; `ollama pull` here
+                // would be a guess.
+                Ok(crush_ai::ModelListing::Unreadable(prefix)) => println!(
+                    "  ai provider   ollama model={} host={} reachable, but the /api/tags response was unreadable (body prefix: {prefix:?})",
+                    cfg.ai.ollama_model, cfg.ai.ollama_host
+                ),
                 Err(error) => println!(
                     "  ai provider   ollama model={} host={} unreachable ({error})",
                     cfg.ai.ollama_model, cfg.ai.ollama_host

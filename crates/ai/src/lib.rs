@@ -86,6 +86,23 @@ impl DescribeRequest {
         }
     }
 
+    /// A request whose generation knobs (temperature/max_tokens) come from the
+    /// `[ai]` config instead of the tuned defaults. Prompt fields keep their
+    /// defaults — config does not own the prompt. Callers that honor user
+    /// config (stages, app commands) should prefer this over [`Self::new`].
+    pub fn from_config(
+        config: &crush_core::config::AiConfig,
+        image_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            image_path: image_path.into(),
+            prompt_version: PROMPT_VERSION,
+            temperature: config.temperature,
+            max_tokens: config.max_tokens,
+            prompt_override: None,
+        }
+    }
+
     fn prompt(&self) -> &str {
         self.prompt_override.as_deref().unwrap_or(DESCRIBE_V1)
     }
@@ -138,9 +155,22 @@ pub struct OllamaProvider {
     agent: ureq::Agent,
 }
 
+/// What an Ollama host answered for `/api/tags`. `Parsed` carries the model
+/// names; `Unreadable` carries a raw body prefix as evidence — a 2xx body that
+/// is not a tags payload must not be mistaken for "no models installed"
+/// (which would wrongly suggest an `ollama pull`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelListing {
+    Parsed(Vec<String>),
+    Unreadable(String),
+}
+
 impl OllamaProvider {
     pub fn new(host: impl Into<String>, model: impl Into<String>) -> Self {
         let agent = ureq::Agent::config_builder()
+            // HTTP status errors are handled explicitly (see `ollama_http_error`)
+            // so a non-2xx body keeps its `{"error": ...}` reason.
+            .http_status_as_error(false)
             .timeout_connect(Some(DESCRIBE_CONNECT_TIMEOUT))
             .timeout_recv_response(Some(DESCRIBE_RECV_TIMEOUT))
             .build()
@@ -157,9 +187,17 @@ impl OllamaProvider {
     }
 
     /// Models available on the host (`GET /api/tags`). Used by the doctor
-    /// provider check as evidence — never a failure when unreachable.
-    pub fn list_models(&self) -> anyhow::Result<Vec<String>> {
+    /// provider check as evidence — never a failure when unreachable. A
+    /// non-2xx answer is an `Err` carrying the body's `error` reason; a 2xx
+    /// body that is not a tags payload is [`ModelListing::Unreadable`], never
+    /// a silent empty list.
+    pub fn list_models(&self) -> anyhow::Result<ModelListing> {
+        // Fresh agent with shorter timeouts on purpose: /api/tags is a cheap
+        // local query and the doctor check must never hang on a wedged host,
+        // unlike describe's 300 s receive budget. Do not "fix" this to reuse
+        // `self.agent` — the long describe timeouts would hang doctor.
         let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
             .timeout_connect(Some(TAGS_CONNECT_TIMEOUT))
             .timeout_recv_response(Some(TAGS_RECV_TIMEOUT))
             .build()
@@ -168,11 +206,21 @@ impl OllamaProvider {
             .get(self.endpoint("api/tags"))
             .call()
             .map_err(|error| anyhow::anyhow!("Ollama at {} is unreachable ({error})", self.host))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(
+                ollama_http_error("api/tags", status.as_u16(), &body).context(self.host.clone())
+            );
+        }
         let body = response
             .body_mut()
             .read_to_string()
             .context("failed to read Ollama /api/tags response")?;
-        Ok(parse_models_json(&body))
+        Ok(match parse_models_json(&body) {
+            Some(models) => ModelListing::Parsed(models),
+            None => ModelListing::Unreadable(raw_prefix(&body, RAW_PREFIX_CHARS)),
+        })
     }
 }
 
@@ -217,6 +265,12 @@ impl VisionProvider for OllamaProvider {
                     self.model
                 )
             })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(ollama_http_error("api/chat", status.as_u16(), &body)
+                .context(format!("host {}, model {}", self.host, self.model)));
+        }
         let text = response
             .body_mut()
             .read_to_string()
@@ -262,26 +316,52 @@ fn chat_request_body(
     .to_string()
 }
 
-/// Model names from an Ollama `/api/tags` body. Unparseable bodies yield an
-/// empty list — the doctor check reports evidence, never guesses.
-fn parse_models_json(body: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(body)
+/// Turn a non-2xx Ollama response into an honest error. The agents are built
+/// with ureq's `http_status_as_error(false)`, so non-2xx bodies reach this
+/// instead of being collapsed into a bare status code: the returned text
+/// carries the body's `{"error": ...}` reason when present (e.g. "model
+/// `llava` not found, try pulling it first"), else a raw body prefix.
+/// Factored out so the formatting is testable without network.
+fn ollama_http_error(endpoint: &str, status: u16, body: &str) -> anyhow::Error {
+    let reason = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| {
             value
-                .get("models")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-        })
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|model| {
-            model
-                .get("name")
+                .get("error")
                 .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
                 .map(str::to_string)
         })
-        .collect()
+        .unwrap_or_else(|| raw_prefix(body.trim(), RAW_PREFIX_CHARS));
+    if reason.is_empty() {
+        anyhow::anyhow!("Ollama {endpoint} returned HTTP {status} (empty response body)")
+    } else {
+        anyhow::anyhow!("Ollama {endpoint} returned HTTP {status}: {reason}")
+    }
+}
+
+/// Model names from an Ollama `/api/tags` body. `None` when the body is not a
+/// parseable tags payload — callers surface that as evidence
+/// ([`ModelListing::Unreadable`]) rather than mistaking it for an empty
+/// model list.
+fn parse_models_json(body: &str) -> Option<Vec<String>> {
+    let models = serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .cloned()?;
+    Some(
+        models
+            .iter()
+            .filter_map(|model| {
+                model
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect(),
+    )
 }
 
 /// Build the configured provider. `"none"` → [`NoneProvider`], `"ollama"` →
@@ -478,14 +558,52 @@ mod tests {
     #[test]
     fn parse_models_json_reads_ollama_tags_shape() {
         let models =
-            parse_models_json(r#"{"models":[{"name":"llava:latest"},{"name":"qwen2.5vl:7b"}]}"#);
+            parse_models_json(r#"{"models":[{"name":"llava:latest"},{"name":"qwen2.5vl:7b"}]}"#)
+                .expect("tags body parses");
         assert_eq!(models, vec!["llava:latest", "qwen2.5vl:7b"]);
     }
 
     #[test]
-    fn parse_models_json_never_guesses_on_garbage() {
-        assert!(parse_models_json("not json").is_empty());
-        assert!(parse_models_json("{}").is_empty());
+    fn parse_models_json_reports_unparseable_bodies_as_none() {
+        assert!(parse_models_json("not json").is_none());
+        assert!(parse_models_json("{}").is_none());
+        assert!(parse_models_json(r#"{"models":"all"}"#).is_none());
+    }
+
+    #[test]
+    fn ollama_http_error_prefers_the_body_error_field() {
+        let error = ollama_http_error(
+            "api/chat",
+            404,
+            r#"{"error":"model \"llava\" not found, try pulling it first"}"#,
+        );
+        let text = error.to_string();
+        assert!(text.contains("HTTP 404"), "names the status: {text}");
+        assert!(
+            text.contains("not found, try pulling it first"),
+            "carries the body reason: {text}"
+        );
+    }
+
+    #[test]
+    fn ollama_http_error_falls_back_to_a_body_prefix() {
+        let error = ollama_http_error("api/tags", 502, "  <html>Bad Gateway</html>  ");
+        let text = error.to_string();
+        assert!(text.contains("HTTP 502"), "names the status: {text}");
+        assert!(
+            text.contains("<html>Bad Gateway</html>"),
+            "carries body evidence, trimmed: {text}"
+        );
+    }
+
+    #[test]
+    fn ollama_http_error_survives_an_empty_body() {
+        let text = ollama_http_error("api/chat", 500, "").to_string();
+        assert!(text.contains("HTTP 500"), "got: {text}");
+        assert!(
+            text.contains("empty response body"),
+            "no dangling separator: {text}"
+        );
     }
 
     #[test]
@@ -562,6 +680,22 @@ mod tests {
             ..DescribeRequest::new("img.jpg")
         };
         assert_eq!(overridden.prompt(), "custom");
+    }
+
+    #[test]
+    fn describe_request_from_config_wires_generation_knobs() {
+        let config = crush_core::config::AiConfig {
+            temperature: 0.1,
+            max_tokens: 128,
+            ..crush_core::config::AiConfig::default()
+        };
+        let request = DescribeRequest::from_config(&config, "img.jpg");
+        assert!((request.temperature - 0.1).abs() < f32::EPSILON);
+        assert_eq!(request.max_tokens, 128);
+        // Prompt fields keep their defaults — config does not own the prompt.
+        assert_eq!(request.prompt_version, prompts::PROMPT_VERSION);
+        assert_eq!(request.prompt(), prompts::DESCRIBE_V1);
+        assert!(request.prompt_override.is_none());
     }
 
     #[test]
